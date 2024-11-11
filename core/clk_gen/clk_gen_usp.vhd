@@ -16,43 +16,60 @@ library unisim;
 use unisim.vcomponents.all;
 
 architecture USP of COMMON_CLK_GEN is
-    signal clkfbout : std_logic;
-    signal clkout0  : std_logic;
-    signal clkout1  : std_logic;
-    signal clkout2  : std_logic;
-    signal clkout3  : std_logic;
+
+    -- purpose: This function selects from the PLL_OUT_DIV_VECT generic the chosen division factor.
+    -- It is necessary to choose this approcach because the width of PLL_OUT_DIV_VECT can be set
+    -- dynamically whereas the amount of divider generics for MMCME4_BASE is fixed. This function
+    -- returns the default values for those outputs of the MMCME4_BASE that are not used.
+    function f_sanitize_div_fact (
+        div_fact_idx : natural)
+        return natural is
+    begin
+        if (div_fact_idx < CLK_WIDTH -1) then
+            return PLL_OUT_DIV_VECT(div_fact_idx);
+        end if;
+
+        return 20;
+    end function;
+
+    signal clkfbout   : std_logic;
+    signal clkout_int : std_logic_vector(6 downto 0);
 begin
+
+    assert (CLK_WIDTH >= 1 and CLK_WIDTH <= 7)
+        report "COMMON_CLK_GEN(USP): unallowed configuration for CLK_WIDTH, the allowed range is from 1 to 7 (inclusively)"
+        severity FAILURE;
 
     INIT_DONE_N <= '0';
 
-    -- NOTE: CLKOUT 0-3 are High-Performance Clocks (UG472), the rest is not!
-    mmcm_i : component mmcme4_base
+    -- NOTE: CLKOUT 0-3 are High-Performance Clocks (UG572), the rest is not!
+    mmcm_i : component MMCME4_BASE
     generic map (
         BANDWIDTH        => "OPTIMIZED",
         DIVCLK_DIVIDE    => PLL_MASTER_DIV,
         CLKFBOUT_MULT_F  => PLL_MULT_F,
         CLKOUT0_DIVIDE_F => PLL_OUT0_DIV_F,
-        CLKOUT1_DIVIDE   => PLL_OUT1_DIV,
-        CLKOUT2_DIVIDE   => PLL_OUT2_DIV,
-        CLKOUT3_DIVIDE   => PLL_OUT3_DIV,
-        CLKOUT4_DIVIDE   => 10,
-        CLKOUT5_DIVIDE   => 10,
-        CLKOUT6_DIVIDE   => 10,
+        CLKOUT1_DIVIDE   => f_sanitize_div_fact(0),
+        CLKOUT2_DIVIDE   => f_sanitize_div_fact(1),
+        CLKOUT3_DIVIDE   => f_sanitize_div_fact(2),
+        CLKOUT4_DIVIDE   => f_sanitize_div_fact(3),
+        CLKOUT5_DIVIDE   => f_sanitize_div_fact(4),
+        CLKOUT6_DIVIDE   => f_sanitize_div_fact(5),
         CLKIN1_PERIOD    => REFCLK_PERIOD
     ) port map (
         CLKFBOUT  => clkfbout,
         CLKFBOUTB => open,
-        CLKOUT0   => clkout0,
+        CLKOUT0   => clkout_int(0),
         CLKOUT0B  => open,
-        CLKOUT1   => clkout1,
+        CLKOUT1   => clkout_int(1),
         CLKOUT1B  => open,
-        CLKOUT2   => clkout2,
+        CLKOUT2   => clkout_int(2),
         CLKOUT2B  => open,
-        CLKOUT3   => clkout3,
+        CLKOUT3   => clkout_int(3),
         CLKOUT3B  => open,
-        CLKOUT4   => open,
-        CLKOUT5   => open,
-        CLKOUT6   => open,
+        CLKOUT4   => clkout_int(4),
+        CLKOUT5   => clkout_int(5),
+        CLKOUT6   => clkout_int(6),
         CLKFBIN   => clkfbout,
         CLKIN1    => REFCLK,
         LOCKED    => LOCKED,
@@ -60,28 +77,11 @@ begin
         RST       => ASYNC_RESET
     );
 
-    clkout0_buf_i : component bufg
-    port map (
-        O => OUTCLK_0,
-        I => clkout0
-    );
-
-    clkout1_buf_i : component bufg
-    port map (
-        O => OUTCLK_1,
-        I => clkout1
-    );
-
-    clkout2_buf_i : component bufg
-    port map (
-        O => OUTCLK_2,
-        I => clkout2
-    );
-
-    clkout3_buf_i : component bufg
-    port map (
-        O => OUTCLK_3,
-        I => clkout3
-    );
-
+    clkout_buf_g: for clk_idx in 0 to (CLK_WIDTH -1) generate
+        clkout_buf_i : component BUFG
+            port map (
+                O => CLK_OUT_VECT(clk_idx),
+                I => clkout_int(clk_idx)
+            );
+    end generate;
 end architecture;
