@@ -13,15 +13,14 @@ set MI_ASYNC_BASE     "$OFM_PATH/comp/mi_tools/async"
 set MI_PIPE_BASE      "$OFM_PATH/comp/mi_tools/pipe"
 set MI_SPLITTER_BASE  "$OFM_PATH/comp/mi_tools/splitter_plus_gen"
 set STREAMIN_DBG_BASE "$OFM_PATH/comp/debug/streaming_debug"
-set EVENT_COUNTER_BASE "$OFM_PATH/comp/base/misc/event_counter"
-set INTEL_BASE        "$ENTITY_BASE/../../../../.."
+set FPGA_COMMON_BASE  "$ENTITY_BASE/../../.."
 
 # Packages
 lappend PACKAGES "$OFM_PATH/comp/base/pkg/math_pack.vhd"
 lappend PACKAGES "$OFM_PATH/comp/base/pkg/type_pack.vhd"
 lappend PACKAGES "$OFM_PATH/comp/base/pkg/dma_bus_pack.vhd"
 lappend PACKAGES "$OFM_PATH/comp/base/pkg/pcie_meta_pack.vhd"
-lappend PACKAGES "$INTEL_BASE/config/core_const.vhd"
+lappend PACKAGES "$FPGA_COMMON_BASE/core_const_pkg.vhd"
 
 # Components
 lappend COMPONENTS [ list "MTC"          $MTC_BASE          "FULL" ]
@@ -32,7 +31,6 @@ lappend COMPONENTS [ list "MI_ASYNC"     $MI_ASYNC_BASE     "FULL" ]
 lappend COMPONENTS [ list "MI_PIPE"      $MI_PIPE_BASE      "FULL" ]
 lappend COMPONENTS [ list "MI_SPLITTER"  $MI_SPLITTER_BASE  "FULL" ]
 lappend COMPONENTS [ list "DEBUG_PROBE"  $STREAMIN_DBG_BASE "FULL" ]
-lappend COMPONENTS [ list "EVENT_CNT"    $EVENT_COUNTER_BASE "FULL" ]
 
 # Files
 lappend MOD "$ENTITY_BASE/pcie_ctrl.vhd"

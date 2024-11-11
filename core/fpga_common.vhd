@@ -10,7 +10,7 @@ use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 use ieee.math_real.all;
 
-use work.combo_const.all;
+use work.core_const.all;
 use work.combo_user_const.all;
 
 use work.math_pack.all;

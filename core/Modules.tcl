@@ -22,12 +22,12 @@ set RESET_TREE_GEN_BASE   "$OFM_PATH/comp/base/misc/reset_tree_gen"
 set MI_TEST_SPACE_BASE    "$OFM_PATH/comp/mi_tools/test_space"
 set HWID_BASE             "$OFM_PATH/comp/base/misc/hwid"
 set JTAG_OP_CTRL_BASE     "$ENTITY_BASE/jtag_op_ctrl"
-set APPLICATION_CORE_BASE "$ENTITY_BASE/app"
+set APPLICATION_CORE_BASE "$OFM_PATH/apps"
 
 # Packages
 lappend PACKAGES "$OFM_PATH/comp/base/pkg/math_pack.vhd"
 lappend PACKAGES "$OFM_PATH/comp/base/pkg/type_pack.vhd"
-lappend PACKAGES "$ENTITY_BASE/combo_const_pkg.vhd"
+lappend PACKAGES "$ENTITY_BASE/core_const_pkg.vhd"
 lappend PACKAGES "$ENTITY_BASE/mi_addr_space_pkg.vhd"
 
 set DMA_ARCH "EMPTY"
