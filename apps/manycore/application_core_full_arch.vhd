@@ -102,6 +102,19 @@ architecture FULL of APPLICATION_CORE is
     signal fr_run_cntr       : unsigned(64 -1 downto 0);
     signal cntr_sample_val   : std_logic_vector(128 -1 downto 0);
 
+    attribute DONT_TOUCH             : boolean;
+    attribute KEEP                   : boolean;
+    attribute DONT_TOUCH of proc_rst : signal is TRUE;
+
+    attribute DONT_TOUCH of proc_rst_reg_1 : signal is TRUE;
+    attribute DONT_TOUCH of proc_rst_reg_2 : signal is TRUE;
+    attribute DONT_TOUCH of proc_rst_reg_3 : signal is TRUE;
+    attribute DONT_TOUCH of proc_rst_reg_4 : signal is TRUE;
+    attribute DONT_TOUCH of proc_rst_reg_5 : signal is TRUE;
+    --attribute DONT_TOUCH of proc_rst_reg_6 : signal is TRUE;
+    attribute KEEP of proc_rst_reg_6 : signal is TRUE;
+    --
+    attribute KEEP of proc_rst_buffered : signal is TRUE;
 begin
 
     assert (PCIE_ENDPOINTS = 1 and DMA_STREAMS = 1)
@@ -168,13 +181,15 @@ begin
             proc_rst_reg_4 <= proc_rst_reg_3;
             proc_rst_reg_5 <= proc_rst_reg_4;
             proc_rst_reg_6 <= proc_rst_reg_5;
+	    ---
+            proc_rst_buffered <= proc_rst_reg_6;
         end if;
     end process;
 
-    proc_rst_buf_i : BUFG
-        port map (
-            O => proc_rst_buffered,
-            I => proc_rst_reg_6);
+    --proc_rst_buf_i : BUFG
+    --    port map (
+    --        O => proc_rst_buffered,
+    --        I => proc_rst_reg_6);
 
     perf_cnt_rst_sync_i : entity work.ASYNC_RESET
         generic map (
