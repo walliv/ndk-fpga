@@ -9,9 +9,11 @@
 
 # How to run:
 #
-# vivado -mode batch -source <path_to_this_file>
+# <path_to_this_file>/program_fpga.tcl
 #
-# The path can also be relative from the current location in the terminal.
+# The path can also be relative from the current location in the terminal. The script
+# searches in the current directory for .bit files and allows to select between them
+# if more than one is present.
 
 # --------------------------------------------------------------------------------
 # Parameters to check on machines other than nct-valek:

@@ -5,8 +5,8 @@
 
 This folder contains useful software tools to interact with the FPGA design or
 the development tools. Some dependencies may be required to run the given
-scripts (see below). If you want to modify these files for your
-application, it is advised to copy them to the `src/app` directory, where
+scripts (see below). If you want to modify these files for your application, it
+is advised to copy them to the `/apps/<application_name>` directory, where
 application specific files are located, and files in the current directory as a
 reference where comments serve for documentation purposes.
 

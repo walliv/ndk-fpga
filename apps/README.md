@@ -5,7 +5,7 @@
 
 The custom components that can benefit from the communication infrastructure
 should be placed as a subcomponent of the `APPLICATION_CORE` (this directory).
-The [entity](../../src/app/application_core_ent.vhd) needs to remain the same.
+The [entity](./application_core_ent.vhd) needs to remain the same.
 When opening this file, the generic parameters passed from the top of the
 hierarchy can be observed as well as available ports like MFB interfaces in both
 directions, the MI interface for configuration and reading of status information
@@ -42,12 +42,12 @@ repository).
    remote component that is referenced needs to have its own `Modules.tcl`.
 4. Change the type of the architecture to your specific name with the
    `APP_CORE_ARCH` parameter inside
-   [/config/core_conf.tcl](../../config/core_conf.tcl).
+   [/config/core_conf.tcl](../config/core_conf.tcl).
 5. Finished! Now you can build the FPGA design with the defined architecture.
 
 ## Adding a new component to the FPGA platform
 
-1. Create a subdirectory in this directory (`/src/app/`) with
+1. Create a subdirectory in this directory (`/apps/`) with
    the name of your choice (usually same as the name of the component;
    lowercase, underscore-separated names are recommended).
 2. Create design files according to the template in
@@ -55,6 +55,6 @@ repository).
    Verilog/SystemVerilog modules are supported) in that subdirectory.
 3. Add instance of this subcomponent to one of the architectures provided or
    create a new architecture.
-4. Add this subcomponent as an external component to the `/src/app/Modules.tcl`
+4. Add this subcomponent as an external component to the `/apps/Modules.tcl`
    file. 
 5. Finished! Now you can build the FPGA design with the new component.
