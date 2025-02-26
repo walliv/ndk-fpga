@@ -14,7 +14,8 @@ use work.math_pack.all;
 use work.type_pack.all;
 
 library unisim;
-use unisim.vcomponents.all;
+use unisim.vcomponents.IBUFDS_GTE4;
+use unisim.vcomponents.IBUF;
 
 -- ============================================================================
 --                                Description
@@ -284,6 +285,7 @@ architecture USP of PCIE_CORE is
 
     signal pcie_sysclk_buf          : std_logic_vector(PCIE_ENDPOINTS-1 downto 0);
     signal pcie_sysclk_gt_buf       : std_logic_vector(PCIE_ENDPOINTS-1 downto 0);
+    signal pcie_sysrst_n_buf        : std_logic_vector(PCIE_ENDPOINTS-1 downto 0);
 
     signal pcie_hip_clk             : std_logic_vector(PCIE_HIPS-1 downto 0);
     signal pcie_hip_rst             : std_logic_vector(PCIE_HIPS-1 downto 0);
@@ -427,7 +429,7 @@ begin
     pcie_mode_0_2_g : if (ENDPOINT_MODE = 0 or ENDPOINT_MODE = 2) generate
 
         pcie_hip_g : for i in 0 to PCIE_HIPS-1 generate
-            pcie_ibuf_i : component ibufds_gte4
+            pcie_ibuf_gte4_i : component ibufds_gte4
             generic map (
                 REFCLK_HROW_CK_SEL => "00"
             )
@@ -437,6 +439,12 @@ begin
                 O     => pcie_sysclk_gt_buf(i),
                 ODIV2 => pcie_sysclk_buf(i),
                 CEB   => '0'
+            );
+
+            pcie_ibuf_i : component ibuf
+            port map (
+                I => PCIE_SYSRST_N(i),
+                O => pcie_sysrst_n_buf(i)
             );
 
             pcie_rq_axi_ready_s(i) <= pcie_rq_axi_ready(i)(0);
@@ -452,7 +460,7 @@ begin
                 port map (
                     sys_clk                           => pcie_sysclk_buf(i),
                     sys_clk_gt                        => pcie_sysclk_gt_buf(i),
-                    sys_reset                         => PCIE_SYSRST_N(i),
+                    sys_reset                         => pcie_sysrst_n_buf(i),
 
                     pci_exp_txn                       => PCIE_TX_N((i+1)*PCIE_IP_LANES-1 downto i*PCIE_IP_LANES),
                     pci_exp_txp                       => PCIE_TX_P((i+1)*PCIE_IP_LANES-1 downto i*PCIE_IP_LANES),
@@ -694,7 +702,7 @@ begin
 
             pcie_i : for j in 0 to 1 generate
 
-                pcie_ibuf_i_j : component ibufds_gte4
+                pcie_ibuf_gte4_i : component ibufds_gte4
                 generic map (
                     REFCLK_HROW_CK_SEL => "00"
                 )
@@ -704,6 +712,12 @@ begin
                     O     => pcie_sysclk_gt_buf(2*i+j),
                     ODIV2 => pcie_sysclk_buf(2*i+j),
                     CEB   => '0'
+                );
+
+                pcie_ibuf_i : component ibuf
+                port map (
+                    I => PCIE_SYSRST_N(i),
+                    O => pcie_sysrst_n_buf(i)
                 );
 
                 pcie_rq_axi_ready_s(2*i+j) <= pcie_rq_axi_ready(2*i+j)(0);
@@ -719,7 +733,7 @@ begin
                     port map (
                         sys_clk                           => pcie_sysclk_buf(2*i+j),
                         sys_clk_gt                        => pcie_sysclk_gt_buf(2*i+j),
-                        sys_reset                         => PCIE_SYSRST_N(i),
+                        sys_reset                         => pcie_sysrst_n_buf(i),
 
                         pci_exp_txn                       => PCIE_TX_N((2*i+j+1)*PCIE_IP_LANES-1 downto (2*i+j)*PCIE_IP_LANES),
                         pci_exp_txp                       => PCIE_TX_P((2*i+j+1)*PCIE_IP_LANES-1 downto (2*i+j)*PCIE_IP_LANES),
