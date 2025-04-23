@@ -14,13 +14,12 @@ proc dts_application {base generics} {
     set ret ""   
     append ret "application {"
 
-    if {$app_core_arch == "TEST"} {
+    if { ($app_core_arch == "MANYCORE" || $app_core_arch == "TEST") &&  ($hbm_channels > 0) } {
+        set hbm_tester_base [expr $base + 0x100000]
+        append ret [dts_hbm_tester "hbm_tester" $hbm_tester_base]
+    }
 
-        if {$hbm_channels > 0} {
-            set hbm_tester_base $base
-            append ret [dts_hbm_tester "hbm_tester" $hbm_tester_base]
-        }
-    } elseif {$app_core_arch == "MANYCORE"} {
+    if { $app_core_arch == "MANYCORE" } {
         append ret [dts_multicore_debug_core 0 $base 4]
     }
 
