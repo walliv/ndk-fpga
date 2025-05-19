@@ -49,7 +49,7 @@ architecture FULL of FPGA is
     -- 450              | 5     | 63.0  | 3.5   | 1575      |
     -- 500              | 5     | 62.5  | 3.125 | 1562.5    |
 
-    constant MMCM_OUT_FREQ : natural := 350;
+    constant MMCM_OUT_FREQ : natural := 500;
 
     function DeriveMasterDiv ( --D
         freq : natural)
