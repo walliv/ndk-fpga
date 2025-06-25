@@ -12,6 +12,26 @@ from ..base.transaction import Transaction
 class MvbTransaction(Transaction):
     """Base class for MVB Transactions with configurable data items"""
 
+    attrs = []
+
+    def __init__(self):
+        for i in self.attrs:
+            setattr(self, i, 0)
+
+    def __str__(self):
+        return f"{[(attr, getattr(self, attr)) for attr in self.attrs]}"
+
+    def __repr__(self):
+        return f"{[(attr, getattr(self, attr)) for attr in self.attrs]}"
+
+    def __eq__(self, other):
+        if isinstance(other, MvbTransaction):
+            for attr in self.attrs:
+                if getattr(self, attr) != getattr(other, attr):
+                    return False
+            return True
+        return NotImplemented
+
     @classmethod
     def from_bytes(cls, tr: bytes):
         """Class method for compatibility with versions when MVB driver accepted only bytes.
@@ -23,18 +43,13 @@ class MvbTransaction(Transaction):
         return mvb_tr
 
 
-@dataclass
 class MvbTrClassic(MvbTransaction):
-    data : int = 0
+    attrs = ["data"]
 
 
-@dataclass
 class MvbTrClassicWithMeta(MvbTransaction):
-    data : int = 0
-    meta : int = 0
+    attrs = ["data", "meta"]
 
 
-@dataclass
 class MvbTrAddressWithMeta(MvbTransaction):
-    addr : int = 0
-    meta : int = 0
+    attrs = ["addr", "meta"]
