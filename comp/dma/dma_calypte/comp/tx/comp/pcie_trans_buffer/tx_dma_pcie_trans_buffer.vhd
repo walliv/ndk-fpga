@@ -74,7 +74,7 @@ entity TX_DMA_PCIE_TRANS_BUFFER is
         -- Input MFB bus (quasi BRAM writing interface)
         -- =========================================================================================
         PCIE_MFB_DATA    : in  std_logic_vector(MFB_REGIONS*MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH-1 downto 0);
-        PCIE_MFB_META    : in  std_logic_vector(MFB_REGIONS*((MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH)/8+log2(CHANNELS)+62+1)-1 downto 0);
+        PCIE_MFB_META    : in  slv_array_t(MFB_REGIONS -1 downto 0)(((MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH)/8+log2(CHANNELS)+62+1)-1 downto 0);
         PCIE_MFB_SOF     : in  std_logic_vector(MFB_REGIONS -1 downto 0);
         PCIE_MFB_SRC_RDY : in  std_logic;
 
@@ -143,7 +143,7 @@ architecture FULL of TX_DMA_PCIE_TRANS_BUFFER is
 
     -- Input register
     signal pcie_mfb_data_inp_reg    : slv_array_t(INP_REG_NUM downto 0)(PCIE_MFB_DATA'range);
-    signal pcie_mfb_meta_inp_reg    : slv_array_t(INP_REG_NUM downto 0)(PCIE_MFB_META'range);
+    signal pcie_mfb_meta_inp_reg    : slv_array_2d_t(INP_REG_NUM downto 0)(MFB_REGIONS -1 downto 0)(((MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH)/8+log2(CHANNELS)+62+1)-1 downto 0);
     signal pcie_mfb_sof_inp_reg     : slv_array_t(INP_REG_NUM downto 0)(PCIE_MFB_SOF'range);
     signal pcie_mfb_src_rdy_inp_reg : std_logic_vector(INP_REG_NUM downto 0);
 
@@ -243,7 +243,7 @@ begin
     end generate;
 
     -- Meta array
-    pcie_mfb_meta_arr   <= slv_array_deser(pcie_mfb_meta_inp_reg(INP_REG_NUM), MFB_REGIONS);
+    pcie_mfb_meta_arr   <= pcie_mfb_meta_inp_reg(INP_REG_NUM);
 
     -- =============================================================================================
     -- Assertions for verification
