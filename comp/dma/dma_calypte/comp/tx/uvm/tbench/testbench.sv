@@ -60,7 +60,7 @@ module testbench;
         $stop(2);
     end
 
-    DUT DUT_U (
+    dut dut_i (
         .CLK       (CLK),
         .RST       (reset_vif.RESET),
         .cq_mfb    (cq_mfb_vif),
