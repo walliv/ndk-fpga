@@ -556,7 +556,7 @@ begin
         -- 2)    0      1   - Port A handles first region, Second region is dispatched by port B (illegal for incoming data)
         -- 3)    1      0   - Port A handles whole MFB word = Current channel is used
         -- 4)    1      1   - Port A handles first region, Second region is dispatched by port B
-        wr_bram_data_demux_p: process (all) is
+        wr_bram_data_demux_p : process (all) is
         begin
             wr_be_bram_demux <= (others => (others => (others => '0')));
 
@@ -572,7 +572,7 @@ begin
         end process;
     else generate
 
-        wr_bram_data_demux_p: process (all) is
+        wr_bram_data_demux_p : process (all) is
         begin
             wr_be_bram_demux <= (others => (others => (others => '0')));
 
