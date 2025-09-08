@@ -10,6 +10,9 @@ use ieee.numeric_std.all;
 
 use work.math_pack.all;
 
+library altera_lnsim;
+use altera_lnsim.altera_lnsim_components.all;
+
 entity APP_BRISKI_TOP is
     port (
         -- FPGA system clock
@@ -80,17 +83,14 @@ architecture FULL of APP_BRISKI_TOP is
             );
     end component;
 
-    component iopll_ip is
-        port (
-            RST      : in  std_logic := 'X';
-            REFCLK   : in  std_logic := 'X';
-            LOCKED   : out std_logic;
-            OUTCLK_0 : out std_logic;
-            OUTCLK_1 : out std_logic;
-            OUTCLK_2 : out std_logic;
-            OUTCLK_3 : out std_logic
-            );
-    end component;
+    -- component iopll_ip is
+    --     port (
+    --         rst      : in  std_logic := 'X';
+    --         refclk   : in  std_logic := 'X';
+    --         locked   : out std_logic;
+    --         outclk_0 : out std_logic
+    --         );
+    -- end component;
 
     component reset_release_ip is
         port (
@@ -99,6 +99,7 @@ architecture FULL of APP_BRISKI_TOP is
     end component;
 
     signal pll_reset : std_logic;
+    signal fbclk : std_logic;
     signal pll_locked : std_logic;
 
     -- Clock and Reset Signals
@@ -134,13 +135,53 @@ begin
             ninit_done => pll_reset
             );
 
-    iopll_i : component iopll_ip
+    -- iopll_i : component iopll_ip
+    --     port map (
+    --         rst      => pll_reset,
+    --         refclk   => FPGA_SYSCLK0_100M_P,
+    --         locked   => pll_locked,
+    --         outclk_0 => clkout0
+    --         );
+
+    iopll_i : IPM_IOPLL
+        generic map (
+            REFERENCE_CLOCK_FREQUENCY => "100.0 MHz",
+            N_CNT                     => 1,
+            M_CNT                     => 10,
+            C0_CNT                    => 1,
+            C1_CNT                    => 1,
+            C2_CNT                    => 1,
+            C3_CNT                    => 1,
+            C4_CNT                    => 1,
+            C5_CNT                    => 1,
+            C6_CNT                    => 1,
+            OPERATION_MODE            => "direct",
+            CLOCK_TO_COMPENSATE       => 1,
+            PHASE_SHIFT0              => 0,
+            PHASE_SHIFT1              => 0,
+            PHASE_SHIFT2              => 0,
+            PHASE_SHIFT3              => 0,
+            PHASE_SHIFT4              => 0,
+            PHASE_SHIFT5              => 0,
+            PHASE_SHIFT6              => 0,
+            PLL_SIM_MODEL             => ""
+        )
         port map (
-            rst      => pll_reset,
-            refclk   => FPGA_SYSCLK0_100M_P,
-            locked   => pll_locked,
-            outclk_0 => clkout0
-            );
+            refclk     => FPGA_SYSCLK0_100M_P,      -- input,  width = 1
+            reset      => pll_reset,       -- input,  width = 1
+            outclk0    => clkout0,     -- output, width = 1
+            outclk1    => open,     -- output, width = 1
+            outclk2    => open,     -- output, width = 1
+            outclk3    => open,     -- output, width = 1
+            outclk4    => open,     -- output, width = 1
+            outclk5    => open,     -- output, width = 1
+            outclk6    => open,     -- output, width = 1
+            locked     => open,      -- output, width = 1
+            fbclk      => fbclk,       -- input,  width = 1
+            fbclkout   => fbclk,    -- output, width = 1
+            extclk_out => open,  -- output, width = 1
+            zdbfbclk   => open     -- inout,  width = 1
+        );
 
     global_reset_i : entity work.ASYNC_RESET
         generic map (

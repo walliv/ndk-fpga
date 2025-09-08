@@ -29,6 +29,7 @@ set ARCHGRP_ARR(IP_DEVICE)        $ARCHGRP_ARR(FPGA)
 #                         script_path    script_name       ip_comp_name     type  modify
 # lappend IP_COMPONENTS [list  "misc"   "mailbox_client"   "mailbox_client_ip"  0      0]
 lappend IP_COMPONENTS [list  "misc"   "reset_release"    "reset_release_ip"   0      0]
+# lappend IP_COMPONENTS [list  "clk"     "iopll"             "iopll_ip"             0      1]
 # lappend IP_COMPONENTS [list  "pcie"   "ptile_pcie"       $PTILE_PCIE_IP_NAME  0      1]
 
 # if {$ARCHGRP_ARR(VIRTUAL_DEBUG_ENABLE)} {
@@ -38,7 +39,7 @@ lappend IP_COMPONENTS [list  "misc"   "reset_release"    "reset_release_ip"   0 
 lappend MOD {*}[get_ip_mod_files $IP_COMPONENTS [array get ARCHGRP_ARR]]
 
 # IP sources
-set MOD "$MOD $ENTITY_BASE/ip/iopll_ip.ip"
+# set MOD "$MOD $ENTITY_BASE/ip/iopll_ip.ip"
 # set MOD "$MOD $ENTITY_BASE/ip/etile_eth_4x10g.ip"
 # set MOD "$MOD $ENTITY_BASE/ip/etile_eth_4x25g.ip"
 # set MOD "$MOD $ENTITY_BASE/ip/etile_eth_1x100g.ip"
