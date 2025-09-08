@@ -7,3 +7,6 @@
 [submodule "extra/ip-3rdparty"]
 	path = extra/ip-3rdparty
 	url = ../ip-3rdparty.git
+[submodule "apps/briski_intel/top/BRISKI"]
+	path = apps/briski_intel/top/BRISKI
+	url = git@github.com:riadhbenabdelhamid/BRISKI.git
