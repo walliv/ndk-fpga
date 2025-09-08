@@ -1,0 +1,68 @@
+# Makefile: Makefile for Terasic Mercury A2700 Accelerator Card
+# Copyright (C) 2024 BrnoLogic, Ltd.
+# Author(s): David Beneš <benes@brnologic.com>
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+COMBO_BASE = ../../../..
+CARD_BASE = $(COMBO_BASE)/cards/terasic/a2700
+APP_CONF = app_conf.tcl
+
+PCIE_CONF ?= 1xgen5x8x8
+export PCIE_CONF
+
+OUTPUT_NAME = a2700-minimal-pcie$(PCIE_CONF)
+
+.PHONY: all 400g1 200g2 100g2 100g4 50g8 40g2 25g8 10g8
+
+all: 400g1
+
+10g8   : ETH_PORT_SPEED=10
+10g8   : ETH_PORT_CHAN=8
+10g8   : OUTPUT_NAME:=$(OUTPUT_NAME)-10g8
+10g8   : EHIP_PORT_TYPE=0
+10g8   : build
+
+25g8   : ETH_PORT_SPEED=25
+25g8   : ETH_PORT_CHAN=8
+25g8   : OUTPUT_NAME:=$(OUTPUT_NAME)-25g8
+25g8   : EHIP_PORT_TYPE=0
+25g8   : build
+
+40g2   : ETH_PORT_SPEED=40
+40g2   : ETH_PORT_CHAN=2
+40g2   : OUTPUT_NAME:=$(OUTPUT_NAME)-40g2
+40g2   : EHIP_PORT_TYPE=0
+40g2   : build
+
+50g8   : ETH_PORT_SPEED=50
+50g8   : ETH_PORT_CHAN=8
+50g8   : OUTPUT_NAME:=$(OUTPUT_NAME)-50g8
+50g8   : EHIP_PORT_TYPE=0
+50g8   : build
+
+100g4   : ETH_PORT_SPEED=100
+100g4   : ETH_PORT_CHAN=4
+100g4   : OUTPUT_NAME:=$(OUTPUT_NAME)-100g4
+100g4   : EHIP_PORT_TYPE=0
+100g4   : build
+
+100g2   : ETH_PORT_SPEED=100
+100g2   : ETH_PORT_CHAN=2
+100g2   : OUTPUT_NAME:=$(OUTPUT_NAME)-100g2
+100g2   : EHIP_PORT_TYPE=0
+100g2   : build
+
+200g2   : ETH_PORT_SPEED=200
+200g2   : ETH_PORT_CHAN=2
+200g2   : OUTPUT_NAME:=$(OUTPUT_NAME)-200g2
+200g2   : EHIP_PORT_TYPE=0
+200g2   : build
+
+400g1   : ETH_PORT_SPEED=400
+400g1   : ETH_PORT_CHAN=1
+400g1   : OUTPUT_NAME:=$(OUTPUT_NAME)-400g1
+400g1   : EHIP_PORT_TYPE=0
+400g1   : build
+
+include $(CARD_BASE)/src/card.mk

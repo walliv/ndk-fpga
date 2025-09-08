@@ -8,7 +8,7 @@
 # Pin Locations
 # ==============================================================================
 
-set_location_assignment PIN_A30 -to FPGA_SYSCLK0_100M_N
+#set_location_assignment PIN_A30 -to FPGA_SYSCLK0_100M_N
 set_location_assignment PIN_A31 -to FPGA_SYSCLK0_100M_P
 
 set_location_assignment PIN_C36 -to USER_LED_G[3]
@@ -16,16 +16,16 @@ set_location_assignment PIN_A35 -to USER_LED_G[2]
 set_location_assignment PIN_C38 -to USER_LED_G[1]
 set_location_assignment PIN_A37 -to USER_LED_G[0]
 
-set_location_assignment PIN_N36 -to BMC_I2C2_DISABLE
-set_location_assignment PIN_P36 -to BMC_I2C3_DISABLE
-set_location_assignment PIN_R31 -to BMC_I2C1_DISABLE
+#set_location_assignment PIN_N36 -to BMC_I2C2_DISABLE
+#set_location_assignment PIN_P36 -to BMC_I2C3_DISABLE
+#set_location_assignment PIN_R31 -to BMC_I2C1_DISABLE
 
-set_location_assignment PIN_C32 -to I2C1_1V8_SCL
-set_location_assignment PIN_G32 -to I2C1_1V8_SDA
-set_location_assignment PIN_K32 -to I2C2_1V8_SCL
-set_location_assignment PIN_B33 -to I2C2_1V8_SDA
-set_location_assignment PIN_G33 -to I2C3_1V8_SCL
-set_location_assignment PIN_C33 -to I2C3_1V8_SDA
+#set_location_assignment PIN_C32 -to I2C1_1V8_SCL
+#set_location_assignment PIN_G32 -to I2C1_1V8_SDA
+#set_location_assignment PIN_K32 -to I2C2_1V8_SCL
+#set_location_assignment PIN_B33 -to I2C2_1V8_SDA
+#set_location_assignment PIN_G33 -to I2C3_1V8_SCL
+#set_location_assignment PIN_C33 -to I2C3_1V8_SDA
 
 # ==============================================================================
 # Pin IO Standards & Input Termination
@@ -34,16 +34,16 @@ set_location_assignment PIN_C33 -to I2C3_1V8_SDA
 set_instance_assignment -name IO_STANDARD LVDS -to FPGA_SYSCLK0_100M_P
 set_instance_assignment -name IO_STANDARD "1.8 V" -to USER_LED_G
 
-set_instance_assignment -name IO_STANDARD "1.8 V" -to I2C1_1V8_SCL
-set_instance_assignment -name IO_STANDARD "1.8 V" -to I2C1_1V8_SDA
-set_instance_assignment -name IO_STANDARD "1.8 V" -to I2C2_1V8_SCL
-set_instance_assignment -name IO_STANDARD "1.8 V" -to I2C2_1V8_SDA
-set_instance_assignment -name IO_STANDARD "1.8 V" -to I2C3_1V8_SCL
-set_instance_assignment -name IO_STANDARD "1.8 V" -to I2C3_1V8_SDA
+#set_instance_assignment -name IO_STANDARD "1.8 V" -to I2C1_1V8_SCL
+#set_instance_assignment -name IO_STANDARD "1.8 V" -to I2C1_1V8_SDA
+#set_instance_assignment -name IO_STANDARD "1.8 V" -to I2C2_1V8_SCL
+#set_instance_assignment -name IO_STANDARD "1.8 V" -to I2C2_1V8_SDA
+#set_instance_assignment -name IO_STANDARD "1.8 V" -to I2C3_1V8_SCL
+#set_instance_assignment -name IO_STANDARD "1.8 V" -to I2C3_1V8_SDA
 
-set_instance_assignment -name IO_STANDARD "1.8 V" -to BMC_I2C1_DISABLE
-set_instance_assignment -name IO_STANDARD "1.8 V" -to BMC_I2C2_DISABLE
-set_instance_assignment -name IO_STANDARD "1.8 V" -to BMC_I2C3_DISABLE
+#set_instance_assignment -name IO_STANDARD "1.8 V" -to BMC_I2C1_DISABLE
+#set_instance_assignment -name IO_STANDARD "1.8 V" -to BMC_I2C2_DISABLE
+#set_instance_assignment -name IO_STANDARD "1.8 V" -to BMC_I2C3_DISABLE
 
 # ==============================================================================
 # Others assignments
@@ -54,7 +54,7 @@ set_global_assignment -name OPTIMIZATION_MODE "HIGH PERFORMANCE EFFORT"
 set_global_assignment -name MIN_CORE_JUNCTION_TEMP 0
 set_global_assignment -name MAX_CORE_JUNCTION_TEMP 100
 
-set_global_assignment -name PRESERVE_UNUSED_XCVR_CHANNEL ON
+#set_global_assignment -name PRESERVE_UNUSED_XCVR_CHANNEL ON
 
 # Smart VID Setting ------------------------------------------------------------
 set_global_assignment -name USE_CONF_DONE SDM_IO16

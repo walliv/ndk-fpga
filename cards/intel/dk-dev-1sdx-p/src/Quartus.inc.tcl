@@ -35,14 +35,14 @@ lappend HIERARCHY(COMPONENTS) \
     [list "TOPLEVEL" $CARD_BASE/src $ARCHGRP_ALL]
 
 # Design parameters
-set SYNTH_FLAGS(MODULE) "FPGA"
+set SYNTH_FLAGS(MODULE) "APP_BRISKI_TOP"
 set SYNTH_FLAGS(FPGA)   $CARD_FPGA
 
 # QSF constraints for specific parts of the design
 set SYNTH_FLAGS(CONSTR) ""
-set SYNTH_FLAGS(CONSTR) "$SYNTH_FLAGS(CONSTR) $CARD_BASE/constr/pcie0.qsf"
+# set SYNTH_FLAGS(CONSTR) "$SYNTH_FLAGS(CONSTR) $CARD_BASE/constr/pcie0.qsf"
 #set SYNTH_FLAGS(CONSTR) "$SYNTH_FLAGS(CONSTR) $CARD_BASE/constr/pcie1.qsf"
-set SYNTH_FLAGS(CONSTR) "$SYNTH_FLAGS(CONSTR) $CARD_BASE/constr/qsfp.qsf"
-set SYNTH_FLAGS(CONSTR) "$SYNTH_FLAGS(CONSTR) $CARD_BASE/constr/ddr4_sodimm.qsf"
+# set SYNTH_FLAGS(CONSTR) "$SYNTH_FLAGS(CONSTR) $CARD_BASE/constr/qsfp.qsf"
+# set SYNTH_FLAGS(CONSTR) "$SYNTH_FLAGS(CONSTR) $CARD_BASE/constr/ddr4_sodimm.qsf"
 set SYNTH_FLAGS(CONSTR) "$SYNTH_FLAGS(CONSTR) $CARD_BASE/constr/general.qsf"
 set SYNTH_FLAGS(CONSTR) "$SYNTH_FLAGS(CONSTR) $CARD_BASE/constr/timing.sdc"
