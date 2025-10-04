@@ -15,6 +15,7 @@ package uvm_tx_dma_calypte;
 
     `include "sequence.sv"
     `include "sequencer.sv"
+    `include "ptr_upd_model.sv"
     `include "model.sv"
     `include "scoreboard.sv"
     `include "coverage.sv"

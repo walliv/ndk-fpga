@@ -42,8 +42,6 @@ class model #(
     uvm_analysis_port     #(uvm_logic_vector_array::sequence_item #(USR_MFB_ITEM_WIDTH))      m_usr_data_analysis_port;
     uvm_analysis_port     #(uvm_logic_vector::sequence_item #(USR_MFB_META_WIDTH))            m_usr_meta_analysis_port;
 
-    local uvm_tx_dma_calypte_regs::regmodel_top #(CHANNELS, DATA_POINTER_WIDTH)               m_regmodel_top;
-
     protected int unsigned m_discard_wait;
     discard #(CHANNELS) m_discard_comp;
 
@@ -87,10 +85,6 @@ class model #(
             m_channel_info[it].dma_transactions_bytes  = 0;
             m_channel_info[it].drop_transactions_bytes = 0;
         end
-    endfunction
-
-    function void regmodel_set(uvm_tx_dma_calypte_regs::regmodel_top #(CHANNELS, DATA_POINTER_WIDTH) regmodel);
-        this.m_regmodel_top = regmodel;
     endfunction
 
     function void time_add (int unsigned channel, time inf_time[string], int unsigned id);
@@ -218,7 +212,7 @@ class model #(
             debug_msg = { debug_msg, $sformatf("DATA        : %s\n", cq_data_tr.convert2string())};
             debug_msg = { debug_msg,
                     $sformatf("================================================================================= \n")};
-            `uvm_info(this.get_full_name(), debug_msg, UVM_MEDIUM);
+            `uvm_info(this.get_full_name(), debug_msg, UVM_HIGH);
 
             //if PCIE transaction is not DMA HEADER
             if (hdr_inf == 1'b0) begin
@@ -306,7 +300,7 @@ class model #(
                     debug_msg = {debug_msg, $sformatf("OUT DATA: %s\n", usr_tx_data_tr.convert2string())};
                     debug_msg = {debug_msg, $sformatf(
                         "================================================================================= \n")};
-                    `uvm_info(this.get_full_name(), debug_msg, UVM_MEDIUM)
+                    `uvm_info(this.get_full_name(), debug_msg, UVM_HIGH)
 
                     m_usr_data_analysis_port.write(usr_tx_data_tr);
                     m_usr_meta_analysis_port.write(usr_tx_meta_tr);
@@ -332,7 +326,7 @@ class model #(
                     debug_msg = {debug_msg, $sformatf("OUT DATA: %s\n", usr_tx_data_tr.convert2string())};
                     debug_msg = {debug_msg, $sformatf(
                         "================================================================================= \n")};
-                    `uvm_info(this.get_full_name(), debug_msg, UVM_MEDIUM)
+                    `uvm_info(this.get_full_name(), debug_msg, UVM_HIGH)
                 end
 
                 m_channel_info[channel].infs.delete();

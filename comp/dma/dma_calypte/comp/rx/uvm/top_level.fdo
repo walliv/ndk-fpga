@@ -7,14 +7,16 @@
 set FIRMWARE_BASE         "../../../../../.."
 
 set DUT_BASE              ".."
+set PTR_UPDATER_BASE      "../../ptr_updater"
 set DUT_UVM_BASE          "."
 
 set TB_FILE               "./tbench/testbench.sv"
 set SIG_FILE              "./signals_sig.fdo"
 
 set COMPONENTS [list \
-    [list "DUT"      $DUT_BASE       "FULL"]\
-    [list "DUT_UVM"  $DUT_UVM_BASE   "FULL"]\
+    [list "PTR_UPDATER" $PTR_UPDATER_BASE "FULL"]\
+    [list "DUT"         $DUT_BASE         "FULL"]\
+    [list "DUT_UVM"     $DUT_UVM_BASE     "FULL"]\
 ]
 
 # Disable Code Coverage
@@ -31,7 +33,7 @@ source "$FIRMWARE_BASE/build/Modelsim.inc.fdo"
 # Suppress warnings from arithm library
 puts "Std NUMERIC Warnings - Disabled"
 set NumericStdNoWarnings 1
-nb_sim_run
+nb_sim_run 113673ns
 
 # Reports
 if {$SIM_FLAGS(CODE_COVERAGE)} {
