@@ -35,7 +35,9 @@ entity MFB_MERGER_SIMPLE is
         ITEM_WIDTH      : natural := 8;
         -- Number of bits for metadata in a single Region.
         META_WIDTH      : natural := 8;
-        -- Enable masking SOF and EOF due to switch to the other input.
+        -- True causes masking of SOF and/or EOF values when switching between ports. False does not
+        -- do that and two EOFs and/or SOFs can accur in the output word (this violates the MFB
+        -- specification but some components do not have to be sensitive to this).
         MASKING_EN      : boolean := True;
         -- Maximum amount of clock periods with destination ready before it tries to switch to the other input.
         CNT_MAX         : integer := 64
