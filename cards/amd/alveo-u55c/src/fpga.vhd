@@ -64,7 +64,6 @@ port (
     QSFP1_TX_N          : out   std_logic_vector(3 downto 0);
 
     -- QSFP leds (one bit per QSFP port)
-    QSFP_ACT_LED_G      : out   std_logic_vector(1 downto 0);
     QSFP_STA_LED_G      : out   std_logic_vector(1 downto 0);
     QSFP_STA_LED_Y      : out   std_logic_vector(1 downto 0);
 
@@ -115,6 +114,9 @@ architecture FULL of FPGA is
     signal qsfp_sda         : std_logic_vector(2-1 downto 0) := (others => 'Z');
     signal qsfp_modprs_n    : std_logic_vector(2-1 downto 0);
     signal qsfp_int_n       : std_logic_vector(2-1 downto 0);
+
+    signal qsfp_sta_led_y_int : std_logic_vector(QSFP_STA_LED_Y'range);
+    signal qsfp_sta_led_g_int : std_logic_vector(QSFP_STA_LED_G'range);
 
     signal boot_mi_clk      : std_logic;
     signal boot_mi_reset    : std_logic;
@@ -1313,9 +1315,10 @@ begin
         QSFP1_TX_N <= eth_tx_n(2*ETH_LANES-1 downto 1*ETH_LANES);
         QSFP0_TX_P <= eth_tx_p(1*ETH_LANES-1 downto 0*ETH_LANES);
         QSFP0_TX_N <= eth_tx_n(1*ETH_LANES-1 downto 0*ETH_LANES);
-    end generate;
 
-    QSFP_ACT_LED_G <= (others => '0');
+        QSFP_STA_LED_G <= qsfp_sta_led_g_int;
+        QSFP_STA_LED_Y <= qsfp_sta_led_y_int;
+    end generate;
 
     -- =========================================================================
     -- BOOT AND FLASH
@@ -1496,8 +1499,8 @@ begin
         ETH_TX_P                => eth_tx_p(ETH_PORTS*ETH_LANES-1 downto 0),
         ETH_TX_N                => eth_tx_n(ETH_PORTS*ETH_LANES-1 downto 0),
 
-        ETH_LED_R               => QSFP_STA_LED_Y,
-        ETH_LED_G               => QSFP_STA_LED_G,
+        ETH_LED_R               => qsfp_sta_led_y_int,
+        ETH_LED_G               => qsfp_sta_led_g_int,
 
         QSFP_I2C_SCL            => open,
         QSFP_I2C_SDA            => open,
