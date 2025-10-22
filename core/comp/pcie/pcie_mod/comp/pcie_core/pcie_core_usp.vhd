@@ -977,7 +977,7 @@ begin
             AXI_CCUSER_WIDTH   => AXI_CCUSER_WIDTH,
             AXI_RQUSER_WIDTH   => AXI_RQUSER_WIDTH,
             AXI_RCUSER_WIDTH   => AXI_RCUSER_WIDTH,
-            AXI_STRADDLING     => false
+            AXI_STRADDLING     => (CQ_MFB_REGIONS = 2)
         )
         port map (
             PCIE_CLK            => pcie_clk(i),

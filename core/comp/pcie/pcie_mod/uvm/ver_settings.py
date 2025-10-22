@@ -24,7 +24,7 @@ SETTINGS = {
         "AXI_CCUSER_WIDTH"     : "81"                ,
         "AXI_RQUSER_WIDTH"     : "137"               ,
         "AXI_RCUSER_WIDTH"     : "161"               ,
-        "AXI_STRADDLING"       : "0"                 ,
+        "AXI_STRADDLING"       : "1"                 ,
 
         "DMA_BAR_ENABLE"       : 0,
         "DMA_PORTS"            : 1,
@@ -189,7 +189,7 @@ SETTINGS = {
         "AXI_CCUSER_WIDTH"     : "81"                ,
         "AXI_RQUSER_WIDTH"     : "137"               ,
         "AXI_RCUSER_WIDTH"     : "161"               ,
-        "AXI_STRADDLING"       : "0"                 ,
+        "AXI_STRADDLING"       : "1"                 ,
 
         "DEVICE"               : "\\\"ULTRASCALE\\\"",
         "PCIE_ENDPOINT_TYPE"   : "\\\"DUMMY\\\""     ,
