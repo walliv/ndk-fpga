@@ -49,7 +49,7 @@ create_clock -period 10.000 -name pcie_clk_p -waveform {0.000 5.000} [get_ports 
 
 create_pblock pblock_pcie_i
 set_property IS_SOFT TRUE [get_pblocks pblock_pcie_i]
-resize_pblock [get_pblocks pblock_pcie_i] -add {CLOCKREGION_X7Y0:CLOCKREGION_X7Y3}
+resize_pblock [get_pblocks pblock_pcie_i] -add {CLOCKREGION_X6Y0:CLOCKREGION_X7Y0}
 
 add_cells_to_pblock [get_pblocks pblock_pcie_i] [get_cells -quiet cm_i/pcie_i]
 add_cells_to_pblock [get_pblocks pblock_pcie_i] [get_cells -quiet cm_i/dma_i]
