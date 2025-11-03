@@ -44,7 +44,7 @@ set SYNTH_FLAGS(PLACE_DIRECTIVE) "ExtraPostPlacementOpt"
 # Post-place physical optimization (phys_opt_design command)
 # set SYNTH_FLAGS(PPLACE_PHYS_OPT_DIRECTIVE) ""
 # Router (route_design command)
-set SYNTH_FLAGS(ROUTE_DIRECTIVE) "-directive AggressiveExplore -tns_cleanup"
+set SYNTH_FLAGS(ROUTE_DIRECTIVE) "AggressiveExplore"
 # Post-route physical optimization (phys_opt_design command)
 # set SYNTH_FLAGS(PROUTE_PHYS_OPT_DIRECTIVE)  ""
 
