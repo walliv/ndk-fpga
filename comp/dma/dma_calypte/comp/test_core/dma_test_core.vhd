@@ -56,9 +56,9 @@ entity DMA_TEST_CORE is
         -- MFB interfaces
         -- =========================================================================================
         RX_MFB_DATA_IN    : in  std_logic_vector(MFB_REGIONS*MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH-1 downto 0);
-        RX_MFB_META_IN    : in  std_logic_vector(MFB_REGIONS*(log2(USR_RX_PKT_SIZE_MAX+1) + HDR_META_WIDTH + log2(RX_CHANNELS))-1 downto 0);
-        RX_MFB_SOF_POS_IN : in  std_logic_vector(MFB_REGIONS*max(1, log2(MFB_REGION_SIZE))-1 downto 0);
-        RX_MFB_EOF_POS_IN : in  std_logic_vector(MFB_REGIONS*max(1, log2(MFB_REGION_SIZE*MFB_BLOCK_SIZE))-1 downto 0);
+        RX_MFB_META_IN    : in  std_logic_vector(log2(USR_RX_PKT_SIZE_MAX+1) + HDR_META_WIDTH + log2(RX_CHANNELS) -1 downto 0);
+        RX_MFB_SOF_POS_IN : in  std_logic_vector(MFB_REGIONS*maximum(1, log2(MFB_REGION_SIZE))-1 downto 0);
+        RX_MFB_EOF_POS_IN : in  std_logic_vector(MFB_REGIONS*maximum(1, log2(MFB_REGION_SIZE*MFB_BLOCK_SIZE))-1 downto 0);
         RX_MFB_SOF_IN     : in  std_logic_vector(MFB_REGIONS-1 downto 0);
         RX_MFB_EOF_IN     : in  std_logic_vector(MFB_REGIONS-1 downto 0);
         RX_MFB_SRC_RDY_IN : in  std_logic;
@@ -69,8 +69,8 @@ entity DMA_TEST_CORE is
         RX_MFB_META_CHAN_OUT     : out std_logic_vector(log2(RX_CHANNELS) -1 downto 0);
 
         RX_MFB_DATA_OUT    : out std_logic_vector(MFB_REGIONS*MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH-1 downto 0);
-        RX_MFB_SOF_POS_OUT : out std_logic_vector(MFB_REGIONS*max(1, log2(MFB_REGION_SIZE))-1 downto 0);
-        RX_MFB_EOF_POS_OUT : out std_logic_vector(MFB_REGIONS*max(1, log2(MFB_REGION_SIZE*MFB_BLOCK_SIZE))-1 downto 0);
+        RX_MFB_SOF_POS_OUT : out std_logic_vector(MFB_REGIONS*maximum(1, log2(MFB_REGION_SIZE))-1 downto 0);
+        RX_MFB_EOF_POS_OUT : out std_logic_vector(MFB_REGIONS*maximum(1, log2(MFB_REGION_SIZE*MFB_BLOCK_SIZE))-1 downto 0);
         RX_MFB_SOF_OUT     : out std_logic_vector(MFB_REGIONS-1 downto 0);
         RX_MFB_EOF_OUT     : out std_logic_vector(MFB_REGIONS-1 downto 0);
         RX_MFB_SRC_RDY_OUT : out std_logic;
@@ -81,17 +81,17 @@ entity DMA_TEST_CORE is
         TX_MFB_META_CHAN_IN     : in std_logic_vector(log2(TX_CHANNELS) -1 downto 0);
 
         TX_MFB_DATA_IN    : in  std_logic_vector(MFB_REGIONS*MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH-1 downto 0);
-        TX_MFB_SOF_POS_IN : in  std_logic_vector(MFB_REGIONS*max(1, log2(MFB_REGION_SIZE))-1 downto 0);
-        TX_MFB_EOF_POS_IN : in  std_logic_vector(MFB_REGIONS*max(1, log2(MFB_REGION_SIZE*MFB_BLOCK_SIZE))-1 downto 0);
+        TX_MFB_SOF_POS_IN : in  std_logic_vector(MFB_REGIONS*maximum(1, log2(MFB_REGION_SIZE))-1 downto 0);
+        TX_MFB_EOF_POS_IN : in  std_logic_vector(MFB_REGIONS*maximum(1, log2(MFB_REGION_SIZE*MFB_BLOCK_SIZE))-1 downto 0);
         TX_MFB_SOF_IN     : in  std_logic_vector(MFB_REGIONS-1 downto 0);
         TX_MFB_EOF_IN     : in  std_logic_vector(MFB_REGIONS-1 downto 0);
         TX_MFB_SRC_RDY_IN : in  std_logic;
         TX_MFB_DST_RDY_IN : out std_logic;
 
         TX_MFB_DATA_OUT    : out std_logic_vector(MFB_REGIONS*MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH-1 downto 0);
-        TX_MFB_META_OUT    : out std_logic_vector(MFB_REGIONS*(log2(USR_TX_PKT_SIZE_MAX+1) + HDR_META_WIDTH + log2(TX_CHANNELS))-1 downto 0);
-        TX_MFB_SOF_POS_OUT : out std_logic_vector(MFB_REGIONS*max(1, log2(MFB_REGION_SIZE))-1 downto 0);
-        TX_MFB_EOF_POS_OUT : out std_logic_vector(MFB_REGIONS*max(1, log2(MFB_REGION_SIZE*MFB_BLOCK_SIZE))-1 downto 0);
+        TX_MFB_META_OUT    : out std_logic_vector(log2(USR_TX_PKT_SIZE_MAX+1) + HDR_META_WIDTH + log2(TX_CHANNELS) -1 downto 0);
+        TX_MFB_SOF_POS_OUT : out std_logic_vector(MFB_REGIONS*maximum(1, log2(MFB_REGION_SIZE))-1 downto 0);
+        TX_MFB_EOF_POS_OUT : out std_logic_vector(MFB_REGIONS*maximum(1, log2(MFB_REGION_SIZE*MFB_BLOCK_SIZE))-1 downto 0);
         TX_MFB_SOF_OUT     : out std_logic_vector(MFB_REGIONS-1 downto 0);
         TX_MFB_EOF_OUT     : out std_logic_vector(MFB_REGIONS-1 downto 0);
         TX_MFB_SRC_RDY_OUT : out std_logic;
@@ -146,10 +146,13 @@ architecture FULL of DMA_TEST_CORE is
     signal mi_drdy_split : std_logic_vector(MI_SPLIT_PORTS-1 downto 0);
 
     -- =============================================================================================
-    -- TX Debug Core ---> MFB Loopback
+    -- TX Debug Core ---> Adaptation interface
     -- =============================================================================================
+    signal tx_mfb_meta_pkt_size_dbg : std_logic_vector(log2(USR_TX_PKT_SIZE_MAX+1) -1 downto 0);
+    signal tx_mfb_meta_hdr_meta_dbg : std_logic_vector(HDR_META_WIDTH -1 downto 0);
+
     signal tx_mfb_data_dbg    : std_logic_vector(MFB_REGIONS*MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH -1 downto 0);
-    signal tx_mfb_meta_dbg    : std_logic_vector(log2(USR_TX_PKT_SIZE_MAX +1)+HDR_META_WIDTH+log2(TX_CHANNELS) -1 downto 0);
+    signal tx_mfb_meta_dbg    : std_logic_vector(MFB_REGIONS*(log2(USR_TX_PKT_SIZE_MAX+1) + HDR_META_WIDTH + log2(TX_CHANNELS)) -1 downto 0);
     signal tx_mfb_sof_dbg     : std_logic_vector(MFB_REGIONS -1 downto 0);
     signal tx_mfb_eof_dbg     : std_logic_vector(MFB_REGIONS -1 downto 0);
     signal tx_mfb_sof_pos_dbg : std_logic_vector(MFB_REGIONS*max(1, log2(MFB_REGION_SIZE)) -1 downto 0);
@@ -158,10 +161,37 @@ architecture FULL of DMA_TEST_CORE is
     signal tx_mfb_dst_rdy_dbg : std_logic;
 
     -- =============================================================================================
-    -- MFB Loopback ----> Latency meter
+    -- Adaptation interface ---> MFB loopback
     -- =============================================================================================
+    signal rx_mfb_meta_chan_in_adapt     : std_logic_vector(log2(maximum(RX_CHANNELS, TX_CHANNELS)) -1 downto 0);
+    signal tx_mfb_meta_out_adapt         : std_logic_vector(log2(USR_TX_PKT_SIZE_MAX+1) + HDR_META_WIDTH + log2(maximum(TX_CHANNELS, RX_CHANNELS)) -1 downto 0);
+
+    -- =============================================================================================
+    -- MFB Loopback ---> Adaptation interface
+    -- =============================================================================================
+    signal rx_mfb_meta_out_adapt         : std_logic_vector(log2(USR_RX_PKT_SIZE_MAX+1) + HDR_META_WIDTH + log2(maximum(TX_CHANNELS, RX_CHANNELS)) -1 downto 0);
+    signal tx_mfb_meta_chan_in_adapt     : std_logic_vector(log2(maximum(RX_CHANNELS, TX_CHANNELS)) -1 downto 0);
+
+    -- =============================================================================================
+    -- MFB Generator ----> MUX
+    -- =============================================================================================
+    signal rx_mfb_data_gen    : std_logic_vector(MFB_REGIONS*MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH -1 downto 0);
+    signal rx_mfb_meta_gen    : std_logic_vector(log2(RX_CHANNELS) + log2(USR_RX_PKT_SIZE_MAX +1) -1 downto 0);
+    signal rx_mfb_sof_gen     : std_logic_vector(MFB_REGIONS -1 downto 0);
+    signal rx_mfb_eof_gen     : std_logic_vector(MFB_REGIONS -1 downto 0);
+    signal rx_mfb_sof_pos_gen : std_logic_vector(MFB_REGIONS*max(1, log2(MFB_REGION_SIZE)) -1 downto 0);
+    signal rx_mfb_eof_pos_gen : std_logic_vector(MFB_REGIONS*max(1, log2(MFB_REGION_SIZE*MFB_BLOCK_SIZE)) -1 downto 0);
+    signal rx_mfb_src_rdy_gen : std_logic;
+    signal rx_mfb_dst_rdy_gen : std_logic;
+
+    -- =============================================================================================
+    -- MFB Loopback ----> MUX
+    -- =============================================================================================
+    signal rx_mfb_meta_pkt_size_out_lbk : std_logic_vector(log2(USR_RX_PKT_SIZE_MAX +1) -1 downto 0);
+    signal rx_mfb_meta_hdr_meta_out_lbk : std_logic_vector(HDR_META_WIDTH -1 downto 0);
+    signal rx_mfb_meta_chan_out_lbk     : std_logic_vector(log2(RX_CHANNELS) -1 downto 0);
+
     signal rx_mfb_data_lbk    : std_logic_vector(MFB_REGIONS*MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH -1 downto 0);
-    signal rx_mfb_meta_lbk    : std_logic_vector(log2(RX_CHANNELS) + log2(USR_RX_PKT_SIZE_MAX +1) + HDR_META_WIDTH -1 downto 0);
     signal rx_mfb_sof_lbk     : std_logic_vector(MFB_REGIONS -1 downto 0);
     signal rx_mfb_eof_lbk     : std_logic_vector(MFB_REGIONS -1 downto 0);
     signal rx_mfb_sof_pos_lbk : std_logic_vector(MFB_REGIONS*max(1, log2(MFB_REGION_SIZE)) -1 downto 0);
@@ -184,7 +214,6 @@ architecture FULL of DMA_TEST_CORE is
     signal tx_mfb_src_rdy_lm : std_logic;
     signal tx_mfb_dst_rdy_lm : std_logic;
 
-    -- =============================================================================================
     -- =============================================================================================
     -- Reset FSM
     -- =============================================================================================
@@ -368,13 +397,47 @@ begin
         tx_mfb_dst_rdy_lm  <= tx_mfb_dst_rdy_dbg;
     end generate;
 
+    -- =============================================================================================
+    -- Adapt interface and loopback
+    --
+    -- Because the amount of channels (RX_CHANNELS, TX_CHANNELS) and maximum packet size
+    -- (USR_RX_PKT_SIZE_MAX, USR_TX_PKT_SIZE_MAX) can be set to unidentical values, the loopback
+    -- interface would report signal mismatch. That is why this adaptation interface has been
+    -- created around loopback.
+    -- =============================================================================================
+    rx_mfb_meta_pkt_size_out_lbk <= rx_mfb_meta_out_adapt(log2(USR_RX_PKT_SIZE_MAX+1) + HDR_META_WIDTH + rx_mfb_meta_chan_in_adapt'length -1 downto HDR_META_WIDTH + rx_mfb_meta_chan_in_adapt'length);
+    rx_mfb_meta_hdr_meta_out_lbk <= rx_mfb_meta_out_adapt(HDR_META_WIDTH + rx_mfb_meta_chan_in_adapt'length -1 downto rx_mfb_meta_chan_in_adapt'length);
+    rx_mfb_meta_chan_out_lbk     <= rx_mfb_meta_out_adapt(log2(RX_CHANNELS) -1 downto 0);
+
+    TX_MFB_META_OUT  <= tx_mfb_meta_out_adapt(log2(USR_TX_PKT_SIZE_MAX+1) + HDR_META_WIDTH + tx_mfb_meta_chan_in_adapt'length -1 downto tx_mfb_meta_chan_in_adapt'length)
+                        & tx_mfb_meta_out_adapt(log2(TX_CHANNELS) -1 downto 0);
+
+    chan_idx_adapt_g: if (TX_CHANNELS > RX_CHANNELS) generate
+        rx_mfb_meta_chan_in_adapt <= (rx_mfb_meta_chan_in_adapt'length - log2(RX_CHANNELS) -1 downto 0 => '0') & RX_MFB_META_IN(log2(RX_CHANNELS) -1 downto 0);
+        tx_mfb_meta_chan_in_adapt <= tx_mfb_meta_dbg(log2(TX_CHANNELS) -1 downto 0);
+
+    elsif (TX_CHANNELS < RX_CHANNELS) generate
+        rx_mfb_meta_chan_in_adapt <= RX_MFB_META_IN(log2(RX_CHANNELS) -1 downto 0);
+        tx_mfb_meta_chan_in_adapt <= (tx_mfb_meta_chan_in_adapt'length - log2(TX_CHANNELS) -1 downto 0 => '0') & tx_mfb_meta_dbg(log2(TX_CHANNELS) -1 downto 0);
+
+    else generate
+        rx_mfb_meta_chan_in_adapt <= RX_MFB_META_IN(log2(RX_CHANNELS) -1 downto 0);
+        tx_mfb_meta_chan_in_adapt <= tx_mfb_meta_dbg(log2(TX_CHANNELS) -1 downto 0);
+    end generate;
+
+    tx_mfb_meta_pkt_size_dbg <= tx_mfb_meta_dbg(log2(USR_TX_PKT_SIZE_MAX+1) + HDR_META_WIDTH + log2(TX_CHANNELS) -1 downto HDR_META_WIDTH + log2(TX_CHANNELS));
+    tx_mfb_meta_hdr_meta_dbg <= tx_mfb_meta_dbg(HDR_META_WIDTH + log2(TX_CHANNELS) -1 downto log2(TX_CHANNELS));
+
     mfb_loopback_i : entity work.MFB_LOOPBACK
     generic map (
         REGIONS     => MFB_REGIONS,
         REGION_SIZE => MFB_REGION_SIZE,
         BLOCK_SIZE  => MFB_BLOCK_SIZE,
         ITEM_WIDTH  => MFB_ITEM_WIDTH,
-        META_WIDTH  => log2(maximum(TX_CHANNELS, RX_CHANNELS)) + log2(maximum(USR_RX_PKT_SIZE_MAX, USR_TX_PKT_SIZE_MAX)+1) + HDR_META_WIDTH,
+        -- Choosing maximum from the channel indexes because when the loopback is not active, we
+        -- need to transmit the full channel index in the direction with larger amount of
+        -- channels.
+        META_WIDTH  => log2(USR_RX_PKT_SIZE_MAX+1) + HDR_META_WIDTH + log2(maximum(TX_CHANNELS, RX_CHANNELS)),
 
         FAKE_LOOPBACK => (not MFB_LOOPBACK_EN),
         PIPED_PORTS   => TRUE,
@@ -396,7 +459,7 @@ begin
         RESET => RESET,
 
         RX_DATA_IN    => RX_MFB_DATA_IN,
-        RX_META_IN    => RX_MFB_META_IN,
+        RX_META_IN    => RX_MFB_META_IN(log2(USR_RX_PKT_SIZE_MAX+1) + HDR_META_WIDTH + log2(RX_CHANNELS) -1 downto log2(RX_CHANNELS)) & rx_mfb_meta_chan_in_adapt,
         RX_SOF_IN     => RX_MFB_SOF_IN,
         RX_EOF_IN     => RX_MFB_EOF_IN,
         RX_SOF_POS_IN => RX_MFB_SOF_POS_IN,
@@ -405,7 +468,7 @@ begin
         RX_DST_RDY_IN => RX_MFB_DST_RDY_IN,
 
         RX_DATA_OUT    => rx_mfb_data_lbk,
-        RX_META_OUT    => rx_mfb_meta_lbk,
+        RX_META_OUT    => rx_mfb_meta_out_adapt,
         RX_SOF_OUT     => rx_mfb_sof_lbk,
         RX_EOF_OUT     => rx_mfb_eof_lbk,
         RX_SOF_POS_OUT => rx_mfb_sof_pos_lbk,
@@ -414,7 +477,7 @@ begin
         RX_DST_RDY_OUT => rx_mfb_dst_rdy_lbk,
 
         TX_DATA_OUT    => TX_MFB_DATA_OUT,
-        TX_META_OUT    => TX_MFB_META_OUT,
+        TX_META_OUT    => tx_mfb_meta_out_adapt,
         TX_SOF_OUT     => TX_MFB_SOF_OUT,
         TX_EOF_OUT     => TX_MFB_EOF_OUT,
         TX_SOF_POS_OUT => TX_MFB_SOF_POS_OUT,
@@ -423,14 +486,13 @@ begin
         TX_DST_RDY_OUT => TX_MFB_DST_RDY_OUT,
 
         TX_DATA_IN    => tx_mfb_data_dbg,
-        TX_META_IN    => tx_mfb_meta_dbg,
+        TX_META_IN    => tx_mfb_meta_pkt_size_dbg & tx_mfb_meta_hdr_meta_dbg & tx_mfb_meta_chan_in_adapt,
         TX_SOF_IN     => tx_mfb_sof_dbg,
         TX_EOF_IN     => tx_mfb_eof_dbg,
         TX_SOF_POS_IN => tx_mfb_sof_pos_dbg,
         TX_EOF_POS_IN => tx_mfb_eof_pos_dbg,
         TX_SRC_RDY_IN => tx_mfb_src_rdy_dbg,
-        TX_DST_RDY_IN => tx_mfb_dst_rdy_dbg
-    );
+        TX_DST_RDY_IN => tx_mfb_dst_rdy_dbg);
 
     -- =============================================================================================
     -- Latency measurement
