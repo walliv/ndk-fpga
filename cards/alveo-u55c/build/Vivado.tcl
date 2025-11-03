@@ -52,8 +52,8 @@ set SYNTH_FLAGS(BOARD)     $CARD_NAME
 # ------------------------------------------------------------------------------
 # Other build directives
 # ------------------------------------------------------------------------------
-set SYNTH_FLAGS(FLATTEN_HIERARCHY) "rebuilt"
-set SYNTH_FLAGS(RETIMING) true
+# set SYNTH_FLAGS(FLATTEN_HIERARCHY) "rebuilt"
+# set SYNTH_FLAGS(RETIMING) true
 
 # ------------------------------------------------------------------------------
 # Constant propagation to submodules
