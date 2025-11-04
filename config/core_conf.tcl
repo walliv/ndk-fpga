@@ -9,7 +9,7 @@
 # Application core parameters:
 # ------------------------------------------------------------------------------
 # Valid options are: TEST, MANYCORE, EMPTY
-set APP_CORE_ARCH "MANYCORE"
+set APP_CORE_ARCH   $env(APP_CORE_ARCH)
 set APP_CORE_ENABLE $env(APP_CORE_ENABLE)
 
 # ------------------------------------------------------------------------------
