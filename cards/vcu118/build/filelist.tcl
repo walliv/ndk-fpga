@@ -8,7 +8,7 @@ if {[info exists $shell_git_root]} {
 read_xdc ${shell_git_root}/cards/vcu118/src/pcie.xdc
 read_xdc ${shell_git_root}/cards/vcu118/src/general.xdc
 read_vhdl -library work -vhdl2008 ${shell_git_root}/cards/vcu118/src/fpga.vhd
-set IP_PARAMS_L {IP_GEN_FILES false PCIE_ENDPOINT_MODE 2 IP_BUILD_DIR ../src CORE_BASE ../../../core SDM_SYSMON_ARCH USP_IDCOMP PCIE_MOD_ARCH USP APP_CORE_ARCH MANYCORE CLOCK_GEN_ARCH USP VIRTUAL_DEBUG_ENABLE false DMA_TYPE 4 IP_COMP_NAME pcie4_uscale_plus IP_EXT_BASE ../src}
+set IP_PARAMS_L {IP_GEN_FILES false PCIE_ENDPOINT_MODE 2 IP_BUILD_DIR ../src CORE_BASE ../../../core SDM_SYSMON_ARCH USP_IDCOMP PCIE_MOD_ARCH USP APP_CORE_ARCH MANYCORE CLOCK_GEN_ARCH USP IP_TEMPLATE_ROOT ../../../core/ip VIRTUAL_DEBUG_ENABLE false DMA_TYPE 4 IP_COMP_NAME pcie4_uscale_plus IP_EXT_BASE ../src}
 source ${shell_git_root}/cards/vcu118/src/pcie4_uscale_plus.ip.tcl
 read_vhdl -library work -vhdl2008 ${shell_git_root}/core/fpga_common.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/apps/application_core_ent.vhd
@@ -41,10 +41,12 @@ read_vhdl -library work -vhdl2008 ${shell_git_root}/core/dma/dma_full_arch.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/core/dma/dma_ent.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/core/dma/wrapper/dma_wrapper.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/dma/dma_calypte/comp/test_core/dma_test_core.vhd
+read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/dma/dma_calypte/comp/test_core/comp/dma_latency_meter/dma_latency_meter.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/debug/latency_meter/latency_meter.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/mfb_tools/flow/loopback/mfb_loopback.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/dma/dma_calypte/comp/test_core/comp/tx_debug_core/debug_core.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/dma/dma_calypte/dma_calypte.vhd
+read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/dma/dma_calypte/comp/ptr_updater/dma_ptr_updater.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/dma/dma_calypte/comp/tx/tx_dma_calypte.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/dma/dma_calypte/comp/tx/comp/pcie_trans_buffer/tx_dma_pcie_trans_buffer.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/dma/dma_calypte/comp/tx/comp/packet_dispatcher/tx_dma_pkt_dispatcher.vhd
@@ -83,6 +85,7 @@ read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/base/fifo/sh_fifo/sh_fi
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/base/fifo/sh_fifo/sh_fifo_fsm.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/dma/dma_calypte/comp/rx/comp/hdr_manager/addr_manager/rx_dma_calypte_addr_manager.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/dma/dma_calypte/comp/rx/comp/hdr_insertor/rx_dma_calypte_hdr_insertor.vhd
+read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/base/pkg/pcie_hdr_fields_pkg.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/mfb_tools/flow/metadata_extractor/metadata_extractor.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/mfb_tools/flow/metadata_insertor/metadata_insertor.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/mfb_tools/debug/gen_loop_switch/gen_loop_switch.vhd
