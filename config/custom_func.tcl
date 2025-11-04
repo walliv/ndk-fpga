@@ -46,9 +46,9 @@ proc target_filelist { {filename "filelist.tcl"} } {
 
             if {$fext == ".vhd" || $fext == ".vhdl"} {
                 append content "read_vhdl -library $library -vhdl2008 $fname\n"
-            } elseif { $FEXT == ".v" } {
+            } elseif { $fext == ".v" } {
                 append content "read_verilog -library $library $fname\n"
-            } elseif { $FEXT == ".sv" || $FEXT == ".svp" } {
+            } elseif { $fext == ".sv" || $fext == ".svp" } {
                 append content "read_verilog -library $library -sv $fname\n"
             }
 

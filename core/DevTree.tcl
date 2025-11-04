@@ -81,12 +81,6 @@ proc dts_ndp_core_main_mi {DTS} {
     # MI test space
     append ret [dts_mi_test_space "mi_test_space" $NdkCore::ADDR_TEST_SPACE]
 
-    # Frequency meter component
-    global MEASURE_FREQUENCIES
-    if {$MEASURE_FREQUENCIES} {
-        append ret [dts_frequency_counter $NdkCore::ADDR_FREQ_METER]
-    }
-
     # Card specific components
     if { [llength [info procs dts_card_specific]] > 0 } {
         set cs_args [info args dts_card_specific]
@@ -97,18 +91,6 @@ proc dts_ndp_core_main_mi {DTS} {
         append ret [dts_card_specific {*}$cs_params]
     }
 
-    # TSU component
-    global TSU_ENABLE
-    if {$TSU_ENABLE} {
-        append ret "tsu:" [dts_tsugen $NdkCore::ADDR_TSU]
-    }
-
-    # Network module
-    global NET_MOD_ARCH ETH_PORTS ETH_PORT_SPEED ETH_PORT_CHAN ETH_PORT_LANES ETH_PORT_RX_MTU ETH_PORT_TX_MTU NET_MOD_ARCH QSFP_CAGES QSFP_I2C_ADDR QSFP_I2C_CUSTOM_CTRLS CARD_NAME
-    if {$NET_MOD_ARCH != "EMPTY"} {
-        append ret [dts_network_mod $NdkCore::ADDR_ETH_MAC $NdkCore::ADDR_ETH_PCS $NdkCore::ADDR_ETH_PMD $ETH_PORTS ETH_PORT_SPEED ETH_PORT_CHAN ETH_PORT_LANES ETH_PORT_RX_MTU ETH_PORT_TX_MTU $NET_MOD_ARCH $QSFP_CAGES QSFP_I2C_ADDR $CARD_NAME $QSFP_I2C_CUSTOM_CTRLS]
-    }
-
     global CLOCK_GEN_ARCH VIRTUAL_DEBUG_ENABLE
     # Intel JTAG-over-protocol controller
     if {$CLOCK_GEN_ARCH == "INTEL" && $VIRTUAL_DEBUG_ENABLE} {
@@ -117,27 +99,14 @@ proc dts_ndp_core_main_mi {DTS} {
 
     # Populate application, if exists
     global APP_CORE_ENABLE
-    global ETH_STREAMS_MODE
-    if {$ETH_STREAMS_MODE == 1} {
-        set ETH_STREAMS [expr $ETH_PORTS*$ETH_PORT_CHAN(0)]
-    } else {
-        set ETH_STREAMS $ETH_PORTS
-    }
     if {$APP_CORE_ENABLE} {
         if { [llength [info procs dts_application]] > 0 } {
-            global MEM_PORTS HBM_PORTS
-
-            if {[llength [info args dts_application]] == 3} {
-                # INFO: backward compatible variant without generics parameter
-                append ret "app:" [dts_application $NdkCore::ADDR_USERAPP $ETH_STREAMS $MEM_PORTS]
-            } else {
-                array set GENERICS "
-                    ETH_STREAMS $ETH_STREAMS
-                    DDR_PORTS $MEM_PORTS
-                    HBM_PORTS $HBM_PORTS
-                "
-                append ret "app:" [dts_application $NdkCore::ADDR_USERAPP [array get GENERICS]]
-            }
+            global HBM_CHANNELS APP_CORE_ARCH
+            array set GENERICS "
+                APP_CORE_ARCH $APP_CORE_ARCH
+                HBM_CHANNELS $HBM_CHANNELS
+            "
+            append ret "app:" [dts_application $NdkCore::ADDR_USERAPP [array get GENERICS]]
         }
     }
 
@@ -222,9 +191,9 @@ proc dts_build_netcope {} {
             }
 
             # DMA module
-            global DMA_RX_CHANNELS DMA_RX_FRAME_SIZE_MAX DMA_TX_FRAME_SIZE_MAX DMA_RX_FRAME_SIZE_MIN DMA_TX_FRAME_SIZE_MIN DMA_DEBUG_ENABLE
+            global DMA_RX_CHANNELS DMA_RX_PKT_SIZE_MAX DMA_TX_PKT_SIZE_MAX DMA_RX_PKT_SIZE_MIN DMA_TX_PKT_SIZE_MIN DMA_DEBUG_ENABLE
             if {$DMA_TYPE != 0} {
-                append ret [dts_dmamod_open $NdkCore::ADDR_DMA_MOD $DMA_TYPE [expr $DMA_RX_CHANNELS / $PCIE_ENDPOINTS] [expr $DMA_TX_CHANNELS / $PCIE_ENDPOINTS] $pcie $DMA_RX_FRAME_SIZE_MAX $DMA_TX_FRAME_SIZE_MAX $DMA_RX_FRAME_SIZE_MIN $DMA_TX_FRAME_SIZE_MIN $DMA_DEBUG_ENABLE]
+                append ret [dts_dmamod_open $NdkCore::ADDR_DMA_MOD $DMA_TYPE [expr $DMA_RX_CHANNELS / $PCIE_ENDPOINTS] [expr $DMA_TX_CHANNELS / $PCIE_ENDPOINTS] $pcie $DMA_RX_PKT_SIZE_MAX $DMA_TX_PKT_SIZE_MAX $DMA_RX_PKT_SIZE_MIN $DMA_TX_PKT_SIZE_MIN $DMA_DEBUG_ENABLE]
             }
         }
 

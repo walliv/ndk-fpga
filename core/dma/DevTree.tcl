@@ -7,8 +7,9 @@
 # 7.  tx_frame_size_max - maximum allowed size of DMA TX frame
 # 8.  rx_frame_size_min - minimum allowed size of DMA RX frame
 # 9.  tx_frame_size_min - minimum allowed size of DMA TX frame
-# 10. offset - address offset for TX controllers
-proc dts_dmamod_open {base type rxn txn pcie rx_frame_size_max tx_frame_size_max rx_frame_size_min tx_frame_size_min {offset 0x00200000}} {
+# 10. dbg_en - enabled debug logic for DMA (if there is one fs)
+# 11. offset - address offset for TX controllers
+proc dts_dmamod_open {base type rxn txn pcie rx_frame_size_max tx_frame_size_max rx_frame_size_min tx_frame_size_min dbg_en {offset 0x00200000}} {
     set    ret ""
     append ret "dma_module@$base {"
 
@@ -28,9 +29,8 @@ proc dts_dmamod_open {base type rxn txn pcie rx_frame_size_max tx_frame_size_max
     }
 
     # RX DMA Channels
-    global DMA_DEBUG_ENABLE
     for {set i 0} {$i < $rxn} {incr i} {
-        # if {$DMA_DEBUG_ENABLE} {
+        # if {$dbg_en} {
         #     append ret [dts_event_counter [expr $base + 0x00010000 + $i * 0x80 + 0x00] "event_counter0_$i" 1]
         #     append ret [dts_event_counter [expr $base + 0x00010000 + $i * 0x80 + 0x10] "event_counter1_$i" 1]
         #     append ret [dts_event_counter [expr $base + 0x00010000 + $i * 0x80 + 0x20] "event_counter2_$i" 1]

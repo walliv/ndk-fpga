@@ -43,4 +43,5 @@ NETCOPE_ENV = \
 
 filelist : ttarget_filelist
 
+include $(CORE_BASE)/core.mk
 include $(COMBO_BASE)/build/Makefile.Vivado.inc
