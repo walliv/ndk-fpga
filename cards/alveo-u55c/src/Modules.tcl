@@ -17,8 +17,7 @@ lappend COMPONENTS [list "FPGA_COMMON"         $FPGA_COMMON_BASE         $ARCHGR
 lappend COMPONENTS [list "BOOT_CTRL"           $BOOT_CTRL_BASE           "FULL"   ]
 lappend COMPONENTS [list "AXI_QSPI_FLASH_CTRL" $AXI_QSPI_FLASH_CTRL_BASE "FULL"   ]
 
-# set IP_MODIFY_BASE   "$ENTITY_BASE"
-set ARCHGRP_ARR(IP_MODIFY_BASE)   $ENTITY_BASE
+set IP_MODIFY_BASE   "$ENTITY_BASE"
 
 lappend IP_COMPONENTS [list  "pcie"   "pcie4_uscale_plus"  "pcie4_uscale_plus" 0 1]
 if {$ARCHGRP_ARR(PCIE_ENDPOINTS) == 2 && $ARCHGRP_ARR(PCIE_ENDPOINT_MODE) == 1} {
@@ -32,7 +31,6 @@ if {$ARCHGRP_ARR(VIRTUAL_DEBUG_ENABLE)} {
 lappend IP_COMPONENTS [list  "mem" "hbm_ip"       "hbm_ip"          0     1]
 lappend IP_COMPONENTS [list  "mem" "axi_quad_spi" "axi_quad_spi_0"  0     1]
 
-# process_ip_scripts $IP_COMPONENTS $IP_MODIFY_BASE $ARCHGRP
-lappend MOD {*}[get_ip_mod_files $IP_COMPONENTS [array get ARCHGRP_ARR]]
+process_ip_scripts $IP_COMPONENTS $IP_MODIFY_BASE $ARCHGRP
 
 lappend MOD "$ENTITY_BASE/fpga.vhd"

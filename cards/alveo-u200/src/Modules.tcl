@@ -17,8 +17,7 @@ lappend COMPONENTS [list "BOOT_CTRL"           $BOOT_CTRL_BASE           "FULL" 
 lappend COMPONENTS [list "AXI_QSPI_FLASH_CTRL" $AXI_QSPI_FLASH_CTRL_BASE "FULL"   ]
 
 # IP components
-# set IP_MODIFY_BASE   "$ENTITY_BASE"
-set ARCHGRP_ARR(IP_MODIFY_BASE)   $ENTITY_BASE
+set IP_MODIFY_BASE   "$ENTITY_BASE"
 
 # modify == 1 -> provide '$IP_MODIFY_BASE/<script_name>/<script_name>.ip.tcl' file with IP modification commands
 #                         script_path     script_name   ip_comp_name         type  modify
@@ -29,8 +28,7 @@ if {$ARCHGRP_ARR(VIRTUAL_DEBUG_ENABLE)} {
     lappend IP_COMPONENTS [list  "misc"  "xvc_vsec"  "xvc_vsec"  0  1]
 }
 
-# process_ip_scripts $IP_COMPONENTS $IP_MODIFY_BASE $ARCHGRP
-lappend MOD {*}[get_ip_mod_files $IP_COMPONENTS [array get ARCHGRP_ARR]]
+process_ip_scripts $IP_COMPONENTS $IP_MODIFY_BASE $ARCHGRP
 
 # Top-level
 lappend MOD "$ENTITY_BASE/fpga.vhd"
