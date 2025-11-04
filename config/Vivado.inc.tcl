@@ -7,7 +7,11 @@
 # Including synthesis procedures (main build script passed to Vivado)
 # Project mode:     source Vivado.inc.tcl
 # Non-project mode: source Vivado_non_prj.inc.tcl
-source $OFM_PATH/build/Vivado_non_prj.inc.tcl
+if {$env(PRJ_MODE_EN)} {
+    source $OFM_PATH/build/Vivado.inc.tcl
+} else {
+    source $OFM_PATH/build/Vivado_non_prj.inc.tcl
+}
 
 set SYNTH_FLAGS(OUTPUT) $OUTPUT_NAME
 
