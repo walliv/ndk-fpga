@@ -227,18 +227,21 @@ class scoreboard #(
             logic [1-1:0] ln = 0;
 
             // This is strench
-            {fmt, pcie_type, tag_9, tc, tag_8, attr[2], ln, th, td, ep, attr[2-1:0], at, length} = tr_meta_dut.data[32-1 -: 32];
+            {fmt, pcie_type, tag_9, tc, tag_8, attr[2], ln, th, td, ep, attr[2-1:0], at, length}
+                = tr_meta_dut.data[32-1 -: 32];
             if (fmt[0] == 1'b0) begin
                 addr[64-1:32] = 0;
-                {requester_id, tag, lbe, fbe, addr[32-1:2], ph} = {tr_meta_dut.data[64-1 -: 32], tr_meta_dut.data[96-1 -: 32]};
+                {requester_id, tag, lbe, fbe, addr[32-1:2], ph}
+                    = {tr_meta_dut.data[64-1 -: 32], tr_meta_dut.data[96-1 -: 32]};
             end else begin
-                {requester_id, tag, lbe, fbe, addr, ph} = {tr_meta_dut.data[64-1 -: 32], tr_meta_dut.data[96-1 -: 32], tr_meta_dut.data[128-1 -: 32]};
+                {requester_id, tag, lbe, fbe, addr, ph}
+                    = {tr_meta_dut.data[64-1 -: 32], tr_meta_dut.data[96-1 -: 32], tr_meta_dut.data[128-1 -: 32]};
             end
 
             if ({fmt, pcie_type} != 8'b01100000 && {fmt, pcie_type} != 8'b01000000) begin
-                `uvm_error(this.get_full_name(), $sformatf("\nUnsupporte request\n\tfmt : 0x%h\n\ttype : 0x%h\n", fmt, pcie_type));
+                `uvm_error(this.get_full_name(),
+                           $sformatf("\nUnsupporte request\n\tfmt : 0x%h\n\ttype : 0x%h\n", fmt, pcie_type));
             end
-
 
             data = tr_dut.data;
 
@@ -255,7 +258,8 @@ class scoreboard #(
             logic [4-1:0]  rq_type;
             logic [32-1:0] hdr[4];
 
-            {ecrc, attr, tc, rq_id_enabled, cm_id, tag, requester_id, ep, rq_type, dword_count, addr[64-1:2], at} = {tr_dut.data[3], tr_dut.data[2], tr_dut.data[1], tr_dut.data[0]};
+            {ecrc, attr, tc, rq_id_enabled, cm_id, tag, requester_id, ep, rq_type, dword_count, addr[64-1:2], at}
+                = {tr_dut.data[3], tr_dut.data[2], tr_dut.data[1], tr_dut.data[0]};
             data = new[tr_dut.data.size() -4];
             for (int unsigned it = 0; it < tr_dut.data.size() -4; it++) begin
                 data[it] = tr_dut.data[it+4];
@@ -312,8 +316,12 @@ class scoreboard #(
 
             //Check pcie requiretments
             if (data.size() > MPS || (((addr & (PAGE_SIZE-1)) + data.size()) > PAGE_SIZE)) begin
-                `uvm_error(this.get_full_name(), $sformatf("\n\tPacket doesn't meet pcie requirements.\n\t\tPacket size %0d\n\t\tMaximum payload(%0d) exceeded %0d\n\t\tPage(%0d) boundary exceeded %0d addr 0x%h",
-                                        data.size(), MPS, data.size() > MPS, PAGE_SIZE, (((addr & (PAGE_SIZE-1)) + data.size()) > PAGE_SIZE), addr));
+                string err_msg = $sformatf("\n\tPacket doesn't meet pcie requirements.");
+                err_msg = {err_msg, $sformatf("\n\t\tPacket size %0d", data.size())};
+                err_msg = {err_msg, $sformatf("\n\t\tMaximum payload(%0d) exceeded %0d", MPS, data.size() > MPS)};
+                err_msg = {err_msg, $sformatf("\n\t\tPage(%0d) boundary exceeded %0d addr 0x%h", PAGE_SIZE,
+                                              (((addr & (PAGE_SIZE-1)) + data.size()) > PAGE_SIZE), addr)};
+                `uvm_error(this.get_full_name(), err_msg);
             end
         end
 
@@ -332,13 +340,16 @@ class scoreboard #(
             m_ptr_upd_model_out_fifo.get(ptr_upd_model_tr);
 
             m_ptr_upd_tr_compared++;
-            msg = $sformatf("\nPTR_UPD tr compared : %0d, PTR_UPD tr erroneous: %0d.", m_ptr_upd_tr_compared, m_ptr_upd_tr_errors);
+            msg = $sformatf("\nPTR_UPD tr compared : %0d, PTR_UPD tr erroneous: %0d.", m_ptr_upd_tr_compared,
+                            m_ptr_upd_tr_errors);
 
             if (pcie_compare(ptr_upd_dut_tr_data, ptr_upd_dut_tr_meta, ptr_upd_model_tr) == 0) begin
                 m_ptr_upd_tr_errors++;
 
-                msg = {msg, $sformatf("\nTransactions DO NOT match!\n\t====== DUT ======\n\tMETA: %s\n\tDATA: %s\n\n\t====== MODEL ======\n\t%s\n",
-                                        ptr_upd_dut_tr_meta.convert2string(), ptr_upd_dut_tr_data.convert2string(), ptr_upd_model_tr.convert2string())};
+                msg = {msg, $sformatf("\nTransactions DO NOT match!")};
+                msg = {msg, $sformatf("\n\t====== DUT ======\n\tMETA: %s\n\tDATA: %s\n",
+                                        ptr_upd_dut_tr_meta.convert2string(), ptr_upd_dut_tr_data.convert2string())};
+                msg = {msg, $sformatf("\n\t====== MODEL ======\n\t%s\n", ptr_upd_model_tr.convert2string())};
                 `uvm_error(this.get_full_name(), msg);
             end else begin
                 msg = {msg, $sformatf("\nReceived correct transaction: %s", ptr_upd_model_tr.convert2string())};

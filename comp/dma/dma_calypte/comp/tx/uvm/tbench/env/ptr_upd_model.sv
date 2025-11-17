@@ -89,7 +89,8 @@ class ptr_updater_model #(POINTER_WIDTH, CHANNELS, UPD_THRESHOLD) extends uvm_co
                 msg = {msg, $sformatf("\tChannel:      %0d\n", chan_idx)};
                 msg = {msg, $sformatf("\tHHP:          %0d (%0x)\n", hhp_int, hhp_int)};
                 msg = {msg, $sformatf("\tHDP:          %0d (%0x)\n", hdp_int, hdp_int)};
-                msg = {msg, $sformatf("\tInternal HDP: %0d (%0x)\n", m_chan_info[chan_idx].hdp, m_chan_info[chan_idx].hdp)};
+                msg = {msg, $sformatf("\tInternal HDP: %0d (%0x)\n", m_chan_info[chan_idx].hdp,
+                                      m_chan_info[chan_idx].hdp)};
 
                 ptr_distance = hdp_int - m_chan_info[chan_idx].hdp;
                 msg = {msg, $sformatf("\tPtr distance: %0d\n", ptr_distance)};
@@ -127,7 +128,11 @@ class ptr_updater_model #(POINTER_WIDTH, CHANNELS, UPD_THRESHOLD) extends uvm_co
                     end
                     out_tr.pcie_type = 0;
 
-                    assert(upd_buff_addr_int[2-1:0] == 0) else `uvm_fatal(this.get_full_name(), $sformatf("\n\tThis model doesnt support counting fbe. lower 2 bits of addres heve to zero"));
+                    assert(upd_buff_addr_int[2-1:0] == 0) else begin
+                        `uvm_fatal(this.get_full_name(),
+                                   $sformatf({"\n\tThis model doesnt support counting fbe. ",
+                                              "Lower 2 bits of addres have to be zero"}));
+                    end
 
                     out_tr.fbe    = 4'b1111;
                     out_tr.lbe    = 4'b0011;
@@ -177,7 +182,11 @@ class ptr_updater_model #(POINTER_WIDTH, CHANNELS, UPD_THRESHOLD) extends uvm_co
                 end
                 out_tr.pcie_type = 0;
 
-                assert(upd_buff_addr_int[2-1:0] == 0) else `uvm_fatal(this.get_full_name(), $sformatf("\n\tThis model doesnt support counting fbe. lower 2 bits of addres heve to zero"));
+                assert(upd_buff_addr_int[2-1:0] == 0) else begin
+                    `uvm_fatal(this.get_full_name(),
+                               $sformatf({"\n\tThis model doesnt support counting fbe. ",
+                                          "Lower 2 bits of addres have to be zero"}));
+                end
 
                 out_tr.fbe    = 4'b1111;
                 out_tr.lbe    = 4'b0011;

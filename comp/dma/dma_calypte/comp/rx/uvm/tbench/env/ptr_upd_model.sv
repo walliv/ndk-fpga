@@ -65,7 +65,10 @@ class ptr_updater_model #(POINTER_WIDTH, SW_ADDR_WIDTH) extends uvm_component;
             end
             out_tr.pcie_type = 0;
 
-            assert(upd_buff_addr_int[2-1:0] == 0) else `uvm_fatal(this.get_full_name(), $sformatf("\n\tThis model doesnt support counting fbe. lower 2 bits of addres heve to zero"));
+            assert(upd_buff_addr_int[2-1:0] == 0) else begin
+                `uvm_fatal(this.get_full_name(), $sformatf({"\n\tThis model doesn't support counting FBE. ",
+                                                            "Lower 2 bits of the addres have to be zero"}));
+            end
 
             out_tr.fbe    = 4'b1111;
             out_tr.lbe    = 4'b0011;

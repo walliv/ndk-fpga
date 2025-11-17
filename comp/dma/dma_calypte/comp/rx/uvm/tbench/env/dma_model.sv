@@ -164,7 +164,8 @@ class dma_model #(ITEM_WIDTH, CHANNELS, PKT_SIZE_MAX) extends uvm_component;
     endfunction
 
 
-    function dma_model_packet get_pcie_transaction(logic [64-1:0] addr, int unsigned packet_byte_size, logic [32-1:0] data []);
+    function dma_model_packet get_pcie_transaction(logic [64-1:0] addr, int unsigned packet_byte_size,
+                                                   logic [32-1:0] data []);
         dma_model_packet rq;
 
         rq = dma_model_packet::type_id::create(this.get_full_name);
@@ -189,7 +190,11 @@ class dma_model #(ITEM_WIDTH, CHANNELS, PKT_SIZE_MAX) extends uvm_component;
         end
         rq.pcie_type = 0; //memory write request
 
-        assert(addr[2-1:0] == 0) else `uvm_fatal(this.get_full_name(), $sformatf("\n\tThis model doesnt support counting fbe. lower 2 bits of addres heve to zero"));
+        assert(addr[2-1:0] == 0) else begin
+            `uvm_fatal(this.get_full_name(),
+                       $sformatf("\n\tThis model doesnt support counting fbe. lower 2 bits of addres heve to zero"));
+        end
+
         // FBE
         rq.fbe = '1;
         // LBE
@@ -214,7 +219,8 @@ class dma_model #(ITEM_WIDTH, CHANNELS, PKT_SIZE_MAX) extends uvm_component;
         return rq;
     endfunction
 
-    function void get_dma_header(logic [16-1:0] frame_pointer, logic[16-1:0] frame_length, logic [24-1:0] meta, bit valid_bit, bit p2p_en, output logic[32-1 : 0] header[2]);
+    function void get_dma_header(logic [16-1:0] frame_pointer, logic[16-1:0] frame_length, logic [24-1:0] meta,
+                                 bit            valid_bit, bit p2p_en, output logic[32-1 : 0] header[2]);
         logic [64-1:0] out_hdr;
 
         out_hdr = {meta, 6'b0, p2p_en, valid_bit, frame_pointer, frame_length};
@@ -222,7 +228,8 @@ class dma_model #(ITEM_WIDTH, CHANNELS, PKT_SIZE_MAX) extends uvm_component;
     endfunction
 
 
-    function void get_data_last(logic[32-1 : 0] packet[], int unsigned f_start, int unsigned f_end, output logic[32-1 : 0] out[]);
+    function void get_data_last(logic [32-1 : 0]       packet[], int unsigned f_start, int unsigned f_end,
+                                output logic [32-1 : 0] out[]);
         out = new [f_end - f_start];
         for (int unsigned it = 0; it < f_end - f_start; it++) begin
             out[it] = packet[f_start + it];
@@ -255,7 +262,8 @@ class dma_model #(ITEM_WIDTH, CHANNELS, PKT_SIZE_MAX) extends uvm_component;
             addr = m_regmodel.channel[channel].data_base.get() + (m_data[channel].data_ptr*BLOCK_SIZE_BYTES);
             m_data[channel].data_ptr = (m_data[channel].data_ptr + 1) & m_regmodel.channel[channel].data_mask.get();
 
-            packet_output = get_pcie_transaction(addr, BLOCK_SIZE_BYTES, pcie_packet[it*BLOCK_SIZE_DWS +: BLOCK_SIZE_DWS]);
+            packet_output = get_pcie_transaction(addr, BLOCK_SIZE_BYTES,
+                                                 pcie_packet[it*BLOCK_SIZE_DWS +: BLOCK_SIZE_DWS]);
             packet_output.packet_num   = m_pkt_cntr_total_chan[channel];
             packet_output.data_packet  = 1;
             packet_output.channel      = channel;
@@ -325,7 +333,8 @@ class dma_model #(ITEM_WIDTH, CHANNELS, PKT_SIZE_MAX) extends uvm_component;
         m_pkt_disc_mvb_subs = dma_model_accept#(CHANNELS)::type_id::create("m_pkt_disc_mvb_subs", this);
 
         m_probe_discard = disc_probe_cbs::type_id::create("m_probe_discard", this);
-        uvm_probe::pool::get_global_pool().get({ "probe_event_component_", "testbench.DUT_U.VHDL_DUT_U", ".probe_discard" }).add_callback(m_probe_discard);
+        uvm_probe::pool::get_global_pool().get(
+            {"probe_event_component_", "testbench.dut_i.VHDL_DUT_U", ".probe_discard" }).add_callback(m_probe_discard);
     endfunction
 
     task run_phase(uvm_phase phase);
@@ -360,12 +369,14 @@ class dma_model #(ITEM_WIDTH, CHANNELS, PKT_SIZE_MAX) extends uvm_component;
             if (pkt_drop) begin
                 m_pkt_disc_cntr[info.channel]++;
                 m_bytes_disc_cntr[info.channel] += tr.data.size();
-                 msg = $sformatf("\n\t\nPacket Dropped:\n RX CHANNEL: %0d\n META: %h\n PACKET SIZE: %0d\n%s", info.channel, info.meta, info.packet_size, tr.convert2string());
+                 msg = $sformatf("\n\t\nPacket Dropped:\n RX CHANNEL: %0d\n META: %h\n PACKET SIZE: %0d\n%s",
+                                 info.channel, info.meta, info.packet_size, tr.convert2string());
                 `uvm_info(this.get_full_name(), msg,  UVM_MEDIUM);
             end else begin
                 m_pkt_sent_cntr[info.channel]++;
                 m_bytes_sent_cntr[info.channel] += tr.data.size();
-                msg = $sformatf("\n\t\nPacket Accepted:\n RX CHANNEL: %0d\n META: %h\n PACKET SIZE: %0d\n%s", info.channel, info.meta, info.packet_size, tr.convert2string());
+                msg = $sformatf("\n\t\nPacket Accepted:\n RX CHANNEL: %0d\n META: %h\n PACKET SIZE: %0d\n%s",
+                                info.channel, info.meta, info.packet_size, tr.convert2string());
                 `uvm_info(this.get_full_name(), msg,  UVM_MEDIUM);
                 packet_send(tr.data, info.input_time, info.channel, info.meta);
             end
