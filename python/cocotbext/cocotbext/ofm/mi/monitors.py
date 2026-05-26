@@ -55,8 +55,7 @@ class MIMonitor(BusMonitor):
             if self.bus.rd.value == 1 and self.bus.ardy.value == 1:
                 addr_bytes = get_signal_value_in_bytes(self.bus.addr)
                 be = self.bus.be.value
-                be.big_endian = False
-                be_int = int.from_bytes(be.buff, 'little')
+                be_int = be.to_unsigned()
 
                 recv_trans = MiTransaction()
                 recv_trans.trans_type = MiTransactionType.Request
@@ -87,14 +86,9 @@ class MIMonitor(BusMonitor):
                 addr_bytes = get_signal_value_in_bytes(self.bus.addr)
 
                 be = self.bus.be.value
-                be.big_endian = False
-                be_int = int.from_bytes(be.buff, 'little')
+                be_int = be.to_unsigned()
 
-                dwr_recv = b''
-                be_list = [*be]
-                first_be = be_list.index(1)
-                last_be = (be_list+[0]).index(0, first_be)  # ensures there is at least one zero
-                dwr_recv = dwr_bytes[first_be:last_be]
+                dwr_recv = filter_bytes_by_bitmask(dwr_bytes, be_int)
 
                 self.log.debug(f"ITEM {self._item_cnt}")
                 self.log.debug(f"ADDR {addr_bytes.hex()}")

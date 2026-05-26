@@ -26,12 +26,19 @@ def random_bytes(bytes_count: int, generator):
     return bytes(next(generator) for i in range(bytes_count))
 
 
-def random_packets(min_size=4, max_size=64, count=10):
+def random_packets(min_size=4, max_size=64, count=10, step_size=1):
     """
     Generate N random packets with random length of bytes in min/max range
     """
+    if step_size < 1:
+        raise ValueError(f"Step size (currently {step_size}) has to be greater than 1")
+
+    if step_size > 1:
+        if min_size % step_size != 0:
+            raise ValueError(f"Minimal packet size (currently {min_size}) has to be a multiple of step_size (currently {step_size})")
+
     for i in range(count):
-        yield random_bytes(random.randint(min_size, max_size), random_byte())
+        yield random_bytes(random.randrange(min_size, max_size+1, step_size), random_byte())
 
 
 def random_integers(mini=0, maxi=100, count=10):

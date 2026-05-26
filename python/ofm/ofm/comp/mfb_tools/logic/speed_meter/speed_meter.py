@@ -28,6 +28,7 @@ class SpeedMeter(nfb.BaseComp):
     _REG_SOFS   = 0x10
     _REG_EOFS   = 0x14
     _REG_FREQ   = 0x18
+    _REG_BYTES_HIGH = 0x1C
 
     # STATUS REGISTER FIELDS
     _SR_DONE_FLAG = 0x00
@@ -72,7 +73,9 @@ class SpeedMeter(nfb.BaseComp):
     @property
     def items(self) -> int:
         """Read the number of accumulated bytes."""
-        return self._comp.read32(self._REG_BYTES)
+        bytes_low = self._comp.read32(self._REG_BYTES)
+        bytes_high = self._comp.read32(self._REG_BYTES_HIGH)
+        return (bytes_high << 32) | bytes_low
 
     @property
     def ticks(self) -> int:

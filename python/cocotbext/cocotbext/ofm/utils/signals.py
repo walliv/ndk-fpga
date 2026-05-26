@@ -4,7 +4,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-from cocotb.binary import BinaryValue
+from cocotb.types import LogicArray
 from typing import Optional, Any
 from cocotb.triggers import RisingEdge, FallingEdge
 from cocotb.clock import Clock
@@ -38,9 +38,8 @@ def get_signal_value_in_bytes(signal, big_endian: bool = False) -> bytes:
         Signal value in bytes.
     """
     sig_val = signal.value
-    sig_val.big_endian = big_endian
 
-    return sig_val.buff
+    return sig_val.to_bytes(byteorder='big' if big_endian else 'little')
 
 
 def filter_bytes_by_bitmask(data: bytes, byte_enable: int) -> bytes:
@@ -66,7 +65,7 @@ def filter_bytes_by_bitmask(data: bytes, byte_enable: int) -> bytes:
     return bytes([x for i, x in enumerate(data) if (1 << i) & byte_enable])
 
 
-def align_request(bus_width: int, addr: int, data_len: int, *, byte_enable: Optional[BinaryValue] = None) -> (int, int, int, Optional[BinaryValue]):
+def align_request(bus_width: int, addr: int, data_len: int, *, byte_enable: Optional[LogicArray] = None) -> (int, int, int, Optional[LogicArray]):
     """
     Aligns address and byte enable of a continuous request based on the bus width.
 
@@ -86,13 +85,13 @@ def align_request(bus_width: int, addr: int, data_len: int, *, byte_enable: Opti
     start_offset = addr % bus_width
     end_offset = -(addr + data_len) % bus_width
 
-    byte_enable = BinaryValue(("0" * start_offset) + byte_enable.binstr + ("0" * end_offset), bigEndian=False) if byte_enable is not None else None
+    byte_enable = LogicArray(("0" * end_offset) + str(byte_enable) + ("0" * start_offset)) if byte_enable is not None else None
     addr = addr - start_offset
 
     return start_offset, end_offset, addr, byte_enable
 
 
-def align_write_request(bus_width: int, addr: int, data: bytes, *, byte_enable: Optional[BinaryValue] = None) -> (int, int, int, int, Optional[BinaryValue]):
+def align_write_request(bus_width: int, addr: int, data: bytes, *, byte_enable: Optional[LogicArray] = None) -> (int, int, int, int, Optional[LogicArray]):
     """
     Aligns data, address and byte enable of a continuous write request based on the bus width.
 
@@ -116,7 +115,7 @@ def align_write_request(bus_width: int, addr: int, data: bytes, *, byte_enable: 
     return start_offset, end_offset, addr, data, byte_enable
 
 
-def align_read_request(bus_width: int, addr: int, byte_count: int, *, byte_enable: Optional[BinaryValue] = None) -> (int, int, int, int, Optional[BinaryValue]):
+def align_read_request(bus_width: int, addr: int, byte_count: int, *, byte_enable: Optional[LogicArray] = None) -> (int, int, int, int, Optional[LogicArray]):
     """
     Aligns address and byte enable of a continuous read request based on the bus width.
 

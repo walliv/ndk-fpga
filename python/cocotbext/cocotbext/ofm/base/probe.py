@@ -5,8 +5,9 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import cocotb
+import logging
+
 from cocotb.triggers import RisingEdge
-from cocotb.log import SimLog
 from cocotb.utils import get_sim_time
 from cocotb_bus.drivers import BusDriver
 from cocotb_bus.monitors import BusMonitor
@@ -64,12 +65,12 @@ class Probe(ABC):
         self._name = f"cocotb.{name}" if name is not None else f"cocotb.probe.{self.__class__.__name__}"
 
         if not hasattr(self, "log"):
-            self.log = SimLog(self._name)
+            self.log = logging.getLogger(self._name)
 
         if callback is not None:
             self.add_callback(callback)
 
-        self._thread = cocotb.scheduler.add(self._start_probe())
+        self._thread = cocotb.start_soon(self._start_probe())
 
     @abstractmethod
     async def _start_probe(self) -> None:
@@ -126,7 +127,7 @@ class Probe(ABC):
     def _get_step_units(self) -> str:
         """Get units of step."""
         for unit in ["fs", "ps", "ns", "us", "ms", "sec"]:
-            if get_sim_time(units="step") // int(get_sim_time(units=unit)) == 1:
+            if get_sim_time(unit="step") // int(get_sim_time(unit=unit)) == 1:
                 return unit
 
     def _format_units_for_get_sim_time(self, time_units: str) -> str:
@@ -165,7 +166,7 @@ class Probe(ABC):
                 break
 
         if not defaults:
-            if get_sim_time(units=gst_units) >= start_time:
+            if get_sim_time(unit=gst_units) >= start_time:
                 if stop_time is None:
                     return True
 

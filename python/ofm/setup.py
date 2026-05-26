@@ -17,7 +17,8 @@ submodules = {
     "ofm.comp.mfb_tools.flow.timestamp_limiter":        f"{src}/mfb_tools/flow/timestamp_limiter/sw",
     "ofm.comp.mfb_tools.logic.speed_meter":             f"{src}/mfb_tools/logic/speed_meter/sw",
     "ofm.comp.mvb_tools.storage.mvb_hash_table_simple": f"{src}/mvb_tools/storage/mvb_hash_table_simple",
-    "ofm.comp.base.hash.chaskey":                       f"{src}/base/hash/chaskey"
+    "ofm.comp.base.hash.chaskey":                       f"{src}/base/hash/chaskey",
+    "ofm.comp.dma.iuventus_reg_access":                 f"{src}/dma/iuventus_reg_access"
 }
 
 setup(

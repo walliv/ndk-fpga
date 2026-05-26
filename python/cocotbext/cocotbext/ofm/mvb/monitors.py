@@ -4,7 +4,7 @@
 #            Daniel Kondys <kondys@cesnet.cz>
 
 
-from cocotb.handle import ModifiableObject
+from cocotb.handle import LogicArrayObject
 from cocotb_bus.monitors import BusMonitor
 from cocotb.triggers import RisingEdge
 
@@ -34,7 +34,7 @@ class MVBMonitor(BusMonitor):
         self.__os = [s for s in self._optional_signals if hasattr(self.bus, s)]
         self.__item_cnt = 0
         self.__items = len(self.bus.vld)
-        self.__bus_isarray = not isinstance(getattr(self.bus, self.__os[0]), ModifiableObject)
+        self.__bus_isarray = not isinstance(getattr(self.bus, self.__os[0]), LogicArrayObject)
         self.__item_widths = self._get_item_widths()
         self.__item_width = sum(self.__item_widths.values())
         self.__tr_type = tr_type
