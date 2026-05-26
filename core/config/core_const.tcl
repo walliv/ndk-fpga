@@ -20,7 +20,7 @@ set DMA_RX_FRAME_SIZE_MIN 60
 set DMA_TX_FRAME_SIZE_MIN 60
 
 set PCIE_LANES 16
-if {$PCIE_ENDPOINT_MODE == 2} {
+if {$PCIE_ENDPOINT_MODE == 2 || $PCIE_ENDPOINT_MODE == 3} {
     set PCIE_LANES 8
 }
 
@@ -46,6 +46,18 @@ if {$DMA_TYPE == 4} {
 
 if {!$env(NET_MOD_ENABLE)} {
     set NET_MOD_ARCH "EMPTY"
+}
+
+if {$DMA_TYPE == 5} {
+    set NET_MOD_ARCH "EMPTY"
+    set APP_CORE_ENABLE false
+    set TSU_ENABLE false
+    set DMA_RX_CHANNELS 0
+    set DMA_TX_CHANNELS 0
+    set DMA_TX_CHANNELS 0
+    set MEM_PORTS 0
+    set HBM_PORTS 0
+    set DMA_GEN_LOOP_EN false
 }
 
 # ------------------------------------------------------------------------------
@@ -83,6 +95,18 @@ if { $DMA_TYPE == 4 } {
     if { $PCIE_ENDPOINT_MODE == 2} {
         error "Incompatible DMA_TYPE: $DMA_TYPE with chosen PCIE_ENDPOINT_MODE: $PCIE_ENDPOINT_MODE\
                 and PCIE_LANES: $PCIE_LANES! Try to use PCIE_CONF=1xGen4x16 or PCIE_CONF=1xGen3x16."
+    }
+} elseif { $DMA_TYPE == 5 } {
+    if {
+        !(
+          ($PCIE_GEN == 3 && $PCIE_ENDPOINTS == 1 && $PCIE_ENDPOINT_MODE == 0) ||
+          ($PCIE_GEN == 4 && $PCIE_ENDPOINTS == 1 && $PCIE_ENDPOINT_MODE == 0) ||
+          ($PCIE_GEN == 4 && $PCIE_ENDPOINTS == 1 && $PCIE_ENDPOINT_MODE == 2) ||
+          ($PCIE_GEN == 4 && $PCIE_ENDPOINTS == 1 && $PCIE_ENDPOINT_MODE == 3)
+        )
+    } {
+        error "Incompatible DMA_TYPE: $DMA_TYPE with chosen PCIE_ENDPOINTS: $PCIE_ENDPOINTS\
+                and PCIE_ENDPOINT_MODE: $PCIE_ENDPOINT_MODE!"
     }
 }
 

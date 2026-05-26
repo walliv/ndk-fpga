@@ -316,6 +316,12 @@ package pcie_hdr_fields_pkg is
     subtype I_RQ_HDRL_ADDR_HIGH   is natural range I_RQ_HDRL_ADDR_HIGH_O    + I_RQ_HDRL_ADDR_HIGH_W    - 1 downto I_RQ_HDRL_ADDR_HIGH_O;
     subtype I_RQ_HDRL_RSV5        is natural range I_RQ_HDRL_RSV5_O         + I_RQ_HDRL_RSV5_W         - 1 downto I_RQ_HDRL_RSV5_O;
     subtype I_RQ_HDRL_ADDR_LOW    is natural range I_RQ_HDRL_ADDR_LOW_O     + I_RQ_HDRL_ADDR_LOW_W     - 1 downto I_RQ_HDRL_ADDR_LOW_O;
+
+    -- =============================================================================================
+    -- Miscelaneous
+    -- =============================================================================================
+    constant A_CQ_HDR_BYTE_CNT_W : natural := A_CQ_HDR_DWORD_CNT_W + 2;
+    
 end package;
 
 package body pcie_hdr_fields_pkg is
