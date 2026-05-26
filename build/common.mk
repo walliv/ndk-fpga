@@ -61,9 +61,9 @@ simulation: $(MOD)
 
 .PHONY: cocotb
 COCOTB_SIM_SCRIPT ?= $(OFM_PATH)/build/scripts/cocotb/cocotb.fdo
-COCOTB_MODULE ?= cocotb_test
+COCOTB_TEST_MODULES ?= cocotb_test
 cocotb: $(MOD)
-	$(NETCOPE_ENV) SYNTHFILES=$(SYNTHFILES) COCOTB_MODULE=$(COCOTB_MODULE) vsim -64 -do $(COCOTB_SIM_SCRIPT) $(SIM_FLAGS)
+	$(NETCOPE_ENV) SYNTHFILES=$(SYNTHFILES) COCOTB_TEST_MODULES=$(COCOTB_TEST_MODULES) vsim -64 -do $(COCOTB_SIM_SCRIPT) $(SIM_FLAGS)
 
 # Automated documentation script
 vhdocl:
@@ -71,13 +71,25 @@ vhdocl:
 	for m in $(MOD); do echo $$m | grep .vhd | sed 's/^/input\ /' >> vhdocl.conf; done
 	vhdocl -f vhdocl.conf
 
+COCOTB_OPT_ARGS:=
+ifneq ($(RANDOM_SEED),)
+COCOTB_OPT_ARGS+=COCOTB_RANDOM_SEED=$(RANDOM_SEED)
+endif
+
+DEBUG_ENABLE?=false
+ifeq ($(DEBUG_ENABLE),true)
+NVC_ELAB_DEBUG_FLAGS=--no-collapse
+NVC_RUN_DEBUG_FLAGS=-w --dump-arrays
+endif
+COCOTB_OPT_ARGS+=DEBUG_ENABLE=$(DEBUG_ENABLE)
+
 GHDL_WORK_DIR?=work_ghdl
 ghdl-sim: $(MOD)
 	@mkdir -p $(GHDL_WORK_DIR)
 	$(eval TOP_LEVEL_ENT_LC:=$(shell echo $(TOP_LEVEL_ENT) | tr '[:upper:]' '[:lower:]'))
 	ghdl -i --workdir=$(GHDL_WORK_DIR) $(addprefix -P,$(GHDL_LIBS)) --std=08 -frelaxed --ieee=synopsys $(filter %.vhd,$(MOD))
 	ghdl -m --workdir=$(GHDL_WORK_DIR) $(addprefix -P,$(GHDL_LIBS)) --std=08 -frelaxed --ieee=synopsys --warn-no-hide $(TOP_LEVEL_ENT_LC)
-	MODULE=$(COCOTB_MODULE) TOPLEVEL=$(TOP_LEVEL_ENT_LC) TOPLEVEL_LANG=vhdl $(NETCOPE_ENV) COCOTB_RESOLVE_X=ZEROS \
+	MODULE=$(COCOTB_TEST_MODULES) TOPLEVEL=$(TOP_LEVEL_ENT_LC) TOPLEVEL_LANG=vhdl $(NETCOPE_ENV) COCOTB_RESOLVE_X=ZEROS $(COCOTB_OPT_ARGS) PYGPI_PYTHON_BIN=$(shell cocotb-config --python-bin) \
 	ghdl -r -v --workdir=$(GHDL_WORK_DIR) -P$(GHDL_WORK_DIR) $(addprefix -P,$(GHDL_LIBS)) $(TOP_LEVEL_ENT_LC) --vpi=$(shell cocotb-config --lib-name-path vpi ghdl) --asserts=disable --vcd=$(OUTPUT_NAME).vcd
 
 NVC_LOAD ?=
@@ -86,10 +98,10 @@ nvc-sim: nvc
 
 nvc: $(MOD)
 	$(eval TOP_LEVEL_ENT_LC:=$(shell echo $(TOP_LEVEL_ENT) | tr '[:upper:]' '[:lower:]'))
-	@nvc --work=nvcwork -H 1G -M 4G --std=2008 -a --relaxed $(filter %.vhd,$(MOD))
-	@nvc --work=nvcwork -H 1G -M 4G -e --no-collapse $(TOP_LEVEL_ENT_LC)
-	@MODULE=$(COCOTB_MODULE) TOPLEVEL=$(TOP_LEVEL_ENT_LC) TOPLEVEL_LANG=vhdl $(NETCOPE_ENV) COCOTB_RESOLVE_X=ZEROS \
-	nvc --work=nvcwork -H 1G -M 4G -rw $(TOP_LEVEL_ENT_LC) --dump-arrays -g --ieee-warnings=off $(NVC_LOAD)
+	nvc --work=nvcwork -H 1G -M 4G --std=2008 -a --relaxed $(filter %.vhd,$(MOD))
+	nvc --work=nvcwork -H 1G -M 4G -e $(NVC_ELAB_DEBUG_FLAGS) $(TOP_LEVEL_ENT_LC)
+	COCOTB_TEST_MODULES=$(COCOTB_TEST_MODULES) TOPLEVEL=$(TOP_LEVEL_ENT_LC) TOPLEVEL_LANG=vhdl $(NETCOPE_ENV) $(COCOTB_OPT_ARGS) PYGPI_PYTHON_BIN=$(shell cocotb-config --python-bin) COCOTB_RESOLVE_X=ZEROS \
+	nvc --work=nvcwork -H 1G -M 4G -r $(TOP_LEVEL_ENT_LC) $(NVC_RUN_DEBUG_FLAGS) --ieee-warnings=off $(NVC_LOAD)
 
 else
 .PHONY: $(GEN_MK_NAME)

@@ -199,8 +199,8 @@ begin
     -- =========================================================================
 
     axi_spi_clk     <= misc_out(0); -- usr_x1 = 100MHz
-    boot_clk        <= misc_out(2); -- usr_x2 = 200MHz
-    boot_reset      <= misc_out(3);
+    boot_clk        <= misc_out(0); -- usr_x2 = 200MHz
+    boot_reset      <= misc_out(1);
 
     boot_ctrl_i : entity work.BOOT_CTRL
     generic map(
@@ -298,11 +298,11 @@ begin
     cm_i : entity work.FPGA_COMMON
     generic map (
         SYSCLK_PERIOD           => 6.4,
-        PLL_MULT_F              => 7.625,  -- creates slightly lower output frequency, should be 7.68
+        PLL_MULT_F              => 8.0,  -- creates slightly lower output frequency, should be 7.68
         PLL_MASTER_DIV          => 1,
-        PLL_OUT0_DIV_F          => 3.0,
+        PLL_OUT0_DIV_F          => 4.0,
         PLL_OUT1_DIV            => 4,
-        PLL_OUT2_DIV            => 6,
+        PLL_OUT2_DIV            => 5,
         PLL_OUT3_DIV            => 12,
 
         USE_PCIE_CLK            => false,

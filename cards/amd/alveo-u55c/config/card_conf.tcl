@@ -41,6 +41,7 @@ set ETH_PORT_LANES(1) 4
 # 1x PCIe Gen3 x16  -- PCIE_ENDPOINT_MODE=0 (Note: default configuration)
 # 1x PCIe Gen3 x8LL -- PCIE_ENDPOINT_MODE=2 (Low-latency configuration)
 # 1x PCIe Gen4 x8x8 -- PCIE_ENDPOINT_MODE=1
+# 1x PCIe Gen4 x8   -- PCIE_ENDPOINT_MODE=3 (Note: default configuration)
 # ------------------------------------------------------------------------------
 
 # Set default PCIe configuration

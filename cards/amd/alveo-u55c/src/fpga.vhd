@@ -64,7 +64,6 @@ port (
     QSFP1_TX_N          : out   std_logic_vector(3 downto 0);
 
     -- QSFP leds (one bit per QSFP port)
-    QSFP_ACT_LED_G      : out   std_logic_vector(1 downto 0);
     QSFP_STA_LED_G      : out   std_logic_vector(1 downto 0);
     QSFP_STA_LED_Y      : out   std_logic_vector(1 downto 0);
 
@@ -1320,9 +1319,6 @@ begin
         QSFP_STA_LED_Y <= qsfp_sta_led_y_int;
         QSFP_STA_LED_G <= qsfp_sta_led_g_int;
     end generate;
-
-    -- Tied to 0 to ensure that these LEDs are turned off
-    QSFP_ACT_LED_G <= (others => '0');
 
     -- =========================================================================
     -- BOOT AND FLASH

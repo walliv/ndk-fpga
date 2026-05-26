@@ -1,9 +1,0 @@
-[submodule "extra/dma-medusa"]
-	path = extra/dma-medusa
-	url = ../ndk-mod-dma-medusa.git
-[submodule "extra/nfb-200g2ql"]
-	path = extra/nfb-200g2ql
-	url = ../ndk-card-nfb-200g2ql.git
-[submodule "extra/ip-3rdparty"]
-	path = extra/ip-3rdparty
-	url = ../ip-3rdparty.git
