@@ -76,16 +76,22 @@ set config_list [list \
     CONFIG.pf0_msi_enabled {false} \
 ]
 
-if {$PARAMS(PCIE_ENDPOINT_MODE) == 2} {
-    # x8_low_latency properties
+if {$PARAMS(PCIE_GEN) == 3} {
+    lappend config_list CONFIG.PL_LINK_CAP_MAX_LINK_SPEED {8.0_GT/s}
+} else {
+    lappend config_list CONFIG.PL_LINK_CAP_MAX_LINK_SPEED {16.0_GT/s}
+}
+
+if {$PARAMS(PCIE_ENDPOINT_MODE) == 0} {
     lappend config_list \
         CONFIG.pcie_blk_locn {X1Y1} \
-        CONFIG.PL_LINK_CAP_MAX_LINK_SPEED {8.0_GT/s} \
-        CONFIG.PL_LINK_CAP_MAX_LINK_WIDTH {X8} \
-        CONFIG.axisten_if_width {256_bit} \
-        CONFIG.coreclk_freq {500}
-} else {
-    if {$PARAMS(PCIE_ENDPOINT_MODE) == 1} {
+        CONFIG.PL_LINK_CAP_MAX_LINK_WIDTH {X16} \
+        CONFIG.AXISTEN_IF_EXT_512_CQ_STRADDLE {true} \
+        CONFIG.AXISTEN_IF_EXT_512_RC_4TLP_STRADDLE {true} \
+        CONFIG.AXISTEN_IF_EXT_512_RQ_STRADDLE {true} \
+        CONFIG.axisten_if_width {512_bit}
+
+} elseif {$PARAMS(PCIE_ENDPOINT_MODE) == 1} {
         if {$endpoint_idx == 0} {
             lappend config_list CONFIG.pcie_blk_locn {X1Y1}
         } else {
@@ -93,21 +99,57 @@ if {$PARAMS(PCIE_ENDPOINT_MODE) == 2} {
         }
 
         lappend config_list \
-            CONFIG.PL_LINK_CAP_MAX_LINK_SPEED {16.0_GT/s} \
-            CONFIG.PL_LINK_CAP_MAX_LINK_WIDTH {X8}
+            CONFIG.PL_LINK_CAP_MAX_LINK_WIDTH {X8} \
+            CONFIG.AXISTEN_IF_EXT_512_CQ_STRADDLE {true} \
+            CONFIG.AXISTEN_IF_EXT_512_RC_4TLP_STRADDLE {true} \
+            CONFIG.AXISTEN_IF_EXT_512_RQ_STRADDLE {true} \
+            CONFIG.axisten_if_width {512_bit}
+
+} elseif {$PARAMS(PCIE_ENDPOINT_MODE) == 2} {
+    lappend config_list \
+        CONFIG.pcie_blk_locn {X1Y1} \
+        CONFIG.PL_LINK_CAP_MAX_LINK_WIDTH {X8}
+
+    if {$PARAMS(PCIE_GEN) == 3} {
+        lappend config_list \
+            CONFIG.axisten_if_width {256_bit} \
+            CONFIG.coreclk_freq {500}
+
     } else {
         lappend config_list \
-            CONFIG.pcie_blk_locn {X1Y1} \
-            CONFIG.PL_LINK_CAP_MAX_LINK_SPEED {8.0_GT/s} \
-            CONFIG.PL_LINK_CAP_MAX_LINK_WIDTH {X16}
+            CONFIG.AXISTEN_IF_EXT_512_CQ_STRADDLE {true} \
+            CONFIG.AXISTEN_IF_EXT_512_RC_4TLP_STRADDLE {true} \
+            CONFIG.AXISTEN_IF_EXT_512_RQ_STRADDLE {true} \
+            CONFIG.axisten_if_width {512_bit}
     }
+}
 
-    # x16 properties
+if {$PARAMS(DMA_TYPE) == 5} {
     lappend config_list \
-        CONFIG.AXISTEN_IF_EXT_512_CQ_STRADDLE {false} \
-        CONFIG.AXISTEN_IF_EXT_512_RC_4TLP_STRADDLE {true} \
-        CONFIG.AXISTEN_IF_EXT_512_RQ_STRADDLE {true} \
-        CONFIG.axisten_if_width {512_bit}
+        CONFIG.TL_PF_ENABLE_REG {2} \
+        CONFIG.copy_pf0 {false} \
+        CONFIG.PF1_DEVICE_ID {c020} \
+        CONFIG.PF1_SUBSYSTEM_ID {c020} \
+        CONFIG.pf1_bar0_size {128} \
+        CONFIG.pf1_bar0_64bit {false} \
+        CONFIG.pf1_bar0_scale {Kilobytes} \
+        CONFIG.pf1_bar1_enabled {true} \
+        CONFIG.pf1_bar1_size {128} \
+        CONFIG.pf1_bar1_64bit {false} \
+        CONFIG.pf1_bar1_scale {Kilobytes} \
+        CONFIG.pf1_bar2_enabled {true} \
+        CONFIG.pf1_bar2_size {128} \
+        CONFIG.pf1_bar2_64bit {false} \
+        CONFIG.pf1_bar2_scale {Kilobytes} \
+        CONFIG.pf1_bar3_enabled {true} \
+        CONFIG.pf1_bar3_size {128} \
+        CONFIG.pf1_bar3_64bit {false} \
+        CONFIG.pf1_bar3_scale {Kilobytes} \
+        CONFIG.pf1_base_class_menu {Memory_controller} \
+        CONFIG.pf1_class_code_interface {00} \
+        CONFIG.pf1_sub_class_interface_menu {Other_memory_controller} \
+        CONFIG.pf1_msi_enabled {false} \
+        CONFIG.pf1_msix_enabled {false}
 }
 
 # set PCIE IDs, must be in last set_property
