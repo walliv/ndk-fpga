@@ -978,7 +978,7 @@ begin
         PCIE_CTRL_DBG_ENABLE => PCIE_CTRL_DEBUG_ENABLE,
 
         PTC_DISABLE         => not PTC_ENABLE,
-        DMA_BAR_ENABLE      => (DMA_TYPE = 4),
+        DMA_BAR_ENABLE      => (DMA_TYPE = 4 or DMA_TYPE = 5),
         XVC_ENABLE          => VIRTUAL_DEBUG_ENABLE,
         CARD_ID_WIDTH       => FPGA_ID_WIDTH,
         MISC_TOP2PCIE_WIDTH => MISC_TOP2PCIE_WIDTH,

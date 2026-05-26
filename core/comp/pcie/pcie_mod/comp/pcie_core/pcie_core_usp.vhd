@@ -406,8 +406,8 @@ architecture USP of PCIE_CORE is
 
 begin
 
-    assert (ENDPOINT_MODE = 0 or ENDPOINT_MODE = 1 or ENDPOINT_MODE = 2)
-        report "Xilinx USP PCIe Wrapper: Only values 0, 1 and 2 are supported for parameter ENDPOINT_MODE!"
+    assert (ENDPOINT_MODE = 0 or ENDPOINT_MODE = 1 or ENDPOINT_MODE = 2 or ENDPOINT_MODE = 3)
+        report "Xilinx USP PCIe Wrapper: Only values 0, 1, 2 or 3 are supported for parameter ENDPOINT_MODE!"
         severity failure;
 
     assert (PCIE_ENDPOINTS = 1 or PCIE_ENDPOINTS = 2)
@@ -422,7 +422,7 @@ begin
     --  PCIE IP CORE
     -- =========================================================================
 
-    pcie_mode_0_2_g : if (ENDPOINT_MODE = 0 or ENDPOINT_MODE = 2) generate
+    pcie_mode_0_2_g : if (ENDPOINT_MODE = 0 or ENDPOINT_MODE = 2 or ENDPOINT_MODE = 3) generate
 
         pcie_hip_g : for i in 0 to PCIE_HIPS-1 generate
             pcie_ibuf_i : component ibufds_gte4
