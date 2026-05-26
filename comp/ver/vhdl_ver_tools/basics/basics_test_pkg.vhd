@@ -201,8 +201,8 @@ package body basics_test_pkg is
          end loop;
 
          --write(l,string'(rev_line(ptr+1 to 16)));
-         for j in ptr+1 to 16 loop
-            write(l, rev_line(j));
+         for idx in ptr+1 to 16 loop
+            write(l, rev_line(idx));
          end loop;
       end if;
    end procedure;
@@ -331,4 +331,3 @@ package body basics_test_pkg is
    ----
 
 end basics_test_pkg;
-

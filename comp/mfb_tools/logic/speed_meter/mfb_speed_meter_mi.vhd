@@ -127,13 +127,16 @@ begin
     logic_reg_p : process (CLK)
     begin
         if (rising_edge(CLK)) then
+            MI_DRD <= (others => '0');
             case MI_ADDR(5-1 downto 0) is
                 when "00000" => MI_DRD <= std_logic_vector(resize(unsigned(cnt_ticks_reg), MI_DATA_WIDTH));
                 when "00100" => MI_DRD <= (0 => cnt_ticks_max_reg, others => '0');
-                when "01000" => MI_DRD <= cnt_bytes_reg;
+                when "01000" => MI_DRD <= cnt_bytes_reg(MI_DATA_WIDTH-1 downto 0);
+                when "01100" => MI_DRD <= (others => '0'); -- CNT_CLEAR is write-only
                 when "10000" => MI_DRD <= cnt_sofs_reg;
                 when "10100" => MI_DRD <= cnt_eofs_reg;
                 when "11000" => MI_DRD <= std_logic_vector(to_unsigned(FREQUENCY, MI_DATA_WIDTH));
+                when "11100" => MI_DRD(CNT_BYTES_WIDTH-MI_DATA_WIDTH-1 downto 0) <= cnt_bytes_reg(CNT_BYTES_WIDTH-1 downto MI_DATA_WIDTH);
                 when others  => MI_DRD <= (others => '0');
             end case;
         end if;

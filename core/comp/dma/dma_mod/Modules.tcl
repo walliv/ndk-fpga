@@ -21,7 +21,7 @@ lappend MOD "$ENTITY_BASE/dma_ent.vhd"
 lappend COMPONENTS [ list "MI_SPLITTER_PLUS_GEN" $MI_SPLITTER_PLUS_GEN_BASE "FULL" ]
 lappend COMPONENTS [ list "GEN_LOOP_SWITCH"      $GEN_LOOP_SWITCH_BASE      "FULL" ]
 
-if { $ARCHGRP == "MEDUSA" || $ARCHGRP == "CALYPTE" } {
+if { $ARCHGRP == "MEDUSA" || $ARCHGRP == "CALYPTE" || $ARCHGRP == "IUVENTUS"} {
 
     # Architecture specific component
     lappend COMPONENTS [ list "DMA_WRAPPER" $DMA_WRAPPER_BASE  $ARCHGRP ]

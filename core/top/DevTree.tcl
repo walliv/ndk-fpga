@@ -226,7 +226,11 @@ proc dts_build_netcope {} {
             # DMA module
             global DMA_RX_CHANNELS DMA_RX_FRAME_SIZE_MAX DMA_TX_FRAME_SIZE_MAX DMA_RX_FRAME_SIZE_MIN DMA_TX_FRAME_SIZE_MIN DMA_DEBUG_ENABLE
             if {$DMA_TYPE != 0} {
-                append ret [dts_dmamod_open $NdkCore::ADDR_DMA_MOD $DMA_TYPE [expr $DMA_RX_CHANNELS / $PCIE_ENDPOINTS] [expr $DMA_TX_CHANNELS / $PCIE_ENDPOINTS] $pcie $DMA_RX_FRAME_SIZE_MAX $DMA_TX_FRAME_SIZE_MAX $DMA_RX_FRAME_SIZE_MIN $DMA_TX_FRAME_SIZE_MIN $DMA_DEBUG_ENABLE]
+                if {$DMA_TYPE == 5} {
+                    dts_dma_iuventus ret $NdkCore::ADDR_DMA_MOD
+                } else {
+                    append ret [dts_dmamod_open $NdkCore::ADDR_DMA_MOD $DMA_TYPE [expr $DMA_RX_CHANNELS / $PCIE_ENDPOINTS] [expr $DMA_TX_CHANNELS / $PCIE_ENDPOINTS] $pcie $DMA_RX_FRAME_SIZE_MAX $DMA_TX_FRAME_SIZE_MAX $DMA_RX_FRAME_SIZE_MIN $DMA_TX_FRAME_SIZE_MIN $DMA_DEBUG_ENABLE]
+                }
             }
         }
 

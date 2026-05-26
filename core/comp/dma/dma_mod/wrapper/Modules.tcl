@@ -18,6 +18,7 @@ set MFB_PIPE_BASE               "$OFM_PATH/comp/mfb_tools/flow/pipe"
 
 set DMA_MEDUSA_BASE             "$OFM_PATH/extra/dma-medusa"
 set DMA_CALYPTE_BASE            "$OFM_PATH/comp/dma/dma_calypte"
+set DMA_IUVENTUS_BASE           "$OFM_PATH/comp/dma/dma_iuventus"
 set DMA_TEST_CORE_BASE          "$OFM_PATH/comp/dma/dma_calypte/comp/test_core"
 
 # Packages
@@ -62,4 +63,11 @@ if { $ARCHGRP == "MEDUSA" } {
     lappend COMPONENTS [ list "DMA_TEST_CORE"          $DMA_TEST_CORE_BASE         "FULL" ]
 
     lappend MOD "$ENTITY_BASE/dma_calypte_wrapper_arch.vhd"
+} elseif { $ARCHGRP == "IUVENTUS" } {
+    lappend COMPONENTS [ list "MFB_PIPE"               $MFB_PIPE_BASE              "FULL" ]
+    lappend COMPONENTS [ list "MFB_ASFIFOX"            $MFB_ASFIFOX_BASE           "FULL" ]
+    lappend COMPONENTS [ list "DMA_IUVENTUS"           $DMA_IUVENTUS_BASE          "FULL" ]
+
+    lappend MOD "$ENTITY_BASE/dma_iuventus_wrapper_arch.vhd"
+
 }

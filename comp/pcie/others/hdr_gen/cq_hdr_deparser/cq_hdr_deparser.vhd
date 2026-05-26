@@ -64,9 +64,6 @@ entity PCIE_CQ_HDR_DEPARSER is
         -- ========================================================================
         -- Completer HEADER Input interface
         -- ========================================================================
-
-        -- PCIE AXI TUSER signal
-        IN_AXI_TUSER     : in std_logic_vector(CQUSER_WIDTH-1 downto 0) := (others => '0');
         -- PCIE CQ header
         IN_HEADER        : in std_logic_vector(128-1 downto 0);
         -- First Byte Enable
@@ -148,4 +145,3 @@ begin
     end generate;
 
 end architecture;
-

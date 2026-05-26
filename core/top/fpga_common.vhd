@@ -395,10 +395,10 @@ architecture FULL of FPGA_COMMON is
         end if;
 
         if (IS_USP_PCIE_EP = True) then         -- Gen3/4 mode only
-            if (PCIE_ENDPOINT_MODE = 0) then    -- x16
-                pcie_mfb_regions := 2;          -- 2x256b AXI
-            elsif (PCIE_ENDPOINT_MODE = 1) then -- x8x8
-                pcie_mfb_regions := 2;          -- 2x256b AXI
+            if (PCIE_ENDPOINT_MODE = 0 or PCIE_ENDPOINT_MODE = 3) then    -- Gen3x16/Gen4x8
+                pcie_mfb_regions := 2;          -- 1x512b AXI
+            elsif (PCIE_ENDPOINT_MODE = 1) then -- Gen4x8x8
+                pcie_mfb_regions := 2;          -- 2x512b AXI
             elsif (PCIE_ENDPOINT_MODE = 2) then -- x8
                 pcie_mfb_regions := 1;          -- 1x256b AXI
             end if;
@@ -873,7 +873,7 @@ begin
         PCIE_GEN            => PCIE_GEN,
 
         PTC_DISABLE         => not PTC_ENABLE,
-        DMA_BAR_ENABLE      => (DMA_TYPE = 4),
+        DMA_BAR_ENABLE      => (DMA_TYPE = 4 or DMA_TYPE = 5),
         XVC_ENABLE          => VIRTUAL_DEBUG_ENABLE,
         CARD_ID_WIDTH       => FPGA_ID_WIDTH,
         MISC_TOP2PCIE_WIDTH => MISC_TOP2PCIE_WIDTH,

@@ -48,6 +48,8 @@ if { $ARCHGRP_ARR(APPLICATION_CORE_ENTITY_ONLY) } {
       set DMA_ARCH "MEDUSA"
   } elseif {$ARCHGRP_ARR(DMA_TYPE) == 4} {
       set DMA_ARCH "CALYPTE"
+  } elseif {$ARCHGRP_ARR(DMA_TYPE) == 5} {
+      set DMA_ARCH "IUVENTUS"
   }
 
   set JTAG_OP_ARCH "EMPTY"
