@@ -64,7 +64,7 @@ class MfbGenerator(nfb.BaseComp):
     @enabled.setter
     def enabled(self, en: bool) -> None:
         self._comp.write32(self._REG_CONTROL, int(en))
-        while bool(self.generating) != en:
+        while bool(self.generating) != en and not self.bursting:
             pass
 
     @property
@@ -146,9 +146,8 @@ class MfbGenerator(nfb.BaseComp):
     @bursting.setter
     def bursting(self, enable: bool) -> None:
         """Configure the generator to send packets in bursts."""
-        if enable:
-            raise NotImplementedError("Reliable bursting has not yet been implemented.")
-        # self._comp.set_bit(self._REG_CHANNEL_INCR, 9, enable)
+        # raise NotImplementedError("Reliable bursting has not yet been implemented.")
+        self._comp.set_bit(self._REG_CHANNEL_INCR, 9, enable)
 
     @property
     def burst_size(self) -> int:
