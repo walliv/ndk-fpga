@@ -36,9 +36,9 @@ from random import randint
 from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge, ClockCycles
 from cocotbext.ofm.base.protocol import alias
-from cocotbext.ofm.mvb.drivers import MVBDriver
+from cocotbext.ofm.mvb.modular_drivers import MVBDriver
 from cocotbext.ofm.mvb.monitors import MVBMonitor
-from cocotbext.ofm.mfb.drivers import MFBDriver
+from cocotbext.ofm.mfb.modular_drivers import MFBDriver
 from cocotbext.ofm.mfb.monitors import MFBMonitor
 from cocotbext.ofm.mfb.protocol import MfbProtocol
 from cocotbext.ofm.ver.backpressure import BackpressureGenerator, BackpressureConfig

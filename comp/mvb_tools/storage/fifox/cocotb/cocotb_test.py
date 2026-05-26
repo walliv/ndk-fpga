@@ -9,7 +9,7 @@ import cocotb
 import logging
 from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge, ClockCycles
-from cocotbext.ofm.mvb.drivers import MVBDriver
+from cocotbext.ofm.mvb.modular_drivers import MVBDriver
 from cocotbext.ofm.mvb.monitors import MVBMonitor
 from cocotbext.ofm.ver.backpressure import BackpressureGenerator, BackpressureConfig
 from cocotbext.ofm.ver.generators import random_integers

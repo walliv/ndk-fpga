@@ -38,7 +38,7 @@ import cocotb
 import logging
 from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge, ClockCycles
-from cocotbext.ofm.mfb.drivers import MFBDriver
+from cocotbext.ofm.mfb.modular_drivers import MFBDriver
 from cocotbext.ofm.mfb.monitors import MFBMonitor
 from cocotbext.ofm.mfb.transaction import MfbTransaction, MfbTransactionWithMeta
 from cocotbext.ofm.base.generators import ItemRateLimiter

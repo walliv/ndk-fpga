@@ -4,8 +4,8 @@
 
 from cocotbext.ofm.base.transaction import IdleTransaction
 from cocotbext.ofm.base.drivers import ModularBusDriver
-from cocotbext.ofm.mvb.drivers import MVBDriver
-from cocotbext.ofm.mfb.drivers import MFBDriver
+from cocotbext.ofm.mvb.modular_drivers import MVBDriver
+from cocotbext.ofm.mfb.modular_drivers import MFBDriver
 from cocotbext.ofm.mfb.transaction import MfbTransaction
 from protocol import PcieMvbProtocol
 

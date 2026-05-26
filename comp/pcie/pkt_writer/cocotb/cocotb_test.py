@@ -17,10 +17,10 @@ from cocotb.triggers import RisingEdge, ClockCycles
 from cocotb_bus.drivers import BitDriver
 from cocotb_bus.scoreboard import Scoreboard
 
-from cocotbext.ofm.mfb.drivers import MFBDriver
+from cocotbext.ofm.mfb.modular_drivers import MFBDriver
 from cocotbext.ofm.mfb.monitors import MFBMonitor
 from cocotbext.ofm.mfb.transaction import MfbTransaction
-from cocotbext.ofm.mvb.drivers import MVBDriver
+from cocotbext.ofm.mvb.modular_drivers import MVBDriver
 from cocotbext.ofm.mvb.monitors import MVBMonitor
 from cocotbext.ofm.mvb.transaction import MvbTrClassicSerializable, hdrfield, serializableheader
 from cocotbext.ofm.ver.generators import random_packets

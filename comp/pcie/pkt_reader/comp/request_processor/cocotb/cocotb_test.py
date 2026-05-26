@@ -17,7 +17,7 @@ from cocotb.triggers import RisingEdge, ClockCycles
 from cocotb_bus.drivers import BitDriver
 from cocotb_bus.scoreboard import Scoreboard
 
-from cocotbext.ofm.mvb.drivers import MVBDriver
+from cocotbext.ofm.mvb.modular_drivers import MVBDriver
 from cocotbext.ofm.mvb.monitors import MVBMonitor
 from cocotbext.ofm.ver.generators import random_packets
 

@@ -1,238 +1,327 @@
-# SPDX-License-Identifier: BSD-3-Clause
-# Copyright (C) 2024-2026 CESNET z. s. p. o.
+# drivers.py: MFBDriver
+# Copyright (C) 2024 CESNET z. s. p. o.
+# Copyright (C) 2025 Universitaet Heidelberg, Institut fuer Technische Informatik (ZITI)
 # Author(s): Jakub Cabal <cabal@cesnet.cz>
-#            Ondrej Schwarz <ondrejschwarz@cesnet.cz>
+#            Vladislav Valek <vladislav.valek@stud.uni-heidelberg.de>
+#
+# SPDX-License-Identifier: BSD-3-Clause OR Apache-2.0
 
-from cocotbext.ofm.base.drivers import ModularBusDriver
-from cocotbext.ofm.base.transaction import IdleTransaction
+import logging
+from math import log2
+from typing import Any, Union
+from collections import deque
+
+import cocotb
+from cocotb.triggers import RisingEdge, ReadOnly
+from cocotb.types import LogicArray, Logic
+
+from cocotb_bus.drivers import ValidatedBusDriver
+from cocotbext.ofm.mfb.utils import get_mfb_params, random_tuple_iterator
 from cocotbext.ofm.mfb.transaction import MfbTransaction
-from cocotb.types import Logic, LogicArray
-from cocotbext.ofm.base.types import LogicArray2D
-from cocotbext.ofm.utils.math import ceildiv
-from cocotbext.ofm.mfb.protocol import MfbProtocol
 
-from dataclasses import dataclass, asdict
+# NOTE: There were many achievements in this implementation of a general MFB Driver that also inserts
+# some gaps between packets if vld_gen is not null. Although there are many of its parts written
+# with an explaining commentary, some parts originate from a testing and its reasoning remains
+# unknown. We attribute these to divine providence.
 
+class MFBDriver(ValidatedBusDriver):
+    _signals = ["data", "sof_pos", "eof_pos", "sof", "eof", "src_rdy", "dst_rdy"]
+    _optional_signals = ["meta"]
 
-class MFBDriver(ModularBusDriver):
-    bus: MfbProtocol
+    # By passing vld_gen as Null, the driver generates on full throughput
+    def __init__(self, entity, name, clock, mfb_params=None, vld_gen=random_tuple_iterator(1,100,1,100), **kwargs):
+        super().__init__(entity, name, clock, valid_generator=vld_gen, **kwargs)
+        self.clock = clock
+        self.frame_cnt = 0
+        self._regions, self._region_size, self._block_size, self._item_width, self._meta_width = get_mfb_params(
+            self.bus, mfb_params
+        )
 
-    @dataclass
-    class State:
-        DATA    : LogicArray | bytearray = 0
-        SOF_POS : LogicArray2D           = 0
-        EOF_POS : LogicArray2D           = 0
-        SOF     : LogicArray             = 0
-        EOF     : LogicArray             = 0
-        SRC_RDY : Logic                  = 0
-        META    : LogicArray2D           = 0
+        self._word_bit_width = self._regions*self._region_size * self._block_size * self._item_width
+        self._rgn_bit_width = self._region_size * self._block_size * self._item_width
+        self._blk_bit_width = self._block_size * self._item_width
+        self._last_blk_idx = 0
+        self._last_rgn_idx = 0
 
-    def __init__(self, dut, name, clock, protocol=MfbProtocol, no_inner_idles: bool = False, **kwargs):
-        super().__init__(dut, name, clock, protocol=protocol, **kwargs)
+        self.log.info(f"Inferred MFB configuration: {self._regions=}, {self._region_size=}, {self._block_size=}, {self._item_width=}, {self._meta_width=}")
 
-        self._item_width     : int = self.bus.ITEM_WIDTH
-        self._word_bytes     : int = self.bus.WORD_WIDTH // 8
-        self._item_bytes     : int = self.bus.ITEM_WIDTH // 8
-        self._block_bytes    : int = self.bus.BLOCK_SIZE * self._item_bytes
-        self._region_bytes   : int = self._block_bytes * self.bus.REGION_SIZE
-        self._regions        : int = self.bus.REGIONS
-        self._region_items   : int = self.bus.REGION_SIZE * self.bus.BLOCK_SIZE
+        # Widths per region
+        self._sof_pos_w_pr = int(log2(self._region_size))
+        self._eof_pos_w_pr = int(log2(self._region_size*self._block_size))
 
-        self._no_inner_idles : bool = no_inner_idles
+        assert self._regions > 0
+        assert self._region_size > 0
+        assert self._block_size > 0
+        assert self._item_width > 0
+        assert self._meta_width >= 0
 
-        self._staged_items   : int = 0
-        self._item_cnt       : int = 0
-        self._frame_cnt      : int = 0
+        self._clr_physical_bus()
+        self._clr_internal_bus()
 
-    @property
-    def item_cnt(self):
-        return self._item_cnt
+        self._wordQ = deque()
 
-    @property
-    def frame_cnt(self):
-        return self._frame_cnt
+    def _clr_physical_bus(self):
+        self.bus.data.value = 0
+        if hasattr(self.bus, 'meta'):
+            self.bus.meta.value = 0
+        self.bus.sof.value = 0
+        self.bus.eof.value = 0
+        self.bus.sof_pos.value = 0
+        self.bus.eof_pos.value = 0
+        self.bus.src_rdy.value = 0
 
-    def _init_state(self):
-        self.state: MFBDriver.State = MFBDriver.State()
+    def _clr_internal_bus(self):
+        self._data_int = LogicArray(0, self._word_bit_width)
+        if hasattr(self.bus, 'meta'):
+            self._meta_int = LogicArray(0, self._regions*self._meta_width)
+        else:
+            self._meta_int = None
+        self._sof_int = LogicArray(0, self._regions)
+        self._eof_int = LogicArray(0, self._regions)
+        self._sof_pos_int = LogicArray(0, self._regions*max(1, self._sof_pos_w_pr))
+        self._eof_pos_int = LogicArray(0, self._regions*max(1, self._eof_pos_w_pr))
+        self._src_rdy_int = Logic("0")
 
-    def _clear_signals(self):
-        self._auto_clear_signals()
-        self.state.DATA    = bytearray(self.bus.WORD_WIDTH // 8)
-        self.state.SOF_POS = LogicArray2D.from_logicarray(self.state.SOF_POS, self.bus.REGIONS)
-        self.state.EOF_POS = LogicArray2D.from_logicarray(self.state.EOF_POS, self.bus.REGIONS)
-        self.state.SOF     = LogicArray(0, self.bus.REGIONS)
-        self.state.EOF     = LogicArray(0, self.bus.REGIONS)
-        self.state.SRC_RDY = 0
+    async def _wait_ready(self):
+        await ReadOnly()
+        while not bool(self.bus.dst_rdy.value):
+            if self.log.isEnabledFor(logging.DEBUG):
+                self.log.debug(f"DST_RDY: {bool(self.bus.dst_rdy.value)}")
+            await RisingEdge(self.clock)
+            await ReadOnly()
 
-        # converting signals valid with SOF or EOF to LogicArray2D
-        for name in self.bus.optional_signals.keys():
-            put_with = self.bus.put_with(name)
+    async def _driver_send(self, trans : Union[MfbTransaction, LogicArray, bytes], sync: bool = True, **kwargs : Any) -> None:
+        ce = RisingEdge(self.clock)
 
-            if put_with == "SOF" or put_with == "EOF":
-                value = getattr(self.state, name)
-                setattr(self.state, name, LogicArray2D.from_logicarray(value, self.bus.REGIONS))
+        # --------------------------------------------------------------------------------
+        # Convert input transaction to LogicArray (first has name data, the second meta)
+        # --------------------------------------------------------------------------------
+        data = LogicArray(0, self._word_bit_width)
+        meta = LogicArray(0, self._meta_width)
 
-    async def _split_transaction(self, transaction: MfbTransaction | IdleTransaction):
-        word_is_full  : bool = False
-        word_has_data : bool = False
-        word_overflow : bool = False
-        region_offset : int  = 0
-        byte_offset   : int  = 0
+        if isinstance(trans, MfbTransaction):
+            if isinstance(trans.data, bytes) or isinstance(trans.data, bytearray):
+                data = LogicArray.from_bytes(trans.data, byteorder="little")
+            elif isinstance(trans.data, LogicArray):
+                data = trans.data
+            else:
+                raise ValueError(f"Unsupported data type in MfbTransaction: {type(trans.data)}. Expected bytes, bytearray or LogicArray.")
 
-        while not word_is_full:
-            if isinstance(transaction, MfbTransaction):
-                while transaction.data:
-                    # get a slice of data from the transaction to the end of the width of a word
-                    data = transaction.data[:self._word_bytes - byte_offset]
-
-                    # if a transaction has already started or ended in this region, put it in the next region
-                    if self.state.SOF[region_offset] or self.state.EOF[region_offset]:
-                        region_offset += 1
-
-                        # if all regions are full, send the transaction
-                        if region_offset >= self._regions:
-                            region_offset = 0
-                            yield
-                            word_has_data = False
-
-                        # set the byte offset to the start of the new region
-                        byte_offset = region_offset * self._region_bytes
-                        # get the data from the transaction again
-                        continue
-
-                    sof_pos   = None
-                    sof_index = None
-
-                    # set SOF if the packet has not started in the previous word
-                    if not word_overflow:
-                        self.state.SOF[region_offset] = 1
-                        sof_pos = (byte_offset % self._region_bytes) // self._block_bytes
-                        sof_index = region_offset
-                        self.state.SOF_POS[region_offset] = LogicArray.from_unsigned(sof_pos, len(self.state.SOF_POS[region_offset]))
-                    else:
-                        word_overflow = False
-
-                    # check for overflow
-                    if len(data) != len(transaction.data):
-                        word_overflow = True
-
-                    # set DATA
-                    self.state.DATA[byte_offset:byte_offset + len(data)] = data
-                    word_has_data = True
-
-                    # count the items
-                    self._staged_items += (len(data) * 8) // self._item_width
-
-                    # remove the part of the data being sent from the transaction
-                    transaction.data = transaction.data[self._word_bytes - byte_offset:]
-
-                    # increase the offset
-                    byte_offset  += len(data)
-                    region_offset = (byte_offset - 1) // self._region_bytes
-
-                    eof_pos   = None
-                    eof_index = None
-
-                    # set EOF if the packet does not overflow to the next word
-                    if not word_overflow:
-                        self.state.EOF[region_offset] = 1
-                        eof_pos = ((byte_offset - 1) % self._region_bytes) // self._item_bytes
-                        eof_index = region_offset
-                        self.state.EOF_POS[region_offset] = LogicArray.from_unsigned(eof_pos, len(self.state.EOF_POS[region_offset]))
-
-                    # set optional signals automatically
-                    self._auto_set_optional_signals(transaction, sof_index, eof_index)
-
-                    # align the byte offset to the next block and region offset to the next region
-                    byte_offset   = ceildiv(self._block_bytes, byte_offset) * self._block_bytes
-                    region_offset = byte_offset // self._region_bytes
-
-                    # check if the word if full
-                    word_is_full = byte_offset >= self._word_bytes
-
-                    # when the word is full, send it to the bus
-                    if word_is_full:
-                        byte_offset = 0
-                        region_offset = 0
-                        yield
-                        word_has_data = False
-
-            elif isinstance(transaction, IdleTransaction):
-                if self._no_inner_idles:
-                    yield
-                    return
-
-                remaining_idle_bytes = len(transaction)
-
-                while remaining_idle_bytes:
-                    free_bytes = self._word_bytes - byte_offset
-
-                    if free_bytes <= remaining_idle_bytes:
-                        self.state.DATA[byte_offset:] = free_bytes * b"\x00"
-                        byte_offset += free_bytes
-                        remaining_idle_bytes -= free_bytes
-                    else:
-                        self.state.DATA[byte_offset:byte_offset + remaining_idle_bytes] = remaining_idle_bytes * b"\x00"
-                        byte_offset += remaining_idle_bytes
-                        remaining_idle_bytes = 0
-
-                    byte_offset   = ceildiv(self._block_bytes, byte_offset) * self._block_bytes
-                    region_offset = byte_offset // self._region_bytes
-
-                    word_is_full = byte_offset >= self._word_bytes
-
-                    if word_is_full:
-                        byte_offset = 0
-                        region_offset = 0
-
-                        if word_has_data:
-                            # send the word with the end of the previous frame to the bus
-                            yield
-                            word_has_data = False
-                        else:
-                            # a word without frame data is an idle cycle with SRC_RDY low
-                            await self._clk_re
-
-            # if the word is not yet full, get the next transaction
-            if not word_is_full:
-                transaction = await anext(self._transactions)
-
-    async def _send_to_bus(self):
-        self.state.SRC_RDY = 1
-        self._write_to_bus()
-
-        await self._clk_re
-
-        while not self.bus.DST_RDY:
-            await self._clk_re
-
-        self._frame_cnt += self.state.EOF.count("1")
-
-    def _get_sent_items(self):
-        items = self._staged_items
-        self._staged_items = 0
-        return items
-
-    def _auto_set_optional_signals(self, transaction: MfbTransaction, sof_index: int, eof_index: int):
-        """Automatically assings value to optional signals present in the transaction."""
-        for name, value in asdict(transaction).items():
-            name = name.upper()
-
-            if name in self.bus.optional_signals:
-                put_with = self.bus.put_with(name)
-
-                if put_with is None:
-                    continue
-
-                if put_with == "SOF" or put_with == "EOF":
-                    index = sof_index if put_with == "SOF" else eof_index
-
-                    if index is None:
-                        continue
-
-                    if getattr(self.state, put_with)[index]:
-                        sigval = getattr(self.state, name)
-                        sigval[index] = value
+            if hasattr(self.bus, "meta") and hasattr(trans, "meta"):
+                if isinstance(trans.meta, bytes) or isinstance(trans.meta, bytearray):
+                    meta = LogicArray.from_bytes(trans.meta, byteorder="big")
+                elif isinstance(trans.meta, LogicArray):
+                    meta = trans.meta
+                elif isinstance(trans.meta, int):
+                    meta = LogicArray.from_unsigned(trans.meta, self._meta_width)
                 else:
-                    if getattr(self.state, put_with):
-                        setattr(self.state, name, value)
+                    raise ValueError(f"Unsupported meta type in MfbTransaction: {type(trans.meta)}. Expected bytes, bytearray, int or LogicArray.")
+
+        elif isinstance(trans, bytes) or isinstance(trans, bytearray):
+            data = LogicArray.from_bytes(trans, byteorder="little")
+
+        elif isinstance(trans, LogicArray):
+            data = trans
+        else:
+            raise ValueError(f"Unsupported transaction type {type(trans)}. Expected MfbTransaction, bytes, bytearray or LogicArray.")
+
+        if self.log.isEnabledFor(logging.DEBUG):
+            self.log.debug(f"Sending MFB transaction of {len(data)} bits ({len(data) // 8} bytes)")
+            self.log.debug(f"{trans!r}")
+
+        # --------------------------------------------------------------------------------
+        # Parse packet data into separate bus words while varying valid and
+        # invalid cycles (if valid/invalid generator is not None)
+        # --------------------------------------------------------------------------------
+        # Bit index in the input data
+        inp_data_blk_idx = 0
+        pkt_finished = False
+
+        # A next packet cannot be started in the current region when there is already a SOF OR it cannot
+        # be started if it fits to the current since this would cause two EOFs to appear
+        if  self._sof_int[self._last_rgn_idx] == 1 or (self._eof_int[self._last_rgn_idx] == 1 and (self._rgn_bit_width >= (self._last_blk_idx*self._blk_bit_width + len(data)))):
+            if self.log.isEnabledFor(logging.DEBUG):
+                self.log.debug(f"Either a SOF: {self._sof_int[self._last_rgn_idx]} or an EOF: {self._eof_int[self._last_rgn_idx]} is in the current region but the packet is too small.")
+            self._last_rgn_idx = (self._last_rgn_idx + 1) % self._regions
+            self._last_blk_idx = 0
+
+            # If there is a new packet to be started in the new region but it is in the
+            # next bus word, a currently prepared word need to be dispatched which is what is happening
+            # in this branch
+            if self._last_rgn_idx == 0:
+                self._wordQ.appendleft((self._data_int, self._meta_int, self._sof_int, self._eof_int, self._sof_pos_int, self._eof_pos_int, self._src_rdy_int))
+                self._clr_internal_bus()
+
+        while inp_data_blk_idx*self._blk_bit_width < len(data):
+            if self.log.isEnabledFor(logging.DEBUG):
+                self.log.debug("==================================================================================================")
+                self.log.debug(f"Initiated new word starting in {inp_data_blk_idx*self._blk_bit_width} bit of input data.")
+                self.log.debug(f"(RGN, BLK) = ({self._last_rgn_idx}, {self._last_blk_idx})")
+
+            # Iterate over regions in the MFB word
+            for rgn_idx in range(self._last_rgn_idx, self._regions):
+                # Iterate over blocks in every region
+                for blk_idx in range(self._last_blk_idx, self._region_size):
+                    if self.log.isEnabledFor(logging.DEBUG):
+                        self.log.debug("--------------------------------------------------------------------------------------------------")
+                        self.log.debug(f"Processing (RGN, BLK) = ({rgn_idx}, {blk_idx}) and bits {inp_data_blk_idx*self._blk_bit_width}/{len(data)} of data")
+                        self.log.debug(f"Valid blocks: {self.on}, invalid blocks: {self.off}")
+
+                    self._src_rdy_int = 1
+
+                    if (inp_data_blk_idx == 0):
+                        if hasattr(self.bus, 'meta'):
+                            self._meta_int[rgn_idx*self._meta_width + self._meta_width-1 : rgn_idx*self._meta_width] = meta
+                        self._sof_int[rgn_idx] = 1
+                        if self._sof_pos_w_pr > 0:
+                            self._sof_pos_int[rgn_idx*self._sof_pos_w_pr + self._sof_pos_w_pr -1 : rgn_idx*self._sof_pos_w_pr] = blk_idx
+
+                    # Truncate as necessary if this is a last block, otherwise keep the size of the MFB block
+                    data_rest_len = len(data) - inp_data_blk_idx*self._blk_bit_width
+                    data_rest_len = self._blk_bit_width if self._blk_bit_width < data_rest_len else data_rest_len
+                    assert data_rest_len >= 0
+
+                    bus_idx_low = rgn_idx*self._rgn_bit_width + blk_idx*self._blk_bit_width
+                    bus_idx_high = rgn_idx*self._rgn_bit_width + blk_idx*self._blk_bit_width + data_rest_len -1
+                    if self.log.isEnabledFor(logging.DEBUG):
+                        self.log.debug(f"Bus range to write [{bus_idx_high} : {bus_idx_low}]")
+                        self.log.debug(f"Range of input data [{inp_data_blk_idx*self._blk_bit_width + data_rest_len -1} : {inp_data_blk_idx*self._blk_bit_width}]")
+                    self._data_int[bus_idx_high : bus_idx_low] \
+                        = data[inp_data_blk_idx*self._blk_bit_width + data_rest_len -1 : inp_data_blk_idx*self._blk_bit_width]
+
+                    inp_data_blk_idx += 1
+
+                    if self.on is not True and self.on > 0:
+                        self.on -= 1
+
+                    if len(data) <= inp_data_blk_idx*self._blk_bit_width:
+                        self._eof_int[rgn_idx] = 1
+                        self._eof_pos_int[rgn_idx*self._eof_pos_w_pr + self._eof_pos_w_pr -1 : rgn_idx*self._eof_pos_w_pr] \
+                            = (blk_idx * self._blk_bit_width + data_rest_len - 1) // self._item_width
+                        if self.log.isEnabledFor(logging.DEBUG):
+                            self.log.debug(f"setting EOF_POS = {(blk_idx * self._blk_bit_width + data_rest_len - 1) // self._item_width}")
+                        self._last_blk_idx = (blk_idx + 1) % self._region_size
+
+                        if blk_idx == self._region_size-1:
+                            self._last_rgn_idx = (rgn_idx + 1) % self._regions
+                        else:
+                            self._last_rgn_idx = rgn_idx
+
+                        pkt_finished = True
+                        break
+                else:
+                    self._last_blk_idx = 0
+
+                if pkt_finished:
+                    break
+            else:
+                self._last_rgn_idx = 0
+
+            word_finished = not pkt_finished and self._last_blk_idx == 0 and self._last_rgn_idx == 0
+            no_space = pkt_finished and self._last_blk_idx == 0 and self._last_rgn_idx == 0
+            no_next_pkt = pkt_finished and not self._sendQ
+            no_vld_blocks = self.on is not True and self.on <= 0
+            if self.log.isEnabledFor(logging.DEBUG):
+                self.log.debug(f"Valid word: {word_finished=}, {no_space=}, {no_next_pkt=}, {no_vld_blocks=}, {self._last_rgn_idx=}, {self._last_blk_idx=}")
+
+            if word_finished or no_space or no_next_pkt or no_vld_blocks:
+                if self.log.isEnabledFor(logging.DEBUG):
+                    self.log.debug(f"Writing word into deque SOF: {bin(self._sof_int)}, EOF: {bin(self._eof_int)}, SOF_POS: {bin(self._sof_pos_int)}, EOF_POS: {bin(self._eof_pos_int)}")
+                self._wordQ.appendleft((self._data_int, self._meta_int, self._sof_int, self._eof_int, self._sof_pos_int, self._eof_pos_int, self._src_rdy_int))
+                self._clr_internal_bus()
+
+            # --------------------------------------------------------------------------------
+            # Consume invalid blocks
+            # --------------------------------------------------------------------------------
+            # NOTE: This branch needs a thorough check for over-engineering. Some of its parts
+            # can be redundant or can be rewritten.
+            if no_vld_blocks:
+                inv_finished = False
+
+                while self.off > 0:
+
+                    if self.log.isEnabledFor(logging.DEBUG):
+                        self.log.debug(f"--------------------------------------------------------------------")
+                        self.log.debug(f"Consuming invalid blocks {self.off=}, {self._last_rgn_idx=}, {self._last_blk_idx=}")
+
+                    # 1. If packet finishes in the word, count invalid cycles from the current word's remaining
+                    # blocks
+                    # 2. If packet does not finish in the word it fills it all up so the invalid blocks are counted from
+                    # the next word
+                    #
+                    # In both cases, the last_rgn_idx and last_blk_idx point right!
+                    for rgn_idx in range(self._last_rgn_idx, self._regions):
+                        for blk_idx in range(self._last_blk_idx, self._region_size):
+                            self.off -= 1
+
+                            if self.off <= 0:
+                                inv_finished = True
+                                # If packet finished, the next packet can begin in the middle of a region after all
+                                # invalid blocks have been dispatched, meaning there can be both whole invalid words but also
+                                # partially invalid. Otherwise, we are still in the middle of a packet which
+                                # means that only whole words can be send as invalid.
+                                if pkt_finished:
+                                    self._last_blk_idx = (blk_idx + 1) % self._region_size
+
+                                    if blk_idx == self._region_size-1:
+                                        self._last_rgn_idx = (rgn_idx + 1) % self._regions
+                                    else:
+                                        self._last_rgn_idx = rgn_idx
+                                    break
+                        else:
+                            self._last_blk_idx = 0
+
+                        if inv_finished:
+                            break
+                    else:
+                        self._last_rgn_idx = 0
+
+                    if self.log.isEnabledFor(logging.DEBUG):
+                        self.log.debug(f"The counting of invalid or partially invalid word finished: {self._last_rgn_idx=}, {self._last_blk_idx=}, {inv_finished=}")
+                    # Rationale: The problem is always, what to do with partially
+                    # valid words. It packet finished in the previous word and there are no further valid blocks, the counting
+                    # of invalid blocks begins there already but this word is not written to the wordQ in this branch UNLESS
+                    # the packet ended in the last block of that word. Afterwards, every following word is written..
+                    # The second situation is when the packet did not finish yet, yet there are no valid blocks and the next word
+                    # needs to be rendered invalid which ist then written to the wordQ in this branch.
+                    if (not pkt_finished) or (pkt_finished and no_space):
+                        if self.log.isEnabledFor(logging.DEBUG):
+                            self.log.debug(f"Invalid word written to queue...")
+                        self._wordQ.appendleft((self._data_int, self._meta_int, self._sof_int, self._eof_int, self._sof_pos_int, self._eof_pos_int, self._src_rdy_int))
+
+                self._next_valids()
+                if self.log.isEnabledFor(logging.DEBUG):
+                    self.log.debug(f"----------------------------------------------------------------------")
+
+        # --------------------------------------------------------------------------------
+        # Set parsed bus words from the previous cycle to the physical bus
+        # --------------------------------------------------------------------------------
+        while self._wordQ:
+            await ce
+            data_w, meta_w, sof_w, eof_w, sof_pos_w, eof_pos_w, src_rdy_w = self._wordQ.pop()
+
+            self.bus.data.value = data_w
+            if hasattr(self.bus, 'meta'):
+                self.bus.meta.value = meta_w
+            self.bus.sof.value = sof_w
+            self.bus.eof.value = eof_w
+            self.bus.sof_pos.value = sof_pos_w
+            self.bus.eof_pos.value = eof_pos_w
+            self.bus.src_rdy.value = src_rdy_w
+
+            # No need to wait for ready if the current word is invalid
+            if bool(src_rdy_w):
+                await self._wait_ready()
+
+        # If there are no more packets, put 0 to the output bus
+        if not self._sendQ:
+            await ce
+            self._clr_physical_bus()
+
+        # Check if word queue is empty
+        assert not self._wordQ
+
+        self.frame_cnt += 1
+        if self.log.isEnabledFor(logging.DEBUG):
+            self.log.debug(f"Transaction send finished!")
+            self.log.debug("==================================================================================================")

@@ -15,7 +15,7 @@ from cocotb.triggers import ClockCycles, RisingEdge
 from cocotb.types import LogicArray
 from cocotbext.ofm.base.protocol import optional_signal
 from cocotbext.ofm.base.types import LogicArray2D
-from cocotbext.ofm.mfb.drivers import MFBDriver
+from cocotbext.ofm.mfb.modular_drivers import MFBDriver
 from cocotbext.ofm.mfb.monitors import MFBMonitor
 from cocotbext.ofm.mfb.protocol import MfbProtocol
 from cocotbext.ofm.mfb.transaction import MfbTransactionWithMeta

@@ -38,9 +38,8 @@ def get_signal_value_in_bytes(signal, big_endian: bool = False) -> bytes:
         Signal value in bytes.
     """
     sig_val = signal.value
-    sig_val.big_endian = big_endian
 
-    return sig_val.buff
+    return sig_val.to_bytes(byteorder='big' if big_endian else 'little')
 
 
 def filter_bytes_by_bitmask(data: bytes, byte_enable: int) -> bytes:
@@ -86,7 +85,7 @@ def align_request(bus_width: int, addr: int, data_len: int, *, byte_enable: Opti
     start_offset = addr % bus_width
     end_offset = -(addr + data_len) % bus_width
 
-    byte_enable = LogicArray(("0" * start_offset) + byte_enable.binstr + ("0" * end_offset)) if byte_enable is not None else None
+    byte_enable = LogicArray(("0" * end_offset) + str(byte_enable) + ("0" * start_offset)) if byte_enable is not None else None
     addr = addr - start_offset
 
     return start_offset, end_offset, addr, byte_enable

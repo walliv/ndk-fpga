@@ -10,7 +10,7 @@ from cocotb_bus.drivers import BitDriver
 from cocotb_bus.scoreboard import Scoreboard
 
 # OFM extension imports
-from cocotbext.ofm.mvb.drivers import MVBDriver
+from cocotbext.ofm.mvb.modular_drivers import MVBDriver
 from cocotbext.ofm.mvb.transaction import MvbTrClassicWithMeta
 from cocotbext.ofm.axi4stream.monitors import Axi4Stream
 from cocotbext.ofm.axi4stream.transaction import Axi4StreamTransaction

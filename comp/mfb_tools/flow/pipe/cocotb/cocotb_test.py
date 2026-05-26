@@ -10,7 +10,7 @@ import random
 import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge, ClockCycles
-from cocotbext.ofm.mfb.drivers import MFBDriver
+from cocotbext.ofm.mfb.modular_drivers import MFBDriver
 from cocotbext.ofm.mfb.monitors import MFBMonitor
 from cocotbext.ofm.mfb.transaction import MfbTransaction
 from cocotbext.ofm.ver.generators import random_packets

@@ -17,7 +17,7 @@ from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge, ClockCycles
 from cocotb.types import LogicArray
 from cocotbext.ofm.mi.drivers import MIRequestDriver as MIDriver
-from cocotbext.ofm.mvb.drivers import MVBDriver
+from cocotbext.ofm.mvb.modular_drivers import MVBDriver
 from cocotbext.ofm.mvb.monitors import MVBMonitor
 from cocotbext.ofm.mvb.protocol import MvbProtocol
 from cocotbext.ofm.base.protocol import optional_signal
