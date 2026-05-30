@@ -13,8 +13,9 @@ TCLSH ?= tclsh
 GEN_MK_TARGETS += simulation vhdocl cocotb ghdl-sim nvc nvc-sim
 simulation: GEN_MK_ENV=SIM_SCRIPT=$(SIM_SCRIPT) SIM_FLAGS=$(SIM_FLAGS)
 
-nvc: NETCOPE_ENV+=PLATFORM_TAGS="altera xilinx"
-nvc-sim: NETCOPE_ENV+=PLATFORM_TAGS="altera xilinx"
+NVC_PLATFORM_TAGS ?= altera xilinx
+nvc: NETCOPE_ENV+=PLATFORM_TAGS="$(NVC_PLATFORM_TAGS)"
+nvc-sim: NETCOPE_ENV+=PLATFORM_TAGS="$(NVC_PLATFORM_TAGS)"
 
 # INFO: NETCOPE_TEMP is generated directory
 clean_common:
@@ -96,11 +97,15 @@ NVC_LOAD ?=
 nvc-sim: NVC_LOAD=--load $(shell cocotb-config --lib-name-path vhpi nvc)
 nvc-sim: nvc
 
+# NVC_RUN_ENV: extra environment variables prepended only to the nvc -r step.
+# Use this to set LD_LIBRARY_PATH or similar per-project without affecting
+# the tclsh mk-file generation step that also uses NETCOPE_ENV.
+NVC_RUN_ENV ?=
 nvc: $(MOD)
 	$(eval TOP_LEVEL_ENT_LC:=$(shell echo $(TOP_LEVEL_ENT) | tr '[:upper:]' '[:lower:]'))
 	nvc --work=nvcwork -H 1G -M 4G --std=2008 -a --relaxed $(filter %.vhd,$(MOD))
 	nvc --work=nvcwork -H 1G -M 4G -e $(NVC_ELAB_DEBUG_FLAGS) $(TOP_LEVEL_ENT_LC)
-	COCOTB_TEST_MODULES=$(COCOTB_TEST_MODULES) TOPLEVEL=$(TOP_LEVEL_ENT_LC) TOPLEVEL_LANG=vhdl $(NETCOPE_ENV) $(COCOTB_OPT_ARGS) PYGPI_PYTHON_BIN=$(shell cocotb-config --python-bin) COCOTB_RESOLVE_X=ZEROS \
+	$(NVC_RUN_ENV) COCOTB_TEST_MODULES=$(COCOTB_TEST_MODULES) TOPLEVEL=$(TOP_LEVEL_ENT_LC) TOPLEVEL_LANG=vhdl $(NETCOPE_ENV) $(COCOTB_OPT_ARGS) PYGPI_PYTHON_BIN=$(shell cocotb-config --python-bin) COCOTB_RESOLVE_X=ZEROS \
 	nvc --work=nvcwork -H 1G -M 4G -r $(TOP_LEVEL_ENT_LC) $(NVC_RUN_DEBUG_FLAGS) --ieee-warnings=off $(NVC_LOAD)
 
 else
