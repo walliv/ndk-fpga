@@ -111,11 +111,37 @@ architecture FULL of N2C_CONTROLLER is
 
     use iuventus_mfb_meta_pkg_i.all;
 
+    -- nvc 1.21.0 workaround: driving variable-bounded signal slices from a process loop body
+    -- crashes in sub-component context. Compute the entire concatenation inside a function
+    -- (local variables, upref 0) and drive the whole output signal at once.
+    function build_pcie_mfb_meta(
+        ext_mfb_meta     : slv_array_t;
+        i_chan_sel        : std_logic_vector;
+        i_meta_be_o       : natural;
+        i_meta_be_w       : natural;
+        i_meta_pcie_addr_o : natural;
+        i_meta_pcie_addr_w : natural
+    ) return std_logic_vector is
+        constant N      : natural := ext_mfb_meta'length;
+        constant ELEM_W : natural := i_meta_be_w + i_meta_pcie_addr_w;
+        variable result : std_logic_vector(N*ELEM_W - 1 downto 0);
+    begin
+        for i in 0 to N-1 loop
+            result((i+1)*ELEM_W-1 downto i*ELEM_W) :=
+                ext_mfb_meta(i)(i_meta_be_o + i_meta_be_w - 1 downto i_meta_be_o) &
+                i_chan_sel(i) &
+                ext_mfb_meta(i)(i_meta_pcie_addr_o + i_meta_pcie_addr_w - 1 downto i_meta_pcie_addr_o + 2) &
+                '0';
+        end loop;
+        return result;
+    end function;
+
     constant USR_MFB_LENGTH : natural := USR_MFB_REGIONS * USR_MFB_REGION_SIZE * USR_MFB_BLOCK_SIZE * USR_MFB_ITEM_WIDTH;
 
     -- Select between Completion Queue (set to 1) or Write Buffer (set to 0)
     signal chan_sel : std_logic_vector(EXT_MFB_REGIONS -1 downto 0);
-    signal pcie_mfb_meta_parsed : slv_array_t(EXT_MFB_REGIONS -1 downto 0)(META_BE_W + 1 + META_PCIE_ADDR_W-2 + 1-1 downto 0);
+    -- nvc workaround: flat std_logic_vector avoids slv_array_t element access bug in nvc 1.21.0
+    signal pcie_mfb_meta_parsed : std_logic_vector(EXT_MFB_REGIONS*(META_BE_W+META_PCIE_ADDR_W) -1 downto 0);
 
     -- =============================================================================================
     -- Interface for the CQE_PROCESSOR to the transaction buffer
@@ -198,13 +224,11 @@ begin
     -- than the input signal to the PCIE_TRANS_BUFFER
     meta_ext_mfb_meta_g : for rgn_idx in (EXT_MFB_REGIONS -1) downto 0 generate
         chan_sel(rgn_idx) <= WRBUFF_CHAN when EXT_MFB_META(rgn_idx)(META_BAR_ID) = WRBUFF_BAR_ID else CQ_BUFF_CHAN;
-
-        pcie_mfb_meta_parsed(rgn_idx) <=
-            EXT_MFB_META(rgn_idx)(META_BE) &
-            chan_sel(rgn_idx) &
-            EXT_MFB_META(rgn_idx)(META_PCIE_ADDR_O + META_PCIE_ADDR_W -1 downto META_PCIE_ADDR_O + 2) &
-            '0';
     end generate;
+
+    pcie_mfb_meta_parsed <= build_pcie_mfb_meta(
+        EXT_MFB_META, chan_sel,
+        META_BE_O, META_BE_W, META_PCIE_ADDR_O, META_PCIE_ADDR_W);
 
     cq_wr_buffer_i : entity work.TX_DMA_PCIE_TRANS_BUFFER
         generic map (
@@ -225,7 +249,7 @@ begin
             RESET => RST,
 
             PCIE_MFB_DATA    => EXT_MFB_DATA,
-            PCIE_MFB_META    => pcie_mfb_meta_parsed,
+            PCIE_MFB_META    => slv_array_deser(pcie_mfb_meta_parsed, EXT_MFB_REGIONS, META_BE_W+META_PCIE_ADDR_W),
             PCIE_MFB_SOF     => EXT_MFB_SOF,
             PCIE_MFB_SRC_RDY => EXT_MFB_SRC_RDY,
 

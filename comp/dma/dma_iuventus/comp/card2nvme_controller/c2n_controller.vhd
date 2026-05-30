@@ -128,10 +128,71 @@ architecture FULL of C2N_CONTROLLER is
 
     use iuventus_mfb_meta_pkg_i.all;
 
+    -- nvc 1.21.0 workaround: implicit concurrent signal assignments that read slices with
+    -- package-constant bounds crash because nvc can't compute slice-level sensitivity for
+    -- generics from non-literal generic package instantiations. Use functions so that the
+    -- whole input signal is passed as a parameter, enabling whole-signal sensitivity instead.
+    function build_mrg_mfb_meta(
+        i_meta     : std_logic_vector;
+        be_hi      : natural;
+        be_lo      : natural;
+        chan_bit    : natural;
+        ptr_hi     : natural;
+        ptr_lo     : natural
+    ) return std_logic_vector is
+        constant BE_W   : natural := be_hi - be_lo + 1;
+        constant ELEM_W : natural := BE_W + 1 + 62;  -- 62 = META_PCIE_ADDR_W - 2
+        variable result : std_logic_vector(ELEM_W downto 0);
+    begin
+        result(ELEM_W downto ELEM_W-BE_W+1)    := i_meta(be_hi downto be_lo);
+        result(ELEM_W-BE_W)                    := i_meta(chan_bit);
+        result(ELEM_W-BE_W-1 downto 1)         := std_logic_vector(resize(unsigned(i_meta(ptr_hi downto ptr_lo)), 62));
+        result(0)                              := '0';
+        return result;
+    end function;
+
+    -- nvc 1.21.0 workaround: variable-bounded signal slice drives from process loop bodies
+    -- crash in sub-component context. Use functions to compute the full result internally
+    -- (local variable assignments at upref 0), then drive the whole signal at once.
+    function build_aux_mfb_meta(
+        i_aux_mfb_meta : std_logic_vector;
+        i_mfb_item_vld : std_logic_vector;
+        n_regions      : natural;
+        buff_ptr_w     : natural;
+        meta_be_w      : natural
+    ) return std_logic_vector is
+        constant ELEM_W : natural := meta_be_w + 1 + buff_ptr_w;
+        variable result : std_logic_vector(n_regions*ELEM_W - 1 downto 0);
+    begin
+        for i in 0 to n_regions-1 loop
+            result((i+1)*ELEM_W-1 downto i*ELEM_W) :=
+                i_mfb_item_vld &
+                RDBUFF_CHAN &
+                i_aux_mfb_meta((i+1)*buff_ptr_w - 1 downto i*buff_ptr_w);
+        end loop;
+        return result;
+    end function;
+
+    function build_hdr_fifo_din(
+        pcie_hdr_addr     : slv_array_t;
+        pcie_hdr_data_raw : slv_array_t;
+        pcie_hdr_byte_cnt : slv_array_t;
+        n_regions         : natural;
+        hdr_fifo_data_w   : natural
+    ) return std_logic_vector is
+        variable result : std_logic_vector(n_regions*hdr_fifo_data_w - 1 downto 0);
+    begin
+        for i in 0 to n_regions-1 loop
+            result((i+1)*hdr_fifo_data_w - 1 downto i*hdr_fifo_data_w) :=
+                pcie_hdr_byte_cnt(i) & pcie_hdr_data_raw(i) & pcie_hdr_addr(i);
+        end loop;
+        return result;
+    end function;
+
     signal aux_mfb_data     : std_logic_vector(WR_REQ_MFB_DATA'range);
     signal aux_mfb_meta     : std_logic_vector(WR_REQ_MFB_META'range);
-    signal aux_mfb_meta_arr : slv_array_t(USR_MFB_REGIONS -1 downto 0)(BUFF_PTR_WIDTH -1 downto 0);
-    signal aux_mfb_meta_parsed : slv_array_t(USR_MFB_REGIONS -1 downto 0)(META_BE_W + 1 + BUFF_PTR_WIDTH -1 downto 0);
+    -- nvc workaround: flat std_logic_vector avoids slv_array_t element access bug in nvc 1.21.0
+    signal aux_mfb_meta_parsed : std_logic_vector(USR_MFB_REGIONS*(META_BE_W + 1 + BUFF_PTR_WIDTH) -1 downto 0);
     signal aux_mfb_sof     : std_logic_vector(WR_REQ_MFB_SOF'range);
     signal aux_mfb_eof     : std_logic_vector(WR_REQ_MFB_EOF'range);
     signal aux_mfb_sof_pos : std_logic_vector(WR_REQ_MFB_SOF_POS'range);
@@ -150,8 +211,10 @@ architecture FULL of C2N_CONTROLLER is
     signal cmdisp_mfb_dst_rdy  : std_logic;
 
     signal mrg_mfb_data     : std_logic_vector(WR_REQ_MFB_DATA'range);
-    signal mrg_mfb_meta     : std_logic_vector(META_BE_W + 1 + BUFF_PTR_WIDTH-1 downto 0);
-    signal mrg_mfb_meta_parsed : std_logic_vector(META_BE_W +1 + 62 + 1 -1 downto 0);
+    -- nvc workaround: use entity-generic expressions instead of package constants in signal
+    -- widths to avoid corrupt descriptors when the generic package uses non-literal generics
+    signal mrg_mfb_meta        : std_logic_vector((USR_MFB_REGION_SIZE*USR_MFB_BLOCK_SIZE*USR_MFB_ITEM_WIDTH)/8 + 1 + BUFF_PTR_WIDTH - 1 downto 0);
+    signal mrg_mfb_meta_parsed : std_logic_vector((USR_MFB_REGION_SIZE*USR_MFB_BLOCK_SIZE*USR_MFB_ITEM_WIDTH)/8 + 63 downto 0);
     signal mrg_mfb_sof      : std_logic_vector(WR_REQ_MFB_SOF'range);
     signal mrg_mfb_src_rdy  : std_logic;
     signal mrg_mfb_dst_rdy  : std_logic;
@@ -162,7 +225,8 @@ architecture FULL of C2N_CONTROLLER is
     signal buff_data      : std_logic_vector(PCIE_CC_MFB_DATA'range);
     signal buff_data_vld  : std_logic;
 
-    signal hdr_fifo_din      : slv_array_t(PCIE_MFB_REGIONS -1 downto 0)(HDR_FIFO_DATA_W -1 downto 0);
+    -- nvc workaround: flat std_logic_vector avoids slv_array_t element access bug in nvc 1.21.0
+    signal hdr_fifo_din      : std_logic_vector(PCIE_MFB_REGIONS*HDR_FIFO_DATA_W -1 downto 0);
     signal hdr_fifo_wr       : std_logic_vector(PCIE_MFB_REGIONS -1 downto 0);
     signal hdr_fifo_full     : std_logic;
     signal hdr_fifo_dout     : std_logic_vector(HDR_FIFO_DATA_W -1 downto 0);
@@ -229,16 +293,10 @@ begin
             TX_BLOCK_VLD     => open,
             TX_ITEM_VLD      => mfb_item_vld);
 
-    aux_mfb_meta_arr <= slv_array_deser(aux_mfb_meta, USR_MFB_REGIONS);
-
-    aux_mfb_meta_parse_g : for rgn_idx in 0 to USR_MFB_REGIONS -1 generate
-        -- Parsing of the metadata signal from the metadata extractor since it has a different layout
-        -- than the input signal to the PCIE_TRANS_BUFFER
-        aux_mfb_meta_parsed(rgn_idx) <=
-            mfb_item_vld &
-            RDBUFF_CHAN &
-            aux_mfb_meta_arr(rgn_idx);
-    end generate;
+    -- Parsing of the metadata: each region element gets byte_enable bits, channel flag, and buffer pointer
+    aux_mfb_meta_parsed <= build_aux_mfb_meta(
+        aux_mfb_meta, mfb_item_vld,
+        USR_MFB_REGIONS, BUFF_PTR_WIDTH, META_BE_W);
 
     nvme_cmd_dispatcher_i : entity work.NVME_CMD_DISPATCHER
         generic map (
@@ -303,7 +361,7 @@ begin
             RST             => RST,
 
             RX_MFB0_DATA    => aux_mfb_data,
-            RX_MFB0_META    => slv_array_ser(aux_mfb_meta_parsed),
+            RX_MFB0_META    => aux_mfb_meta_parsed,
             RX_MFB0_SOF     => aux_mfb_sof,
             RX_MFB0_SOF_POS => aux_mfb_sof_pos,
             RX_MFB0_EOF     => aux_mfb_eof,
@@ -330,10 +388,21 @@ begin
             TX_MFB_DST_RDY  => mrg_mfb_dst_rdy);
 
     -- WARNING: Assumes that USR_MFB_REGIONS = 1
-    mrg_mfb_meta_parsed <=
-        mrg_mfb_meta(C2N_META_BE)
-        & mrg_mfb_meta(C2N_META_CHAN_IDX)
-        & std_logic_vector(resize(unsigned(mrg_mfb_meta(C2N_META_BUFF_PTR)), META_PCIE_ADDR_W-2)) & '0';
+    -- nvc workaround: pass whole signal and entity-generic-only positions to avoid
+    -- package-constant slice sensitivity computation that crashes nvc 1.21.0
+    mrg_mfb_meta_parsed <= build_mrg_mfb_meta(
+        mrg_mfb_meta,
+        -- be_hi = C2N_META_BE_O + META_BE_W - 1 = (BUFF_PTR_WIDTH+1) + META_BE_W - 1
+        BUFF_PTR_WIDTH + (USR_MFB_REGION_SIZE*USR_MFB_BLOCK_SIZE*USR_MFB_ITEM_WIDTH)/8,
+        -- be_lo = C2N_META_BE_O = BUFF_PTR_WIDTH + 1
+        BUFF_PTR_WIDTH + 1,
+        -- chan_bit = C2N_META_CHAN_IDX_O = BUFF_PTR_WIDTH
+        BUFF_PTR_WIDTH,
+        -- ptr_hi = C2N_META_BUFF_PTR_O + C2N_META_BUFF_PTR_W - 1 = BUFF_PTR_WIDTH - 1
+        BUFF_PTR_WIDTH - 1,
+        -- ptr_lo = C2N_META_BUFF_PTR_O = 2
+        2
+    );
     mrg_mfb_dst_rdy <= '1';
 
     sq_rd_buffer_i : entity work.TX_DMA_PCIE_TRANS_BUFFER
@@ -371,9 +440,12 @@ begin
             RD_DATA_B     => open,
             RD_DATA_VLD_B => open);
 
-    hdr_fifo_input_assign_g : for reg_idx in (PCIE_MFB_REGIONS - 1) downto 0 generate
-        hdr_fifo_din(reg_idx) <= PCIE_HDR_BYTE_CNT(reg_idx) & PCIE_HDR_DATA_RAW(reg_idx) & PCIE_HDR_ADDR(reg_idx);
-        hdr_fifo_wr(reg_idx)  <= PCIE_HDR_SRC_RDY and PCIE_HDR_VLD(reg_idx);
+    hdr_fifo_din <= build_hdr_fifo_din(
+        PCIE_HDR_ADDR, PCIE_HDR_DATA_RAW, PCIE_HDR_BYTE_CNT,
+        PCIE_MFB_REGIONS, HDR_FIFO_DATA_W);
+
+    hdr_fifo_wr_g : for reg_idx in (PCIE_MFB_REGIONS - 1) downto 0 generate
+        hdr_fifo_wr(reg_idx) <= PCIE_HDR_SRC_RDY and PCIE_HDR_VLD(reg_idx);
     end generate;
 
     PCIE_HDR_DST_RDY <= not hdr_fifo_full;
@@ -395,7 +467,7 @@ begin
             CLK   => CLK,
             RESET => RST,
 
-            DI    => slv_array_ser(hdr_fifo_din),
+            DI    => hdr_fifo_din,
             WR    => hdr_fifo_wr,
             FULL  => hdr_fifo_full,
             AFULL => open,
