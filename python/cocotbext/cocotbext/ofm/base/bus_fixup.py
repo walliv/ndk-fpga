@@ -5,7 +5,13 @@ from cocotb_bus.monitors import MonitorStatistics
 
 from collections import deque
 from cocotb.triggers import Event
-from cocotb.log import SimLog
+import logging
+try:
+    from cocotb.log import SimLog
+except ImportError:
+    # cocotb 2.0+ removed SimLog; fall back to standard logging
+    def SimLog(name):
+        return logging.getLogger(name)
 
 
 class Driver:
