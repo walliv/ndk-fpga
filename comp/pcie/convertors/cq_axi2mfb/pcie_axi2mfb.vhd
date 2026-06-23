@@ -11,6 +11,7 @@ use IEEE.numeric_std.all;
 
 use work.math_pack.all;
 use work.type_pack.all;
+use work.pcie_axi_meta_pack.all;
 
 -- The Purpose of this component is to convert AXI to MFB bus.
 -- Supported are 512b and 256b with and without straddling, but
@@ -38,7 +39,7 @@ entity PCIE_CQ_AXI2MFB is
         -- CQ_USER_WIDTH = 85  for Gen3x8 PCIe - without straddling!
         -- =======================================================================
 
-        AXI_CQUSER_WIDTH  : natural := 183;
+        AXI_CQUSER_WIDTH  : natural := AXI_CC512_USER_W;
         AXI_DATA_WIDTH    : natural := MFB_REGIONS*MFB_REGION_WIDTH;
         -- Straddling is permited only for CQ_USER_WIDTH = 183
         STRADDLING        : boolean := false;
@@ -106,8 +107,9 @@ entity PCIE_CQ_AXI2MFB is
         -- Byte enables for the first DWORD
         CQ_FBE            : out std_logic_vector(MFB_REGIONS*4-1 downto 0);
         -- Byte enables for the last DWORD
-        CQ_LBE            : out std_logic_vector(MFB_REGIONS*4-1 downto 0)
-
+        CQ_LBE            : out std_logic_vector(MFB_REGIONS*4-1 downto 0);
+        -- Byte enable for the whole Dword
+        CQ_BE             : out std_logic_vector(MFB_REGIONS*32-1 downto 0)
     );
 end entity;
 
@@ -147,6 +149,7 @@ architecture FULL of PCIE_CQ_AXI2MFB is
     signal cq_axi_user_tph_st_tag  : std_logic_vector(MFB_REGIONS*8-1 downto 0);
     signal cq_axi_user_fbe         : std_logic_vector(MFB_REGIONS*4-1 downto 0);
     signal cq_axi_user_lbe         : std_logic_vector(MFB_REGIONS*4-1 downto 0);
+    signal cq_axi_user_be          : std_logic_vector(MFB_REGIONS*32-1 downto 0);
     ---------------------------------------------------------------------------
 
 begin
@@ -166,6 +169,7 @@ begin
         cq_axi_user_sop(0)     <= CQ_AXI_USER(40);
         cq_axi_user_fbe        <= CQ_AXI_USER(4-1 downto 0);
         cq_axi_user_lbe        <= CQ_AXI_USER(8-1 downto 4);
+        CQ_BE                  <= CQ_AXI_USER(AXI_CQ256_BE);
 
         conv_256_pr : process (all)
             variable eof_pos   : unsigned(3-1 downto 0) := (others => '0');
@@ -211,6 +215,7 @@ begin
         cq_axi_user_eop         <= CQ_AXI_USER(87 downto 86);
         cq_axi_user_eop_ptr(0)  <= CQ_AXI_USER(91 downto 88);
         cq_axi_user_eop_ptr(1)  <= CQ_AXI_USER(95 downto 92);
+        CQ_BE                   <= CQ_AXI_USER(AXI_CQ512_BE);
 
         -- conversion process
         sop_eop_sof_eof_conv_pr : process (all)
@@ -273,15 +278,15 @@ begin
     -- =========================================================================
 
     axi_512b_no_straddling_g: if (AXI_CQUSER_WIDTH = 183 and not STRADDLING) generate
-        cq_axi_user_tph_present <= CQ_AXI_USER(99-1 downto 97);
-        cq_axi_user_tph_type    <= CQ_AXI_USER(103-1 downto 99);
-        cq_axi_user_tph_st_tag  <= CQ_AXI_USER(119-1 downto 103);
-        cq_axi_user_sop(0)      <= CQ_AXI_USER(80);
-        cq_axi_user_sop(1)      <= '0';
+        cq_axi_user_tph_present <= CQ_AXI_USER(AXI_CQ512_TPH_PRESENT);
+        cq_axi_user_tph_type    <= CQ_AXI_USER(AXI_CQ512_TPH_TYPE);
+        cq_axi_user_tph_st_tag  <= CQ_AXI_USER(AXI_CQ512_TPH_ST_TAG);
+        cq_axi_user_sop         <= CQ_AXI_USER(AXI_CQ512_SOP);
         CQ_MFB_SOF              <= cq_axi_user_sop;
         CQ_MFB_SOF_POS          <= (others => '0');
-        cq_axi_user_fbe         <= "0000" & CQ_AXI_USER(4-1 downto 0);
-        cq_axi_user_lbe         <= "0000" & CQ_AXI_USER(12-1 downto 8);
+        cq_axi_user_fbe         <= CQ_AXI_USER(AXI_CQ512_FBE);
+        cq_axi_user_lbe         <= CQ_AXI_USER(AXI_CQ512_FBE);
+        CQ_BE                   <= CQ_AXI_USER(AXI_CQ512_BE);
 
         conv_pr : process (all)
             variable eof_pos : unsigned(3-1 downto 0) := (others => '0');
@@ -295,13 +300,13 @@ begin
             CQ_MFB_EOF     <= (others => '0');
             CQ_MFB_EOF_POS <= (others => '0');
 
-            if (CQ_AXI_USER(80) = '1') then
+            if (cq_axi_user_sop(0) = '1') then
                 CQ_TPH_PRESENT <= cq_axi_user_tph_present;
                 CQ_TPH_TYPE    <= cq_axi_user_tph_type;
                 CQ_TPH_ST_TAG  <= cq_axi_user_tph_st_tag;
             end if;
-            if (CQ_AXI_LAST = '1') then
 
+            if (CQ_AXI_LAST = '1') then
                 for i in 0 to ((AXI_DATA_WIDTH/32)/2-1) loop
                     if ((CQ_AXI_KEEP(i) = '1' and not (CQ_AXI_KEEP(i+1) = '0')) or (CQ_AXI_KEEP(i) = '1' and unsigned(CQ_AXI_KEEP) = 1)) then
                         eof(0) := '1';
@@ -362,5 +367,4 @@ begin
     CQ_MFB_DATA    <= CQ_AXI_DATA;
     CQ_MFB_SRC_RDY <= CQ_AXI_VALID;
     CQ_AXI_READY   <= CQ_MFB_DST_RDY;
-
 end architecture;

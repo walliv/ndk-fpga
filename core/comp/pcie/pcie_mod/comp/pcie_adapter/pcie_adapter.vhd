@@ -267,6 +267,7 @@ architecture FULL of PCIE_ADAPTER is
     signal cq_tph_st_tag        : std_logic_vector(CQ_MFB_REGIONS*8-1 downto 0);
     signal cq_fbe               : std_logic_vector(CQ_MFB_REGIONS*4-1 downto 0);
     signal cq_lbe               : std_logic_vector(CQ_MFB_REGIONS*4-1 downto 0);
+    signal cq_be                : std_logic_vector(CQ_MFB_REGIONS*PCIE_META_BE_W-1 downto 0);
     signal rq_mfb_be_arr        : slv_array_t(RQ_MFB_REGIONS-1 downto 0)(8-1 downto 0);
 
     signal cq_mfb_meta_arr      : slv_array_t(CQ_MFB_REGIONS-1 downto 0)(PCIE_CQ_META_WIDTH-1 downto 0);
@@ -331,7 +332,8 @@ begin
             CQ_TPH_TYPE    => cq_tph_type,
             CQ_TPH_ST_TAG  => cq_tph_st_tag,
             CQ_FBE         => cq_fbe,
-            CQ_LBE         => cq_lbe
+            CQ_LBE         => cq_lbe,
+            CQ_BE          => cq_be
         );
 
         cq_mfb_meta_g: for i in 0 to CQ_MFB_REGIONS-1 generate
@@ -340,6 +342,7 @@ begin
             cq_mfb_meta_arr(i)(PCIE_CQ_META_BAR)           <= (others => '0');
             cq_mfb_meta_arr(i)(PCIE_CQ_META_FBE)           <= cq_fbe((i+1)*PCIE_META_FBE_W-1 downto i*PCIE_META_FBE_W);
             cq_mfb_meta_arr(i)(PCIE_CQ_META_LBE)           <= cq_lbe((i+1)*PCIE_META_LBE_W-1 downto i*PCIE_META_LBE_W);
+            cq_mfb_meta_arr(i)(PCIE_CQ_META_BE)            <= cq_be((i+1)*PCIE_META_BE_W-1 downto i*PCIE_META_BE_W);
             cq_mfb_meta_arr(i)(PCIE_CQ_META_TPH_PRESENT_O) <= cq_tph_present(i);
             cq_mfb_meta_arr(i)(PCIE_CQ_META_TPH_TYPE)      <= cq_tph_type((i+1)*PCIE_META_TPH_TYPE_W-1 downto i*PCIE_META_TPH_TYPE_W);
             cq_mfb_meta_arr(i)(PCIE_CQ_META_TPH_ST_TAG)    <= cq_tph_st_tag((i+1)*PCIE_META_TPH_ST_TAG_W-1 downto i*PCIE_META_TPH_ST_TAG_W);
@@ -559,6 +562,7 @@ begin
             cq_mfb_meta_arr(i)(PCIE_CQ_META_BAR)           <= cblk_cq_mfb_meta_arr(i)(PCIE_CQ_META_BAR);
             cq_mfb_meta_arr(i)(PCIE_CQ_META_FBE)           <= (others => '0');
             cq_mfb_meta_arr(i)(PCIE_CQ_META_LBE)           <= (others => '0');
+            cq_mfb_meta_arr(i)(PCIE_CQ_META_BE)            <= (others => '0');
             cq_mfb_meta_arr(i)(PCIE_CQ_META_TPH_PRESENT_O) <= '0';
             cq_mfb_meta_arr(i)(PCIE_CQ_META_TPH_TYPE)      <= (others => '0');
             cq_mfb_meta_arr(i)(PCIE_CQ_META_TPH_ST_TAG)    <= (others => '0');
