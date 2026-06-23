@@ -345,7 +345,7 @@ architecture FULL of PCIE_CTRL is
     signal pcie_cq_mfb_meta_arr   : slv_array_t(CQ_MFB_REGIONS-1 downto 0)(PCIE_CQ_META_WIDTH-1 downto 0);
     signal pcie_cq_mfb_data_arr   : slv_array_t(CQ_MFB_REGIONS-1 downto 0)(CQ_MFB_REGION_SIZE*CQ_MFB_BLOCK_SIZE*CQ_MFB_ITEM_WIDTH-1 downto 0);
     signal pcie_cq_mfb_bar        : slv_array_t(CQ_MFB_REGIONS-1 downto 0)(PCIE_META_BAR_W-1 downto 0);
-    signal pcie_cq_mfb_func_id    : slv_array_t(CQ_MFB_REGIONS-1 downto 0)(3-1 downto 0);
+    signal pcie_cq_mfb_func_id    : slv_array_t(CQ_MFB_REGIONS-1 downto 0)(8-1 downto 0);
     signal pcie_cq_mfb_sel        : std_logic_vector(CQ_MFB_REGIONS-1 downto 0);
 
     signal pcie_rq_mfb_meta_arr   : slv_array_t(RQ_MFB_REGIONS-1 downto 0)(PCIE_RQ_META_WIDTH-1 downto 0);
@@ -585,12 +585,15 @@ begin
             bar_index_g: if (DEVICE = "ULTRASCALE" or DEVICE = "VERSAL") generate
                 -- BAR index is in AXI header
                 pcie_cq_mfb_bar(i)     <= pcie_cq_mfb_data_arr(i)(114 downto 112);
-                pcie_cq_mfb_func_id(i) <= pcie_cq_mfb_data_arr(i)(106 downto 104);
+                pcie_cq_mfb_func_id(i) <= pcie_cq_mfb_data_arr(i)(111 downto 104);
             else generate -- Intel FPGA (R-Tile, P-Tile)
                 pcie_cq_mfb_bar(i)     <= pcie_cq_mfb_meta_arr(i)(PCIE_CQ_META_BAR);
                 -- TODO: The function number should be passed somewhere else
                 pcie_cq_mfb_func_id(i) <= (others => '0');
             end generate;
+            -- Universal routing: PF0 BAR0 always goes to MI/MTC; everything else goes to DMA-BAR.
+            -- Works for both single-function (e.g. Hyperion on PF0 BAR2) and multi-function
+            -- (e.g. Iuventus with PF1 DMA) designs.
             pcie_cq_mfb_sel(i) <= '0' when (unsigned(pcie_cq_mfb_bar(i)) = 0 and unsigned(pcie_cq_mfb_func_id(i)) = 0) else '1';
         end generate;
 
