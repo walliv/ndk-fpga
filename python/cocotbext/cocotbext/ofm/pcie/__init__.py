@@ -17,7 +17,7 @@ from .PcieHeaders import (RQHeader, CQHeader, RCHeader, CCHeader, RQUser, CQUser
 
 __all__ = ["Axi4SCompleter", "Axi4SRequester", "AvstCompleter", "AvstRequester", "PcieRequester",
            "RQHeader", "CQHeader", "RCHeader", "CCHeader", "RQUser", "CQUser",
-           "RCUser", "CQMfbMeta", "RQMfbMeta", "CCMfbMeta", "RCMfbMeta"]
+           "RCUser", "CQMfbMeta", "RQMfbMeta", "CCMfbMeta", "RCMfbMeta", "PcieReqType", "pcie_byte_count"]
 
 
 class PcieReqType(IntEnum):
@@ -37,7 +37,8 @@ class PcieReqType(IntEnum):
     VENDOR_MSG = 0xD
     ATS_MSG = 0xE
     RSVD = 0xF
-    
+
+
 def pcie_byte_count(dword_count, first_be, last_be):
     """
     Calculates Total Byte Count based on AMD's PCIe logic table.
