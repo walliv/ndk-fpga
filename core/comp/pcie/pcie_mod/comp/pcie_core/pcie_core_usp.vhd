@@ -34,8 +34,7 @@ architecture USP of PCIE_CORE is
     constant IS_FULL_EP : boolean := (
         ENDPOINT_MODE = 0
         or ENDPOINT_MODE = 1
-        or (PCIE_GEN = 4 and ENDPOINT_MODE = 2)
-        or ENDPOINT_MODE = 3);
+        or (PCIE_GEN = 4 and ENDPOINT_MODE = 2));
     constant AXI_CQUSER_WIDTH  : natural := tsel(IS_FULL_EP, 183, 88);
     constant AXI_CCUSER_WIDTH  : natural := tsel(IS_FULL_EP, 81, 33);
     constant AXI_RQUSER_WIDTH  : natural := tsel(IS_FULL_EP, 137, 62);
