@@ -16,7 +16,7 @@ from argparse import ArgumentParser
 
 import numpy as np
 import nfb
-from ofm.comp.dma.c2h_hbm_reader import C2HHBMReaderRegAccess
+from ofm.comp.dma.hyperion import C2HHBMReaderRegAccess
 
 log = logging.getLogger(__name__)
 
