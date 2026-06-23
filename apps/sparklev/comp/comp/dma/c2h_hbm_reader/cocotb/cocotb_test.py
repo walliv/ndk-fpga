@@ -9,7 +9,7 @@ import math
 import random
 import logging
 from logging.handlers import RotatingFileHandler
-from cocotbext.ofm.dma.c2h_hbm_reader import C2HReaderMIRegMap, CtrlRegBits, StatRegBits
+from cocotbext.ofm.dma.hyperion import C2HReaderMIRegMap, C2HCtrlRegBits, C2HC2HStatRegBits
 
 import cocotb
 from cocotb.clock import Clock
@@ -221,9 +221,9 @@ class Testbench:
         poll = 0
         while True:
             status = await self._mi_read32(C2HReaderMIRegMap.STATUS)
-            if status & (1 << StatRegBits.ERROR):
+            if status & (1 << C2HStatRegBits.ERROR):
                 raise RuntimeError(f"C2H_HBM_READER: AXI RRESP error (addr=0x{addr:09X} size={size})")
-            if status & (1 << StatRegBits.DONE):
+            if status & (1 << C2HStatRegBits.DONE):
                 self.log.info(f"DONE after {poll} polls")
                 break
             poll += 1
