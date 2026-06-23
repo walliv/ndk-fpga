@@ -12,7 +12,7 @@ import time
 from argparse import ArgumentParser
 
 import nfb
-from ofm.comp.dma.c2h_hbm_reader import C2HHBMReaderRegAccess
+from ofm.comp.dma.hyperion import C2HHBMReaderRegAccess
 from ofm.comp.dma.hyperion import HBMWriteWindow
 
 log = logging.getLogger(__name__)
