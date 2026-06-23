@@ -37,12 +37,12 @@ GEN_MK_NAME ?= $(OUTPUT_NAME).$(SYNTH).mk
 #
 # All targets, which depends on $(MOD) variable, must be called in two phases:
 # 1. Main run of make:
-# 		- target depends on $(GEN_MK_NAME) only (this will generate the file)
-# 		- target executes recursion of make
+# - target depends on $(GEN_MK_NAME) only (this will generate the file)
+# - target executes recursion of make
 # 2. Recursive run of make:
-# 		- already generated file $(GEN_MK_NAME) is included
-# 		- $(MOD) variable can be used to determine dependencies
-#		- real target is executed
+# - already generated file $(GEN_MK_NAME) is included
+# - $(MOD) variable can be used to determine dependencies
+#- real target is executed
 #
 # Rule for $(GEN_MK_NAME) is better than previous approach (in which the file
 # was generated always, in the parse phase of the main Makefile):
@@ -51,7 +51,7 @@ GEN_MK_NAME ?= $(OUTPUT_NAME).$(SYNTH).mk
 # - allows user to include this Makefile system even some Modules.tcl not yet exists
 
 # a) In the recursive run of make include the generated file $(GEN_MK_NAME)
-# 	- all real rules must be specified in main Makefile and wrapped in similar condition
+# - all real rules must be specified in main Makefile and wrapped in similar condition
 # b) In the main run of make create a rule for the $(GEN_MK_NAME) and rule for all targets, which needs $(GEN_MK_NAME)
 #   - user must specify all those targets in the $(GEN_MK_TARGETS) variable within main Makefile
 ifneq ($(GEN_MK_TARGET),)
@@ -72,17 +72,34 @@ vhdocl:
 	for m in $(MOD); do echo $$m | grep .vhd | sed 's/^/input\ /' >> vhdocl.conf; done
 	vhdocl -f vhdocl.conf
 
-COCOTB_OPT_ARGS:=
+# Cocotb runtime args
+COCOTB_RUN_ARGS:=
+
 ifneq ($(RANDOM_SEED),)
-COCOTB_OPT_ARGS+=COCOTB_RANDOM_SEED=$(RANDOM_SEED)
+COCOTB_RUN_ARGS += COCOTB_RANDOM_SEED=$(RANDOM_SEED)
 endif
 
+# Debug / NVC options
 DEBUG_ENABLE?=false
 ifeq ($(DEBUG_ENABLE),true)
-NVC_ELAB_DEBUG_FLAGS=--no-collapse
-NVC_RUN_DEBUG_FLAGS=-w --dump-arrays
+NVC_ELAB_ARGS += --no-collapse
+NVC_RUN_ARGS += --dump-arrays
 endif
-COCOTB_OPT_ARGS+=DEBUG_ENABLE=$(DEBUG_ENABLE)
+
+# Coverage options
+ifneq ($(COVERAGE_EN),)
+NVC_ELAB_ARGS += --cover
+endif
+
+COCOTB_ENV=\
+COCOTB_TEST_MODULES=$(COCOTB_TEST_MODULES) \
+TOPLEVEL=$(TOP_LEVEL_ENT_LC) \
+TOPLEVEL_LANG=vhdl \
+$(NETCOPE_ENV) \
+$(COCOTB_RUN_ARGS) \
+PYGPI_PYTHON_BIN=$(shell cocotb-config --python-bin) \
+COCOTB_RESOLVE_X=ZEROS \
+LIBPYTHON_LOC=$(shell cocotb-config --libpython)
 
 GHDL_WORK_DIR?=work_ghdl
 ghdl-sim: $(MOD)
@@ -90,8 +107,7 @@ ghdl-sim: $(MOD)
 	$(eval TOP_LEVEL_ENT_LC:=$(shell echo $(TOP_LEVEL_ENT) | tr '[:upper:]' '[:lower:]'))
 	ghdl -i --workdir=$(GHDL_WORK_DIR) $(addprefix -P,$(GHDL_LIBS)) --std=08 -frelaxed --ieee=synopsys $(filter %.vhd,$(MOD))
 	ghdl -m --workdir=$(GHDL_WORK_DIR) $(addprefix -P,$(GHDL_LIBS)) --std=08 -frelaxed --ieee=synopsys --warn-no-hide $(TOP_LEVEL_ENT_LC)
-	MODULE=$(COCOTB_TEST_MODULES) TOPLEVEL=$(TOP_LEVEL_ENT_LC) TOPLEVEL_LANG=vhdl $(NETCOPE_ENV) COCOTB_RESOLVE_X=ZEROS $(COCOTB_OPT_ARGS) PYGPI_PYTHON_BIN=$(shell cocotb-config --python-bin) \
-	ghdl -r -v --workdir=$(GHDL_WORK_DIR) -P$(GHDL_WORK_DIR) $(addprefix -P,$(GHDL_LIBS)) $(TOP_LEVEL_ENT_LC) --vpi=$(shell cocotb-config --lib-name-path vpi ghdl) --asserts=disable --vcd=$(OUTPUT_NAME).vcd
+	$(COCOTB_ENV) ghdl -r -v --workdir=$(GHDL_WORK_DIR) -P$(GHDL_WORK_DIR) $(addprefix -P,$(GHDL_LIBS)) $(TOP_LEVEL_ENT_LC) --vpi=$(shell cocotb-config --lib-name-path vpi ghdl) --asserts=disable --vcd=$(OUTPUT_NAME).vcd
 
 NVC_LOAD ?=
 nvc-sim: NVC_LOAD=--load $(shell cocotb-config --lib-name-path vhpi nvc)
@@ -103,10 +119,9 @@ nvc-sim: nvc
 NVC_RUN_ENV ?=
 nvc: $(MOD)
 	$(eval TOP_LEVEL_ENT_LC:=$(shell echo $(TOP_LEVEL_ENT) | tr '[:upper:]' '[:lower:]'))
-	nvc --work=nvcwork -H 1G -M 4G --std=2008 -a --relaxed $(filter %.vhd,$(MOD))
-	nvc --work=nvcwork -H 1G -M 4G -e $(NVC_ELAB_DEBUG_FLAGS) $(TOP_LEVEL_ENT_LC)
-	$(NVC_RUN_ENV) COCOTB_TEST_MODULES=$(COCOTB_TEST_MODULES) TOPLEVEL=$(TOP_LEVEL_ENT_LC) TOPLEVEL_LANG=vhdl $(NETCOPE_ENV) $(COCOTB_OPT_ARGS) PYGPI_PYTHON_BIN=$(shell cocotb-config --python-bin) COCOTB_RESOLVE_X=ZEROS \
-	nvc --work=nvcwork -H 1G -M 4G -r $(TOP_LEVEL_ENT_LC) $(NVC_RUN_DEBUG_FLAGS) --ieee-warnings=off $(NVC_LOAD)
+	nvc --work=nvcwork -H 1G -M 16G --std=2008 -a --relaxed $(filter %.vhd,$(MOD))
+	nvc --work=nvcwork -H 1G -M 16G -e $(NVC_ELAB_ARGS) $(TOP_LEVEL_ENT_LC)
+	$(NVC_RUN_ENV) $(COCOTB_ENV) nvc --work=nvcwork -H 1G -M 16G -rw $(TOP_LEVEL_ENT_LC) --dump-arrays --ieee-warnings=off $(NVC_LOAD)
 
 else
 .PHONY: $(GEN_MK_NAME)

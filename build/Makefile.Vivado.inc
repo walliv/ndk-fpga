@@ -51,6 +51,11 @@ ttarget_%:
 starget_%:
 	$(NETCOPE_ENV) $(SYNTH) $(SYNTHFLAGS) $(SYNTHFILES) -t $*
 
+# Generate a stand-alone filelist.tcl (read_* commands for all design sources).
+# Runs the target_filelist TCL procedure through bare tclsh.
+.PHONY: filelist
+filelist: ttarget_filelist
+
 # Main target for synthesize components
 comp: export CLK_PORTS:=$(CLK_PORTS)
 comp: export CLK_PERIOD:=$(CLK_PERIOD)
