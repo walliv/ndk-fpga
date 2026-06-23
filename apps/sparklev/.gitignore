@@ -1,0 +1,51 @@
+# Generated artifacts across the SparkleV app. Everything below is reproducible
+# by running a build, a cocotb simulation, or `make filelist`, and must not be
+# committed. The design source list is tracked as build/<card>/filelist.tcl and
+# is regenerated with `make filelist`.
+
+# Vivado output products
+*.bit
+*.nfw
+*.dcp
+*.mcs
+*.edf
+*.edn
+*.prm
+
+# Vivado project / run / IP output directories
+*.xpr
+*.cache/
+*.gen/
+*.hw/
+*.runs/
+*.sim/
+*.srcs/
+*.ip_user_files/
+.Xil/
+build/*/src/*/
+
+# NDK build temporaries
+*.netcope_tmp/
+*.vivado.mk
+DevTree_paths.txt
+
+# Simulation artifacts (cocotb / nvc / Questa)
+nvcwork/
+*.fst
+*.vcd
+results.xml
+build.log
+rotating.log*
+
+# Logs and synthesis/implementation reports
+*.log
+*.jou
+*.prj
+*_synth.*
+*_par.*
+*.drc
+messages-*.txt
+
+# Python
+__pycache__/
+*.pyc
