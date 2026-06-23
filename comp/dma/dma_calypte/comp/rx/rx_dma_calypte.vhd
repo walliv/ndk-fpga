@@ -53,7 +53,9 @@ entity RX_DMA_CALYPTE is
         -- latency by one clock period).
         TRBUF_REG_EN   : boolean := FALSE;
         -- Enables performance counters in the design for metrics.
-        PERF_CNTR_EN   : boolean := FALSE
+        PERF_CNTR_EN   : boolean := FALSE;
+        -- Enables input buffer to the component
+        INP_BUFF_EN     : boolean := TRUE
     );
 
     port (
@@ -730,31 +732,43 @@ begin
         TX_FRAME_LNG   => stat_frame_lng
     );
 
-    input_buffer_i : entity work.RX_DMA_CALYPTE_INPUT_BUFFER
-    generic map (
-        REGION_SIZE => USER_RX_MFB_REGION_SIZE,
-        BLOCK_SIZE  => USER_RX_MFB_BLOCK_SIZE,
-        ITEM_WIDTH  => USER_RX_MFB_ITEM_WIDTH
-    )
-    port map (
-        CLK => CLK,
-        RST => RESET,
+    -- If the input buffer in not enabled, the input data can begin only on the beginning of a word
+    -- and have therefore a configuration 1,1,X,8
+    inp_buff_g: if (INP_BUFF_EN) generate
+        input_buffer_i : entity work.RX_DMA_CALYPTE_INPUT_BUFFER
+        generic map (
+            REGION_SIZE => USER_RX_MFB_REGION_SIZE,
+            BLOCK_SIZE  => USER_RX_MFB_BLOCK_SIZE,
+            ITEM_WIDTH  => USER_RX_MFB_ITEM_WIDTH
+        )
+        port map (
+            CLK => CLK,
+            RST => RESET,
 
-        RX_MFB_DATA    => USER_RX_MFB_DATA,
-        RX_MFB_SOF_POS => USER_RX_MFB_SOF_POS,
-        RX_MFB_EOF_POS => USER_RX_MFB_EOF_POS,
-        RX_MFB_SOF     => USER_RX_MFB_SOF(0),
-        RX_MFB_EOF     => USER_RX_MFB_EOF(0),
-        RX_MFB_SRC_RDY => USER_RX_MFB_SRC_RDY and hdr_log_dst_rdy,
-        RX_MFB_DST_RDY => data_path_dst_rdy,
+            RX_MFB_DATA    => USER_RX_MFB_DATA,
+            RX_MFB_SOF_POS => USER_RX_MFB_SOF_POS,
+            RX_MFB_EOF_POS => USER_RX_MFB_EOF_POS,
+            RX_MFB_SOF     => USER_RX_MFB_SOF(0),
+            RX_MFB_EOF     => USER_RX_MFB_EOF(0),
+            RX_MFB_SRC_RDY => USER_RX_MFB_SRC_RDY and hdr_log_dst_rdy,
+            RX_MFB_DST_RDY => data_path_dst_rdy,
 
-        TX_MFB_DATA    => mfb_data_inbuf,
-        TX_MFB_SOF_POS => mfb_sof_pos_inbuf,
-        TX_MFB_EOF_POS => mfb_eof_pos_inbuf,
-        TX_MFB_SOF     => mfb_sof_inbuf,
-        TX_MFB_EOF     => mfb_eof_inbuf,
-        TX_MFB_SRC_RDY => mfb_src_rdy_inbuf,
-        TX_MFB_DST_RDY => mfb_dst_rdy_inbuf
-    );
+            TX_MFB_DATA    => mfb_data_inbuf,
+            TX_MFB_SOF_POS => mfb_sof_pos_inbuf,
+            TX_MFB_EOF_POS => mfb_eof_pos_inbuf,
+            TX_MFB_SOF     => mfb_sof_inbuf,
+            TX_MFB_EOF     => mfb_eof_inbuf,
+            TX_MFB_SRC_RDY => mfb_src_rdy_inbuf,
+            TX_MFB_DST_RDY => mfb_dst_rdy_inbuf
+        );
 
+    else generate
+        mfb_data_inbuf    <= USER_RX_MFB_DATA;
+        mfb_sof_inbuf     <= USER_RX_MFB_SOF(0);
+        mfb_eof_inbuf     <= USER_RX_MFB_EOF(0);
+        mfb_sof_pos_inbuf <= USER_RX_MFB_SOF_POS;
+        mfb_eof_pos_inbuf <= USER_RX_MFB_EOF_POS;
+        mfb_src_rdy_inbuf <= USER_RX_MFB_SRC_RDY and hdr_log_dst_rdy;
+        data_path_dst_rdy <= mfb_dst_rdy_inbuf;
+    end generate;
 end architecture;
