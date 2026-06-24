@@ -30,7 +30,6 @@ NET_MOD_ENABLE?=true
 APP_CORE_ENABLE?=true
 BMC_ENABLE?=true
 USR_CORE_ARCH?=FULL
-
 include $(CORE_BASE)/ndk_paths.mk
 
 NETCOPE_ENV += \
