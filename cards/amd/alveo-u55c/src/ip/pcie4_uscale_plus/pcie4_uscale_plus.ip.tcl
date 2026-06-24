@@ -1,5 +1,5 @@
 # pcie4_uscale_plus.ip.tcl: generation script for the PCIe IP
-# Copyright 2025 Universitaet Heidelberg, Institut fuer Technische Informatik (ZITI)
+# Copyright 2026 Universitaet Heidelberg, Institut fuer Technische Informatik (ZITI)
 # Author(s): Vladislav Valek <vladislav.valek@stud.uni-heidelberg.de>
 #
 # SPDX-License-Identifier: Apache-2.0
@@ -89,6 +89,12 @@ if {$PARAMS(PCIE_ENDPOINT_MODE) == 2 && $PARAMS(PCIE_GEN) == 3} {
         CONFIG.PL_LINK_CAP_MAX_LINK_WIDTH {X8} \
         CONFIG.axisten_if_width {256_bit} \
         CONFIG.coreclk_freq {500}
+} elseif {$PARAMS(PCIE_ENDPOINT_MODE) == 3} {
+    # x4 endpoint (256-bit non-straddle AXI interface; IS_FULL_EP=false in pcie_core_usp for this mode)
+    lappend config_list \
+        CONFIG.PL_LINK_CAP_MAX_LINK_WIDTH {X4} \
+        CONFIG.pcie_blk_locn {X1Y0} \
+        CONFIG.axisten_if_width {256_bit}
 } else {
     if {$PARAMS(PCIE_ENDPOINT_MODE) == 1} {
         if {$endpoint_idx == 0} {
@@ -115,6 +121,19 @@ if {$PARAMS(PCIE_ENDPOINT_MODE) == 2 && $PARAMS(PCIE_GEN) == 3} {
         CONFIG.AXISTEN_IF_EXT_512_RC_4TLP_STRADDLE {true} \
         CONFIG.AXISTEN_IF_EXT_512_RQ_STRADDLE {true} \
         CONFIG.axisten_if_width {512_bit}
+}
+
+# DMA Hyperion (type 6): enable PF0 BAR2 as a 64-bit prefetchable 16 GB window for direct HBM writes.
+# Prefetchable is required so the host can place this multi-GB BAR in the 64-bit above-4 GB window
+# (a non-prefetchable BAR is confined to the bridge's 32-bit window and cannot exceed 4 GB).
+# The host maps BAR2 to the full HBM address space; the H2C AXI adapter uses addr[33:0] as AWADDR.
+if {$PARAMS(DMA_TYPE) == 6} {
+    lappend config_list \
+        CONFIG.pf0_bar2_enabled {true} \
+        CONFIG.pf0_bar2_64bit {true} \
+        CONFIG.pf0_bar2_prefetchable {true} \
+        CONFIG.pf0_bar2_size {16} \
+        CONFIG.pf0_bar2_scale {Gigabytes}
 }
 
 if {$PARAMS(DMA_TYPE) == 5} {
