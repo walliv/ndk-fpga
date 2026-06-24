@@ -109,6 +109,166 @@ proc EvalComp {ENTITY ENTITY_BASE ARCHGRP} {
 }
 
 # ---------------------------------------------------------------------
+# Procedure filelist_rebase_paths
+# Rewrites repository paths embedded in IP-generation parameters so they resolve
+# relative to the repository root. A value is rewritten only when it contains a
+# path separator (scalar parameters such as "6" or "USP" are left intact) and
+# resolves to a location inside the repository (paths to external tools are left
+# intact). Lists are processed element-wise, so nested parameter dictionaries
+# (e.g. IP_PARAMS_L) are handled transparently. The repository root is emitted as
+# 'git_root_token' (a neutral placeholder) instead of ${shell_git_root}, because
+# the value lives inside a brace-quoted dict where variable substitution does not
+# happen; the generated script resolves the placeholder with a string map.
+#
+proc filelist_rebase_paths {token combo_base git_root_token} {
+    if {[llength $token] > 1} {
+        set out [list]
+        foreach el $token {
+            lappend out [filelist_rebase_paths $el $combo_base $git_root_token]
+        }
+        return $out
+    }
+
+    if {[string first "/" $token] < 0} {
+        return $token
+    }
+
+    set norm [file normalize $token]
+    if {!([string match "${combo_base}/*" $norm] || $norm eq $combo_base)} {
+        return $token
+    }
+
+    set rel [string range $norm [string length $combo_base] end]
+    return "${git_root_token}${rel}"
+}
+
+# ---------------------------------------------------------------------
+# Procedure target_filelist
+# Generates a stand-alone TCL script (default "filelist.tcl") that lists every
+# source file of the design as Vivado "read_*" / "source" commands, so the design
+# sources can be added to an external Vivado flow without the NDK build system.
+# File paths are emitted relative to the repository root through the
+# ${shell_git_root} variable, which the calling shell must define before sourcing
+# the generated file. Invoked through "make filelist".
+#
+proc target_filelist { {filename "filelist.tcl"} } {
+    global SYNTH_FLAGS HIERARCHY COMBO_BASE
+
+    # Make sure dynamically generated sources (DevTree.vhd, netcope_const.vhd,
+    # combo_user_const.vhd, ...) exist on disk so the file list can reference them.
+    DevTree_init
+    foreach gen_file $SYNTH_FLAGS(NB_GENERATED_FILES) {
+        foreach gen_name [lindex $gen_file 0] {
+            target_generate_file [SimplPath $gen_name]
+        }
+    }
+
+    # Collect the whole source hierarchy. EvalFileDevTree_paths only records the
+    # device-tree paths; it does not run any Vivado command, so this works under
+    # bare tclsh (see the ttarget_% rule).
+    set NB_FILELIST [AddInputFiles SYNTH_FLAGS HIERARCHY EvalFileDevTree_paths ""]
+
+    # Absolute path to the repository root; subtracted from each file name so the
+    # emitted paths become repository-relative (prefixed with ${shell_git_root}).
+    set int_combo_base [file normalize $COMBO_BASE]
+
+    # Neutral placeholder used for the repository root inside brace-quoted IP
+    # parameter dicts (where ${shell_git_root} would not be substituted).
+    set git_root_token "@@SHELL_GIT_ROOT@@"
+
+    set library "work"
+    set content "# This is an automatically generated file.\n"
+    append content "# You can regenerate it using \"make filelist\".\n\n"
+
+    append content "if \{!\[info exists shell_git_root]\} {
+    error \"The shell_git_root variable is undefined! Initialize it in a calling shell.\"
+}\n\n"
+
+    foreach item $NB_FILELIST {
+
+        array set opt [lassign $item fname]
+        set fext [file extension $fname]
+
+        # Rebase real source files onto ${shell_git_root}. Pseudo entries
+        # (COMPONENT, DEVTREE) carry no real path and are left untouched.
+        if {!($opt(TYPE) == "COMPONENT" || $opt(TYPE) == "DEVTREE")} {
+            set fname [string range $fname [string length $int_combo_base] end]
+            set fname "\$\{shell_git_root\}${fname}"
+        }
+
+        if {$opt(TYPE) == ""} {
+            # A normal HDL source file
+            if {$fext == ".vhd" || $fext == ".vhdl"} {
+                append content "read_vhdl -library $library -vhdl2008 $fname\n"
+            } elseif {$fext == ".v"} {
+                append content "read_verilog -library $library $fname\n"
+            } elseif {$fext == ".sv" || $fext == ".svp"} {
+                append content "read_verilog -library $library -sv $fname\n"
+            }
+
+        } elseif {$opt(TYPE) == "CONSTR_VIVADO" && $fext == ".xdc"} {
+            # A constraint file
+            append content "read_xdc $fname\n"
+
+            if {[info exists opt(SCOPED_TO_REF)]} {
+                append content "set_property SCOPED_TO_REF $opt(SCOPED_TO_REF) \[get_files [file tail $fname]\]\n"
+            }
+            if {[info exists opt(PROCESSING_ORDER)]} {
+                append content "set_property PROCESSING_ORDER $opt(PROCESSING_ORDER) \[get_files [file tail $fname]\]\n"
+            }
+            if {[info exists opt(USED_IN)]} {
+                append content "set_property USED_IN $opt(USED_IN) \[get_files [file tail $fname]\]\n"
+            }
+
+        } elseif {$opt(TYPE) == "VIVADO_IP_XACT"} {
+            # An IP defined by an XCI file
+            append content "read_ip $fname\n"
+            append content "generate_target all \[get_files $fname\]\n"
+
+        } elseif {$opt(TYPE) == "VIVADO_BD"} {
+            # A Block Design
+            append content "read_bd $fname\n"
+            append content "generate_target all \[get_files $fname\] -force\n"
+
+        } elseif {$opt(TYPE) == "VIVADO_TCL"} {
+            # An IP defined by a TCL generation script. Only run it in the
+            # ADD_FILES phase, mirroring EvalFile.
+            if {![info exists opt(PHASE)] || "ADD_FILES" in $opt(PHASE)} {
+                if {[info exists opt(VARS)]} {
+                    # VARS is a flat {name value name value ...} list. Rebase any
+                    # repository path inside each value onto the repository root.
+                    foreach {var_name var_value} $opt(VARS) {
+                        set var_value [filelist_rebase_paths $var_value $int_combo_base $git_root_token]
+                        append content "set $var_name [list $var_value]\n"
+                        # Resolve the placeholder to the real root at source time.
+                        if {[string first $git_root_token $var_value] >= 0} {
+                            append content "set $var_name \[string map \[list $git_root_token \$shell_git_root] \$$var_name]\n"
+                        }
+                    }
+                }
+                append content "source $fname\n"
+            }
+        }
+
+        if {$opt(TYPE) != "COMPONENT"} {
+            foreach {param_name param_value} [array get opt] {
+                if {$param_name == "VIVADO_SET_PROPERTY"} {
+                    append content "set_property $param_value \[get_files [file tail $fname]\]\n"
+                }
+            }
+        }
+
+        unset opt
+    }
+
+    append content "generate_target all \[get_ips\]\n"
+    append content "synth_ip \[get_ips\]\n"
+
+    file delete "DevTree_paths.txt"
+    nb_file_update $filename $content
+}
+
+# ---------------------------------------------------------------------
 # Procedure SetupDesign - creates a new project with the name defined in MODULE
 # parameter. If the project already exists, it removes the project including
 # all its implementations. It sets the type of FPGA chip, for the synthesis is
