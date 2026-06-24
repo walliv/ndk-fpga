@@ -24,6 +24,7 @@ use IEEE.std_logic_1164.all;
 -- 171 to 171     TPH_PRESENT  Transaction Processing Hint (TPH) present flag - Xilinx FPGA only
 -- 172 to 173     TPH_TYPE     The PH field associated with the hint - Xilinx FPGA only
 -- 174 to 181     TPH_ST_TAG   The Steering Tag associated with the hint - Xilinx FPGA only
+-- 182 to 213     BE           Byte Enable - Xilinx FPGA only
 -- ============== ============ =================================================
 --
 -- **PCIe CC MFB Meta items description:**
@@ -65,6 +66,7 @@ package pcie_meta_pack is
     constant PCIE_META_TPH_PRESENT_W  : natural := 1;
     constant PCIE_META_TPH_TYPE_W     : natural := 2;
     constant PCIE_META_TPH_ST_TAG_W   : natural := 8;
+    constant PCIE_META_BE_W           : natural := 32;
 
     constant PCIE_RC_META_HEADER_O : natural := 0;
     constant PCIE_RC_META_PREFIX_O : natural := PCIE_RC_META_HEADER_O + PCIE_META_CPL_HDR_W;
@@ -94,8 +96,9 @@ package pcie_meta_pack is
     constant PCIE_CQ_META_TPH_PRESENT_O : natural := PCIE_CQ_META_LBE_O         + PCIE_META_LBE_W;
     constant PCIE_CQ_META_TPH_TYPE_O    : natural := PCIE_CQ_META_TPH_PRESENT_O + PCIE_META_TPH_PRESENT_W;
     constant PCIE_CQ_META_TPH_ST_TAG_O  : natural := PCIE_CQ_META_TPH_TYPE_O    + PCIE_META_TPH_TYPE_W;
+    constant PCIE_CQ_META_BE_O          : natural := PCIE_CQ_META_TPH_ST_TAG_O  + PCIE_META_TPH_ST_TAG_W;
 
-    constant PCIE_CQ_META_WIDTH         : natural := PCIE_CQ_META_TPH_ST_TAG_O + PCIE_META_TPH_ST_TAG_W;
+    constant PCIE_CQ_META_WIDTH         : natural := PCIE_CQ_META_BE_O + PCIE_META_BE_W;
 
     subtype PCIE_CQ_META_HEADER      is natural range PCIE_CQ_META_HEADER_O      + PCIE_META_REQ_HDR_W     -1 downto PCIE_CQ_META_HEADER_O;
     subtype PCIE_CQ_META_PREFIX      is natural range PCIE_CQ_META_PREFIX_O      + PCIE_META_PREFIX_W      -1 downto PCIE_CQ_META_PREFIX_O;
@@ -105,6 +108,7 @@ package pcie_meta_pack is
     subtype PCIE_CQ_META_TPH_PRESENT is natural range PCIE_CQ_META_TPH_PRESENT_O + PCIE_META_TPH_PRESENT_W -1 downto PCIE_CQ_META_TPH_PRESENT_O;
     subtype PCIE_CQ_META_TPH_TYPE    is natural range PCIE_CQ_META_TPH_TYPE_O    + PCIE_META_TPH_TYPE_W    -1 downto PCIE_CQ_META_TPH_TYPE_O;
     subtype PCIE_CQ_META_TPH_ST_TAG  is natural range PCIE_CQ_META_TPH_ST_TAG_O  + PCIE_META_TPH_ST_TAG_W  -1 downto PCIE_CQ_META_TPH_ST_TAG_O;
+    subtype PCIE_CQ_META_BE          is natural range PCIE_CQ_META_BE_O          + PCIE_META_BE_W          -1 downto PCIE_CQ_META_BE_O;
 
     constant PCIE_CC_META_HEADER_O : natural := 0;
     constant PCIE_CC_META_PREFIX_O : natural := PCIE_CC_META_HEADER_O + PCIE_META_CPL_HDR_W;

@@ -18,4 +18,4 @@ $(WAVEFORM_FILE): all
 see-wave: $(WAVEFORM_FILE)
 	surfer $< -s waveform.su &
 
-include ../../../../../../build/Makefile
+include ../../../../../../../../../build/Makefile
