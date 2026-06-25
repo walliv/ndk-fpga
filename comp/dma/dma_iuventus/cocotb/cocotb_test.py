@@ -262,10 +262,10 @@ class Testbench:
         #     f"Mismatch in PCIe CQ write requests: NVME Model={self.nvme_ctrl_model.c_pcie_cq_wrs}, Iuventus Model={self.iuventus_model.c_cq_wr_reqs}"
         # assert self.nvme_ctrl_model.c_pcie_cq_wr_bytes == self.iuventus_model.c_cq_wr_req_bytes, \
         #     f"Mismatch in PCIe CQ write request bytes: NVME Model={self.nvme_ctrl_model.c_pcie_cq_wr_bytes}, Iuventus Model={self.iuventus_model.c_cq_wr_req_bytes}"
-        # assert self.nvme_ctrl_model.c_cqhdbl_reg_upds == self.iuventus_model.c_cqhdbl_reg_upds, \
-        #     f"Mismatch in CQHDBL register updates: NVME Model={self.nvme_ctrl_model.c_cqhdbl_reg_upds}, Iuventus Model={self.iuventus_model.c_cqhdbl_reg_upds}"
-        # assert self.nvme_ctrl_model.c_sqtdbl_reg_upds == self.iuventus_model.c_sqtdbl_reg_upds, \
-        #     f"Mismatch in SQTDBL register updates: NVME Model={self.nvme_ctrl_model.c_sqtdbl_reg_upds}, Iuventus Model={self.iuventus_model.c_sqtdbl_reg_upds}"
+        assert self.nvme_ctrl_model.c_cqhdbl_reg_upds == self.iuventus_model.c_cqhdbl_reg_upds, \
+            f"Mismatch in CQHDBL register updates: NVME Model={self.nvme_ctrl_model.c_cqhdbl_reg_upds}, Iuventus Model={self.iuventus_model.c_cqhdbl_reg_upds}"
+        assert self.nvme_ctrl_model.c_sqtdbl_reg_upds == self.iuventus_model.c_sqtdbl_reg_upds, \
+            f"Mismatch in SQTDBL register updates: NVME Model={self.nvme_ctrl_model.c_sqtdbl_reg_upds}, Iuventus Model={self.iuventus_model.c_sqtdbl_reg_upds}"
         assert self.nvme_ctrl_model.c_sqe_rd_cmds == self.iuventus_model.c_sqe_rd_cmds, \
             f"Mismatch in SQE read commands: NVME Model={self.nvme_ctrl_model.c_sqe_rd_cmds}, Iuventus Model={self.iuventus_model.c_sqe_rd_cmds}"
         assert self.nvme_ctrl_model.c_sqe_rd_cmd_size == self.iuventus_model.c_sqe_rd_cmd_size, \
@@ -336,12 +336,12 @@ class Testbench:
         cntr = await self.m_mi_driver.read(IuventusMiRegMap.CQ_PCIE_WR_BYTES_CNTR_L, 8)
         assert int.from_bytes(cntr, 'little') == self.iuventus_model.c_cq_wr_req_bytes, \
             f"Mismatch in CQ_PCIE_WR_BYTES_CNTR: DUT={int.from_bytes(cntr, 'little')}, Iuventus Model={self.iuventus_model.c_cq_wr_req_bytes}"
-        # cntr = await self.m_mi_driver.read(IuventusMiRegMap.CQHDBL_REG_UPDS_CNTR_L, 8)
-        # assert int.from_bytes(cntr, 'little') == self.iuventus_model.c_cqhdbl_reg_upds, \
-        #     f"Mismatch in CQHDBL_REG_UPD_CNTR: DUT={int.from_bytes(cntr, 'little')}, Iuventus Model={self.iuventus_model.c_cqhdbl_reg_upds}"
-        # cntr = await self.m_mi_driver.read(IuventusMiRegMap.SQTDBL_REG_UPDS_CNTR_L, 8)
-        # assert int.from_bytes(cntr, 'little') == self.iuventus_model.c_sqtdbl_reg_upds, \
-        #     f"Mismatch in SQTDBL_REG_UPD_CNTR: DUT={int.from_bytes(cntr, 'little')}, Iuventus Model={self.iuventus_model.c_sqtdbl_reg_upds}"
+        cntr = await self.m_mi_driver.read(IuventusMiRegMap.CQHDBL_REG_UPDS_CNTR_L, 8)
+        assert int.from_bytes(cntr, 'little') == self.iuventus_model.c_cqhdbl_reg_upds, \
+            f"Mismatch in CQHDBL_REG_UPD_CNTR: DUT={int.from_bytes(cntr, 'little')}, Iuventus Model={self.iuventus_model.c_cqhdbl_reg_upds}"
+        cntr = await self.m_mi_driver.read(IuventusMiRegMap.SQTDBL_REG_UPDS_CNTR_L, 8)
+        assert int.from_bytes(cntr, 'little') == self.iuventus_model.c_sqtdbl_reg_upds, \
+            f"Mismatch in SQTDBL_REG_UPD_CNTR: DUT={int.from_bytes(cntr, 'little')}, Iuventus Model={self.iuventus_model.c_sqtdbl_reg_upds}"
         cntr = await self.m_mi_driver.read(IuventusMiRegMap.NVME_RD_BYTES_CNTR_L, 8)
         assert int.from_bytes(cntr, 'little') == self.iuventus_model.c_sqe_rd_cmd_size, \
             f"Mismatch in NVME_RD_BYTES_CNTR: DUT={int.from_bytes(cntr, 'little')}, Iuventus Model={self.iuventus_model.c_sqe_rd_cmd_size}"
@@ -444,13 +444,43 @@ class Testbench:
 
         self.log.info("\n" + stat_str)
 
-    async def post_test_checks(self, req_count, last_test=False):
+    async def post_test_checks(self, req_count, last_test=False, max_stall_cycles=None):
         self.log.setLevel(logging.INFO)
         last_num = 0
+        stall_cycles = 0
+        last_ops = -1
         while (self.op_stat_mon.ops_processed < req_count):
             if (self.op_stat_mon.ops_processed // 100 > last_num):
                 last_num = self.op_stat_mon.ops_processed // 100
                 cocotb.log.info(f"Completed {self.op_stat_mon.ops_processed} requests...")
+
+            if max_stall_cycles is not None:
+                if self.op_stat_mon.ops_processed == last_ops:
+                    stall_cycles += 100
+                else:
+                    stall_cycles = 0
+                    last_ops = self.op_stat_mon.ops_processed
+                if stall_cycles >= max_stall_cycles:
+                    cocotb.log.warning(
+                        f"STALL DETECTED after {stall_cycles} cycles: "
+                        f"ops_processed={self.op_stat_mon.ops_processed}/{req_count}"
+                    )
+                    cocotb.log.warning(
+                        f"iuventus_model: c_sqes_disp={self.iuventus_model.c_sqes_disp}, "
+                        f"c_cqes_proc={self.iuventus_model.c_cqes_proc}, "
+                        f"c_sqtdbl_reg_upds={self.iuventus_model.c_sqtdbl_reg_upds}, "
+                        f"c_cqhdbl_reg_upds={self.iuventus_model.c_cqhdbl_reg_upds}"
+                    )
+                    cocotb.log.warning(
+                        f"nvme_ctrl_model: c_sqes_proc={self.nvme_ctrl_model.c_sqes_proc}, "
+                        f"c_sqtdbl_reg_upds={self.nvme_ctrl_model.c_sqtdbl_reg_upds}, "
+                        f"c_cqhdbl_reg_upds={self.nvme_ctrl_model.c_cqhdbl_reg_upds}"
+                    )
+                    await self.print_stats()
+                    assert False, (
+                        f"DUT stalled: ops_processed={self.op_stat_mon.ops_processed} "
+                        f"after {stall_cycles} cycles of no progress (expected {req_count})"
+                    )
 
             await ClockCycles(self.dut.CLK, 100)
         await ClockCycles(self.dut.CLK, 100)
@@ -467,6 +497,53 @@ class Testbench:
 
         else:
             cocotb.log.warning("Timed out waiting for SQTDBL and CQHDBL to be updated...")
+
+        # Drain the doorbell FIFO before checking counts.
+        # The RQ backpressure BitDriver may have left doorbell updates in-flight
+        # inside dbl_updater's FIFO (PCIE_RQ_MFB_SRC_RDY still asserted).
+        # Stop the backpressure generator and hold DST_RDY=1 so the FIFO can
+        # drain, then wait until the RQ channel is quiescent and the doorbell
+        # counters in both models agree.
+        self.m_rq_mfb_bpsr.stop()
+        self.dut.PCIE_RQ_MFB_DST_RDY.value = 1
+
+        drain_timeout = 50_000
+        drain_cycles = 0
+        src_rdy_idle_count = 0
+        src_rdy_idle_threshold = 10
+        while drain_cycles < drain_timeout:
+            await RisingEdge(self.dut.CLK)
+            drain_cycles += 1
+            dbls_synced = (
+                self.nvme_ctrl_model.c_cqhdbl_reg_upds == self.iuventus_model.c_cqhdbl_reg_upds
+                and self.nvme_ctrl_model.c_sqtdbl_reg_upds == self.iuventus_model.c_sqtdbl_reg_upds
+            )
+            if not bool(self.dut.PCIE_RQ_MFB_SRC_RDY.value):
+                src_rdy_idle_count += 1
+            else:
+                src_rdy_idle_count = 0
+            if dbls_synced and src_rdy_idle_count >= src_rdy_idle_threshold:
+                break
+        else:
+            cocotb.log.error(
+                f"Doorbell FIFO drain timeout after {drain_timeout} cycles: "
+                f"nvme_ctrl_model c_cqhdbl_reg_upds={self.nvme_ctrl_model.c_cqhdbl_reg_upds}, "
+                f"iuventus_model c_cqhdbl_reg_upds={self.iuventus_model.c_cqhdbl_reg_upds}, "
+                f"nvme_ctrl_model c_sqtdbl_reg_upds={self.nvme_ctrl_model.c_sqtdbl_reg_upds}, "
+                f"iuventus_model c_sqtdbl_reg_upds={self.iuventus_model.c_sqtdbl_reg_upds}"
+            )
+            assert False, (
+                f"Doorbell FIFO did not drain within {drain_timeout} cycles — "
+                "this indicates a genuine RTL hang in dbl_updater, not an in-flight artifact"
+            )
+
+        cocotb.log.info(
+            f"Doorbell FIFO drained after {drain_cycles} cycles. "
+            f"c_cqhdbl_reg_upds: nvme={self.nvme_ctrl_model.c_cqhdbl_reg_upds} "
+            f"iuventus={self.iuventus_model.c_cqhdbl_reg_upds}; "
+            f"c_sqtdbl_reg_upds: nvme={self.nvme_ctrl_model.c_sqtdbl_reg_upds} "
+            f"iuventus={self.iuventus_model.c_sqtdbl_reg_upds}"
+        )
 
         await self.disable_dut()
         await self.print_stats()
@@ -592,3 +669,5 @@ async def that_first_bloody_error_test(dut):
     await ClockCycles(dut.CLK, 100)
 
     await tb.post_test_checks(req_count=0, last_test=True)
+
+
