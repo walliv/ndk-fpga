@@ -706,7 +706,10 @@ async def run_random_rw_test(dut, req_count: int = 20, size_reduce_factor: int =
 
 @cocotb.test()
 async def that_first_bloody_error_test(dut):
-    tb = await prepare(dut)
+    # strict_rq=False: mixed read+write traffic interleaves SQE-MemWr and doorbell TLPs on the shared
+    # PCIE_RQ bus, which the in-order RQ scoreboard cannot predict (spurious ordering mismatches);
+    # correctness is covered by the CC/RD/OP_STAT scoreboards. Same rationale as run_random_rw_test.
+    tb = await prepare(dut, strict_rq=False)
 
     req_count = 5
     size_reduce_factor = 20
