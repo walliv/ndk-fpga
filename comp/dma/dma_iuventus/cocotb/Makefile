@@ -26,9 +26,19 @@ CLEAN_DEPENDS += clean_shards
 # Waveform dumping is off by default for speed; set DEBUG_ENABLE=true to enable.
 DEBUG_ENABLE ?= false
 
-.PHONY: all see-wave clean_shards sim-parallel
+.PHONY: all see-wave clean_shards sim-parallel sim-elab sim-run
 
 all: comp
+
+# Fast-iteration wrappers. The cocotb dir has no Vivado.tcl, so nvc-elab / nvc-run
+# need the comp_vivado.tcl SYNTHFILES override (same as sim-parallel). Use for
+# editing the Python testbench without re-elaborating the design:
+#   make sim-elab                                   # analyze + elaborate once
+#   COCOTB_TESTCASE=<name> make sim-run             # run one test (no re-elaborate)
+sim-elab:
+	$(MAKE) "SYNTHFILES=$(OFM_PATH)/build/targets/comp_vivado.tcl" nvc-elab
+sim-run:
+	$(MAKE) "SYNTHFILES=$(OFM_PATH)/build/targets/comp_vivado.tcl" nvc-run
 
 $(WAVEFORM_FILE): all
 
