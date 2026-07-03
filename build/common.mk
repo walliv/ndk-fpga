@@ -80,10 +80,15 @@ COCOTB_RUN_ARGS += COCOTB_RANDOM_SEED=$(RANDOM_SEED)
 endif
 
 # Debug / NVC options
+# When DEBUG_ENABLE=true, waveform/introspection flags are added to the
+# relevant nvc step: --no-collapse at elaboration (keep all signals visible),
+# -w and --dump-arrays at run (dump the waveform incl. array-typed signals).
+# With DEBUG_ENABLE=false (default) none of these are emitted, so simulation
+# runs without the substantial waveform-dumping overhead.
 DEBUG_ENABLE?=false
 ifeq ($(DEBUG_ENABLE),true)
 NVC_ELAB_ARGS += --no-collapse
-NVC_RUN_ARGS += --dump-arrays
+NVC_RUN_ARGS  += -w --dump-arrays
 endif
 
 # Coverage options
@@ -120,8 +125,8 @@ NVC_RUN_ENV ?=
 nvc: $(MOD)
 	$(eval TOP_LEVEL_ENT_LC:=$(shell echo $(TOP_LEVEL_ENT) | tr '[:upper:]' '[:lower:]'))
 	nvc --work=nvcwork -H 1G -M 16G --std=2008 -a --relaxed $(filter %.vhd,$(MOD))
-	nvc --work=nvcwork -H 1G -M 16G -e $(NVC_ELAB_ARGS) $(TOP_LEVEL_ENT_LC)
-	$(NVC_RUN_ENV) $(COCOTB_ENV) nvc --work=nvcwork -H 1G -M 16G -rw $(TOP_LEVEL_ENT_LC) --dump-arrays --ieee-warnings=off $(NVC_LOAD)
+	nvc --work=nvcwork -H 1G -M 16G -e -O3 $(NVC_ELAB_ARGS) $(TOP_LEVEL_ENT_LC)
+	$(NVC_RUN_ENV) $(COCOTB_ENV) nvc --work=nvcwork -H 1G -M 16G -r $(NVC_RUN_ARGS) $(TOP_LEVEL_ENT_LC) --ieee-warnings=off $(NVC_LOAD)
 
 else
 .PHONY: $(GEN_MK_NAME)
