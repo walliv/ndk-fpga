@@ -10,12 +10,13 @@ TCLSH ?= tclsh
 
 .PHONY: simulation vhdocl cocotb clean_common
 
-GEN_MK_TARGETS += simulation vhdocl cocotb ghdl-sim nvc nvc-sim
+GEN_MK_TARGETS += simulation vhdocl cocotb ghdl-sim nvc nvc-sim nvc-elab
 simulation: GEN_MK_ENV=SIM_SCRIPT=$(SIM_SCRIPT) SIM_FLAGS=$(SIM_FLAGS)
 
 NVC_PLATFORM_TAGS ?= altera xilinx
 nvc: NETCOPE_ENV+=PLATFORM_TAGS="$(NVC_PLATFORM_TAGS)"
 nvc-sim: NETCOPE_ENV+=PLATFORM_TAGS="$(NVC_PLATFORM_TAGS)"
+nvc-elab: NETCOPE_ENV+=PLATFORM_TAGS="$(NVC_PLATFORM_TAGS)"
 
 # INFO: NETCOPE_TEMP is generated directory
 clean_common:
@@ -127,6 +128,13 @@ nvc: $(MOD)
 	nvc --work=nvcwork -H 1G -M 16G --std=2008 -a --relaxed $(filter %.vhd,$(MOD))
 	nvc --work=nvcwork -H 1G -M 16G -e -O3 $(NVC_ELAB_ARGS) $(TOP_LEVEL_ENT_LC)
 	$(NVC_RUN_ENV) $(COCOTB_ENV) nvc --work=nvcwork -H 1G -M 16G -r $(NVC_RUN_ARGS) $(TOP_LEVEL_ENT_LC) --ieee-warnings=off $(NVC_LOAD)
+
+# nvc-elab: analyze + elaborate only (no run). Used by the parallel runner
+# (make sim-parallel) to build nvcwork/ once before launching per-test shards.
+nvc-elab: $(MOD)
+	$(eval TOP_LEVEL_ENT_LC:=$(shell echo $(TOP_LEVEL_ENT) | tr '[:upper:]' '[:lower:]'))
+	nvc --work=nvcwork -H 1G -M 16G --std=2008 -a --relaxed $(filter %.vhd,$(MOD))
+	nvc --work=nvcwork -H 1G -M 16G -e -O3 $(NVC_ELAB_ARGS) $(TOP_LEVEL_ENT_LC)
 
 else
 .PHONY: $(GEN_MK_NAME)
