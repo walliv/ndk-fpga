@@ -154,12 +154,12 @@ if {$PARAMS(DMA_TYPE) == 5} {
         CONFIG.copy_pf0 {false} \
         CONFIG.PF1_DEVICE_ID {c020} \
         CONFIG.PF1_SUBSYSTEM_ID {c020} \
-        CONFIG.pf1_bar0_size {256} \
+        CONFIG.pf1_bar0_size {128} \
         CONFIG.pf1_bar0_64bit {true} \
         CONFIG.pf1_bar0_prefetchable {true} \
         CONFIG.pf1_bar0_scale {Kilobytes} \
         CONFIG.pf1_bar2_enabled {true} \
-        CONFIG.pf1_bar2_size {256} \
+        CONFIG.pf1_bar2_size {128} \
         CONFIG.pf1_bar2_64bit {true} \
         CONFIG.pf1_bar2_prefetchable {true} \
         CONFIG.pf1_bar2_scale {Kilobytes} \
