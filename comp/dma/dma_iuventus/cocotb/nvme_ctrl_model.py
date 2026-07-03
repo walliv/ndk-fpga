@@ -50,6 +50,7 @@ class NVMEControllerModel:
         self._sqhdbl = 0
         self._cqtdbl = 0
         self._cqhdbl = 0
+        self._processed_cmd_ids = set()  # detect duplicate SQE processing
 
         self._wrbuff_baddr = wrbuff_prpl_data[0]
         self._rdbuff_baddr = rdbuff_prpl_data[0]
@@ -712,6 +713,13 @@ class NVMEControllerModel:
 
             self._sqhdbl = (self._sqhdbl + 1) % self._qsize
             self.c_sqes_proc += 1
+            if sqe.cmd_id in self._processed_cmd_ids:
+                self.log.error(
+                    f"DUPLICATE SQE PROCESSING: cmd_id={sqe.cmd_id} "
+                    f"sqes_proc={self.c_sqes_proc} sqhdbl={self._sqhdbl} sqtdbl={self._sqtdbl} "
+                    f"cqtdbl={self._cqtdbl} cqhdbl={self._cqhdbl}"
+                )
+            self._processed_cmd_ids.add(sqe.cmd_id)
             await self._complete_sqe(sqe.cmd_id)
 
         self._sq_int.clear()  # Clear processed entries
