@@ -10,13 +10,14 @@ TCLSH ?= tclsh
 
 .PHONY: simulation vhdocl cocotb clean_common
 
-GEN_MK_TARGETS += simulation vhdocl cocotb ghdl-sim nvc nvc-sim nvc-elab
+GEN_MK_TARGETS += simulation vhdocl cocotb ghdl-sim nvc nvc-sim nvc-elab nvc-run
 simulation: GEN_MK_ENV=SIM_SCRIPT=$(SIM_SCRIPT) SIM_FLAGS=$(SIM_FLAGS)
 
 NVC_PLATFORM_TAGS ?= altera xilinx
 nvc: NETCOPE_ENV+=PLATFORM_TAGS="$(NVC_PLATFORM_TAGS)"
 nvc-sim: NETCOPE_ENV+=PLATFORM_TAGS="$(NVC_PLATFORM_TAGS)"
 nvc-elab: NETCOPE_ENV+=PLATFORM_TAGS="$(NVC_PLATFORM_TAGS)"
+nvc-run: NETCOPE_ENV+=PLATFORM_TAGS="$(NVC_PLATFORM_TAGS)"
 
 # INFO: NETCOPE_TEMP is generated directory
 clean_common:
@@ -118,6 +119,7 @@ ghdl-sim: $(MOD)
 NVC_LOAD ?=
 nvc-sim: NVC_LOAD=--load $(shell cocotb-config --lib-name-path vhpi nvc)
 nvc-sim: nvc
+nvc-run: NVC_LOAD=--load $(shell cocotb-config --lib-name-path vhpi nvc)
 
 # NVC_RUN_ENV: extra environment variables prepended only to the nvc -r step.
 # Use this to set LD_LIBRARY_PATH or similar per-project without affecting
@@ -135,6 +137,15 @@ nvc-elab: $(MOD)
 	$(eval TOP_LEVEL_ENT_LC:=$(shell echo $(TOP_LEVEL_ENT) | tr '[:upper:]' '[:lower:]'))
 	nvc --work=nvcwork -H 1G -M 16G --std=2008 -a --relaxed $(filter %.vhd,$(MOD))
 	nvc --work=nvcwork -H 1G -M 16G -e -O3 $(NVC_ELAB_ARGS) $(TOP_LEVEL_ENT_LC)
+
+# nvc-run: run only, reusing an already-built nvcwork/ (no analyze/elaborate).
+# For fast iteration on cocotb Python (models/tests) — which nvc loads at run time,
+# so the elaborated design does not change. Run `make nvc-elab` (or `make nvc-sim`)
+# once, then `COCOTB_TESTCASE=<name> make nvc-run` per Python edit (skips the ~50 s
+# analyze+elaborate). Requires nvcwork/ to already exist from a prior elaboration.
+nvc-run: $(MOD)
+	$(eval TOP_LEVEL_ENT_LC:=$(shell echo $(TOP_LEVEL_ENT) | tr '[:upper:]' '[:lower:]'))
+	$(NVC_RUN_ENV) $(COCOTB_ENV) nvc --work=nvcwork -H 1G -M 16G -r $(NVC_RUN_ARGS) $(TOP_LEVEL_ENT_LC) --ieee-warnings=off $(NVC_LOAD)
 
 else
 .PHONY: $(GEN_MK_NAME)
