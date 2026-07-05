@@ -20,13 +20,47 @@ endif
 
 WAVEFORM_FILE=dma_iuventus.fst
 
-.PHONY: all see-wave
+# Hook shard directory cleanup into 'make clean'.
+CLEAN_DEPENDS += clean_shards
+
+# Waveform dumping is off by default for speed; set DEBUG_ENABLE=true to enable.
+DEBUG_ENABLE ?= false
+
+.PHONY: all see-wave clean_shards sim-parallel sim-elab sim-run
 
 all: comp
+
+# Fast-iteration wrappers. The cocotb dir has no Vivado.tcl, so nvc-elab / nvc-run
+# need the comp_vivado.tcl SYNTHFILES override (same as sim-parallel). Use for
+# editing the Python testbench without re-elaborating the design:
+#   make sim-elab                                   # analyze + elaborate once
+#   COCOTB_TESTCASE=<name> make sim-run             # run one test (no re-elaborate)
+sim-elab:
+	$(MAKE) "SYNTHFILES=$(OFM_PATH)/build/targets/comp_vivado.tcl" nvc-elab
+sim-run:
+	$(MAKE) "SYNTHFILES=$(OFM_PATH)/build/targets/comp_vivado.tcl" nvc-run
 
 $(WAVEFORM_FILE): all
 
 see-wave: $(WAVEFORM_FILE)
 	surfer $< -s waveform.su &
+
+clean_shards:
+	-@$(RM) -r shard_*/
+
+# sim-parallel: elaborate once, then run all 6 tests in parallel.
+#
+# The cocotb directory has no Vivado.tcl synthesis script.  Source-file
+# discovery uses build/targets/comp_vivado.tcl instead, which is the same
+# script the 'comp' target uses.  We pass it as a command-line override to
+# the recursive $(MAKE) nvc-elab call so it takes highest-priority precedence
+# over the Makefile-defined SYNTHFILES default (which would be 'Vivado.tcl').
+#
+# Usage:
+#   make sim-parallel              # 6 tests in parallel, no waveforms (~60s)
+#   make sim-parallel DEBUG_ENABLE=true  # same, with per-shard .fst waveforms
+sim-parallel:
+	$(MAKE) "SYNTHFILES=$(OFM_PATH)/build/targets/comp_vivado.tcl" nvc-elab
+	cd $(CURDIR) && DEBUG_ENABLE=$(DEBUG_ENABLE) pytest -n auto -v test_dma_iuventus.py
 
 include ../../../../build/Makefile

@@ -19,8 +19,8 @@ entity OP_CTRL is
         DEVICE         : string  := "ULTRASCALE"
     );
     port (
-        CLK : in std_logic;
-        RST : in std_logic;
+        CLK          : in std_logic;
+        RST          : in std_logic;
         CMD_DISP_RST : out std_logic;
 
         -- =========================================================================================
@@ -50,7 +50,7 @@ entity OP_CTRL is
         NVME_RD_REQ_LBA_NUM : in  std_logic_vector(7 downto 0);
         NVME_RD_REQ_LBA_PTR : in  std_logic_vector(63 downto 0);
         NVME_RD_REQ_VLD     : in  std_logic;
-        NVME_RD_REQ_RDY   : out std_logic;
+        NVME_RD_REQ_RDY     : out std_logic;
 
         -- =========================================================================================
         -- Outputs to the operation status reporter
@@ -98,7 +98,7 @@ entity OP_CTRL is
         NVME_WR_REQ_FRAME_LNG     : in std_logic_vector(BUFF_PTR_WIDTH downto 0);
         NVME_WR_REQ_FRAME_LNG_VLD : in std_logic;
         -- Backpressure to ensure that only one write request is processed at a time
-        WR_MFB_DST_RDY       : out std_logic
+        WR_MFB_DST_RDY            : out std_logic
     );
 end entity;
 
@@ -107,9 +107,11 @@ architecture FULL of OP_CTRL is
     -- Flush is dispatched after the counter wraps around (overflow).
     constant FLUSH_DELAY_CNTR_WIDTH : positive := 28;
 
-    type op_state_t is (S_IDLE, S_RD_REQ_PREPARE, S_WAIT_CQE, S_WRBUFF_READ,
+    type   op_state_t is (
+        S_IDLE, S_RD_REQ_PREPARE, S_WAIT_CQE, S_WRBUFF_READ,
         S_WR_REQ_FINISH_WAIT, S_WR_REQ_PREPARE, S_WR_REQ_SIZE_WAIT,
-        S_OP_CHECK, S_WRBUFF_FINISH_WAIT, S_FLUSH_REQ_PREPARE);
+        S_OP_CHECK, S_WRBUFF_FINISH_WAIT, S_FLUSH_REQ_PREPARE
+    );
     signal op_state_pst : op_state_t := S_IDLE;
     signal op_state_nst : op_state_t := S_IDLE;
 
@@ -121,23 +123,23 @@ architecture FULL of OP_CTRL is
     signal op_type_next       : std_logic_vector(CMD_OPCODE_W -1 downto 0);
     signal comp_enabled       : std_logic;
 
-    signal flush_delay_cnt_reg        : unsigned(FLUSH_DELAY_CNTR_WIDTH -1 downto 0);
-    signal flush_delay_cnt_next       : unsigned(FLUSH_DELAY_CNTR_WIDTH -1 downto 0);
+    signal flush_delay_cnt_reg         : unsigned(FLUSH_DELAY_CNTR_WIDTH -1 downto 0);
+    signal flush_delay_cnt_next        : unsigned(FLUSH_DELAY_CNTR_WIDTH -1 downto 0);
     -- Counter enable/arm flag: when '1' counter increments every cycle;
     -- after overflow it is cleared to stop counting until next write arms it again.
-    signal flush_delay_cnt_active_reg : std_logic;
-    signal flush_delay_cnt_active_next: std_logic;
+    signal flush_delay_cnt_active_reg  : std_logic;
+    signal flush_delay_cnt_active_next : std_logic;
     -- Pending FLUSH request flag set by counter overflow.
     -- Consumed in S_IDLE to enter S_FLUSH_REQ_PREPARE and then cleared.
-    signal flush_dispatch_reg         : std_logic;
-    signal flush_dispatch_next        : std_logic;
+    signal flush_dispatch_reg          : std_logic;
+    signal flush_dispatch_next         : std_logic;
 
     signal wrbuff_rd_req_addr_piped : std_logic_vector(BUFF_PTR_WIDTH -1 downto 0);
     signal wrbuff_rd_req_size_piped : std_logic_vector(BUFF_PTR_WIDTH downto 0);
     signal wrbuff_rd_req_last_piped : std_logic;
     signal wrbuff_rd_req_en_piped   : std_logic;
     signal wrbuff_rd_req_ack_piped  : std_logic;
-    signal pipe_out_data : std_logic_vector(2*BUFF_PTR_WIDTH+2 -1 downto 0);
+    signal pipe_out_data            : std_logic_vector(2*BUFF_PTR_WIDTH+2 -1 downto 0);
 begin
     -- =============================================================================================
     -- Start/stop logic
@@ -146,9 +148,9 @@ begin
     begin
         if (rising_edge(CLK)) then
             if (RST = '1') then
-                comp_enabled  <= '0';
-                START_REQ_ACK <= '0';
-                STOP_REQ_ACK  <= '0';
+                comp_enabled   <= '0';
+                START_REQ_ACK  <= '0';
+                STOP_REQ_ACK   <= '0';
                 CMD_DISP_RST   <= '0';
             else
                 START_REQ_ACK <= '0';
@@ -176,7 +178,7 @@ begin
     op_state_reg_p : process (CLK)
     begin
         if rising_edge(CLK) then
-            if RST = '1' then
+            if (RST = '1') then
                 op_state_pst               <= S_IDLE;
                 lba_num_reg                <= (others => '0');
                 start_lba_ptr_reg          <= (others => '0');
@@ -270,7 +272,7 @@ begin
                 end if;
 
             when S_OP_CHECK =>
-                op_state_nst <= S_RD_REQ_PREPARE;
+                op_state_nst   <= S_RD_REQ_PREPARE;
                 WR_MFB_DST_RDY <= '0';
 
                 -- Check if the request does not exeed the LBA space size
@@ -297,8 +299,11 @@ begin
                     -- Round the amount of LBAs up to include all of the packet's data
                     lba_num_temp       := resize(((unsigned(NVME_WR_REQ_FRAME_LNG) + 511) / 512) -1, LBA_SPACE_SIZE'length);
 
-                    -- Check if the request does not exeed the LBA space size
-                    if ((resize(unsigned(NVME_WR_REQ_LBA_PTR), LBA_SPACE_SIZE'length) + lba_num_temp + 1) > unsigned(LBA_SPACE_SIZE)) then
+                    -- Check if the request does not exeed the LBA space size.
+                    -- Use start_lba_ptr_reg (captured from NVME_WR_REQ_LBA_PTR in S_IDLE)
+                    -- rather than the raw NVME_WR_REQ_LBA_PTR input, which is no longer
+                    -- valid once WR_MFB_DST_RDY is deasserted after the SOF cycle.
+                    if ((resize(unsigned(start_lba_ptr_reg), LBA_SPACE_SIZE'length) + lba_num_temp + 1) > unsigned(LBA_SPACE_SIZE)) then
                         op_state_nst <= S_IDLE;
                         OP_STAT_VLD  <= '1';
                         OP_STAT_TYPE <= '0';
@@ -314,7 +319,7 @@ begin
                 C2N_CMD_OPCODE  <= WR_CMD_OPCODE;
                 C2N_PRP_ENTRY_1 <= RDBUFF_BADDR;
                 C2N_PRP_ENTRY_2 <= RDBUFF_PRP_LIST_PTR;
-                WR_MFB_DST_RDY <= '0';
+                WR_MFB_DST_RDY  <= '0';
 
                 -- If the the size of a request fits into 2 pages, then PRP_ENTRY_2 should point to
                 -- a page and not to the PRP list
@@ -393,7 +398,7 @@ begin
                 wrbuff_rd_req_addr_piped <= WRBUFF_BADDR(BUFF_PTR_WIDTH -1 downto 0);
                 wrbuff_rd_req_size_piped <= std_logic_vector(unsigned('0' & lba_num_reg) + 1) & "000000000"; -- multiply by 512
                 wrbuff_rd_req_en_piped   <= '1';
-                WR_MFB_DST_RDY <= '0';
+                WR_MFB_DST_RDY           <= '0';
 
                 if (wrbuff_rd_req_ack_piped = '1') then
                     op_state_nst <= S_WRBUFF_FINISH_WAIT;
@@ -416,16 +421,16 @@ begin
         DEVICE      => DEVICE
     )
     port map (
-        CLK => CLK,
+        CLK   => CLK,
         RESET => RST,
 
-        RX_DATA => wrbuff_rd_req_addr_piped & wrbuff_rd_req_size_piped & wrbuff_rd_req_last_piped,
-        RX_VLD => (others => '1'),
+        RX_DATA    => wrbuff_rd_req_addr_piped & wrbuff_rd_req_size_piped & wrbuff_rd_req_last_piped,
+        RX_VLD     => (others => '1'),
         RX_SRC_RDY => wrbuff_rd_req_en_piped,
         RX_DST_RDY => wrbuff_rd_req_ack_piped,
 
-        TX_DATA => pipe_out_data,
-        TX_VLD => open,
+        TX_DATA    => pipe_out_data,
+        TX_VLD     => open,
         TX_SRC_RDY => WRBUFF_RD_REQ_EN,
         TX_DST_RDY => WRBUFF_RD_REQ_ACK
     );

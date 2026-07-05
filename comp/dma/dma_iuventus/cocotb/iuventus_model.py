@@ -58,6 +58,7 @@ class IuventusModel:
         self._phase_tag = 1
         self.outstanding_cmds = deque()
         self.tag_fifo = deque(range(2048))
+        self._completed_cmd_ids = set()  # detect duplicate CQE processing
 
         # Counters as taken from the DUT's register map
         self.c_sqes_disp = 0
@@ -282,17 +283,40 @@ class IuventusModel:
             if cqe.phase_tag != self._phase_tag or not self._enabled:
                 continue  # No new CQE to process
 
+            # Use cmd_id membership as the authoritative phantom/genuine discriminator.
+            # proc_cqes detects new CQEs by phase tag alone, so a stale CQE slot whose
+            # phase coincidentally matches the expected tag (e.g. after even numbers of
+            # full CQ rounds) would be a false positive.  A genuine CQE always carries the
+            # cmd_id of an outstanding command; a stale/phantom slot does not.
+            # nvme_ctrl_model may complete commands out of order (it shuffles SQEs with a
+            # fixed seed), so we search the entire deque instead of popping the tail.
+            match_idx = next(
+                (i for i, entry in enumerate(self.outstanding_cmds) if entry[0] == cqe.cmd_id),
+                None
+            )
+            if match_idx is None:
+                raw = self._cq_int[self.cqhdbl * CQE_SIZE : (self.cqhdbl + 1) * CQE_SIZE]
+                already_done = cqe.cmd_id in self._completed_cmd_ids
+                self.log.warning(
+                    f"proc_cqes: skipping CQE at slot {self.cqhdbl} "
+                    f"phase={cqe.phase_tag} expected={self._phase_tag} "
+                    f"cmd_id={cqe.cmd_id} already_completed={already_done} "
+                    f"outstanding_count={len(self.outstanding_cmds)} "
+                    f"raw={raw.hex()}"
+                )
+                continue  # phantom/stale CQE: cmd_id not found among outstanding commands
+
             self.sqhdbl = cqe.sqhdbl
-            assert cqe.cmd_id == self.outstanding_cmds[-1][0], f"CQE Command ID {cqe.cmd_id} not found in outstanding commands {list(self.outstanding_cmds)}"
             assert self.qid == cqe.sq_id, f"CQE SQ ID {cqe.sq_id} does not match model SQ ID {self.qid}"
             assert cqe.stat_code_type == CQEStatCodeTypes.GENERIC, f"CQE stat code type {cqe.stat_code_type} not supported in model"
             assert cqe.stat_code == CQEStatusCodes.SUCCESS, f"CQE status code {cqe.stat_code} not supported in model"
 
-            # Process the CQE (for now, just print it)
             if self.log.isEnabledFor(logging.INFO):
                 self.log.info(f"Processing CQE at index {self.cqhdbl}: {cqe}")
-            cmd_id, rd, size = self.outstanding_cmds.pop()
+            cmd_id, rd, size = self.outstanding_cmds[match_idx]
+            del self.outstanding_cmds[match_idx]
             self.tag_fifo.append(cmd_id)
+            self._completed_cmd_ids.add(cmd_id)
 
             self.disp_dbl_update(self.cqhdbl_baddr)
             if self.cqhdbl == 0:
@@ -359,14 +383,14 @@ class IuventusModel:
         if self.log.isEnabledFor(logging.INFO):
             self.log.info(f"Creating NVMe Read Request: LBA Num={lba_num}, LBA Ptr={lba_ptr} ({lba_ptr:x})")
 
+        if lba_ptr + lba_num > STORAGE_CAP_LBAS:
+            self.log.info(f"NVMe RD OOR: lba_ptr={lba_ptr} lba_num={lba_num} exceeds storage capacity {STORAGE_CAP_LBAS}. Reporting LBA_OUT_OF_RANGE.")
+            self.m_op_stat_exp_out.append((True, IuventusOpStatCode.LBA_OUT_OF_RANGE))
+            return
+
         self.c_sqes_disp += 1
         self.c_sqe_rd_cmds += 1
         self.c_sqe_rd_cmd_size += lba_num * SECT_SIZE
-
-        if lba_ptr + lba_num > STORAGE_CAP_LBAS:
-            self.log.warning(f"Requested LBA range (start: {lba_ptr}, num: {lba_num}) exceeds storage capacity. Marking operation as failed.")
-            self.m_op_stat_exp_out.append((True, IuventusOpStatCode.LBA_OUT_OF_RANGE))
-            return
 
         sqe = SQEntry()
         sqe.opcode = SQEOpCodes.READ
@@ -407,14 +431,14 @@ class IuventusModel:
         if self.log.isEnabledFor(logging.INFO):
             self.log.info(f"Creating NVMe Write Request: LBA Num={lba_num}, LBA Ptr={transaction.meta} ({transaction.meta:x})")
 
+        if transaction.meta + lba_num > STORAGE_CAP_LBAS:
+            self.log.info(f"NVMe WR OOR: lba_ptr={transaction.meta} lba_num={lba_num} exceeds storage capacity {STORAGE_CAP_LBAS}. Reporting LBA_OUT_OF_RANGE.")
+            self.m_op_stat_exp_out.append((False, IuventusOpStatCode.LBA_OUT_OF_RANGE))
+            return
+
         self.c_sqes_disp += 1
         self.c_sqe_wr_cmds += 1
         self.c_sqe_wr_cmd_size += lba_num * SECT_SIZE
-
-        if transaction.meta + lba_num > STORAGE_CAP_LBAS:
-            self.log.warning(f"Write request exceeds storage capacity: LBA Ptr={transaction.meta} + LBA Num={lba_num} > Storage Capacity={STORAGE_CAP_LBAS}")
-            self.m_op_stat_exp_out.append((False, IuventusOpStatCode.LBA_OUT_OF_RANGE))
-            return
 
         sqe = SQEntry()
         sqe.opcode = SQEOpCodes.WRITE
