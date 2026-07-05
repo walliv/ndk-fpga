@@ -7,6 +7,7 @@
 # SPDX-License-Identifier: BSD-3-Clause OR Apache-2.0
 
 from math import log2
+import logging
 from typing import Any, Union
 from collections import deque
 
@@ -113,14 +114,21 @@ class MFBDriver(ValidatedBusDriver):
         data = None
         meta = None
         be = None
+        # Raw payload bytes kept for the fast per-block slicing path (avoids O(n^2) slicing of
+        # the whole-payload LogicArray in the block loop below). None => fall back to LogicArray.
+        data_bytes = None
 
         if isinstance(trans, MfbTransaction):
             if isinstance(trans.data, (bytes, bytearray)):
-                data = LogicArray.from_bytes(trans.data, byteorder="little")
+                # Keep only the raw bytes + length; the fast path slices data_bytes per block, so
+                # building a whole-payload LogicArray here would be wasted work (see block loop).
+                data_bytes = bytes(trans.data)
                 data_byte_len = len(trans.data)
+                data_bit_len = data_byte_len * 8
             elif isinstance(trans.data, LogicArray):
                 data = trans.data
                 data_byte_len = len(trans.data) // 8
+                data_bit_len = len(trans.data)
                 assert data_byte_len % 8 == 0
             else:
                 raise TypeError(f"Unsupported type of data in MfbTransaction: {type(trans.data)}")
@@ -148,20 +156,27 @@ class MFBDriver(ValidatedBusDriver):
                 be = LogicArray(0, 32)
 
         elif isinstance(trans, (bytes, bytearray)):
-            data = LogicArray.from_bytes(trans, byteorder="little")
+            data_bytes = bytes(trans)
+            data_bit_len = len(trans) * 8
             if hasattr(self.bus, 'meta'):
                 meta = LogicArray(0, self._meta_width)
 
         elif isinstance(trans, LogicArray):
             data = trans
+            data_bit_len = len(trans)
             if hasattr(self.bus, 'meta'):
                 meta = LogicArray(0, self._meta_width)
         else:
             raise TypeError(f"Unsupported type of transaction: {type(trans)}")
 
-        self.log.debug(f"Data: (len {len(data)} bits = {len(data) // 8} bytes)\n{hex(data)}")
-        self.log.debug(f"Meta: (len {len(meta)} bits)\n{hex(meta)}")
-        self.log.debug(f"BE: {hex(be)}")
+        # hex() on a whole-payload LogicArray is O(payload); only build it when actually logging.
+        # In the fast path data is None (only data_bytes is kept), so materialise a LogicArray
+        # for the log message on demand.
+        if self.log.isEnabledFor(logging.DEBUG):
+            data_disp = data if data is not None else LogicArray.from_bytes(data_bytes, byteorder="little")
+            self.log.debug(f"Data: (len {data_bit_len} bits = {data_bit_len // 8} bytes)\n{hex(data_disp)}")
+            self.log.debug(f"Meta: (len {len(meta)} bits)\n{hex(meta)}")
+            self.log.debug(f"BE: {hex(be)}")
 
         # --------------------------------------------------------------------------------
         # Parse packet data into separate bus words while varying valid and
@@ -173,7 +188,7 @@ class MFBDriver(ValidatedBusDriver):
 
         # A next packet cannot be started in the current region when there is already a SOF OR it cannot
         # be started if it fits to the current since this would cause two EOFs to appear
-        if  self._sof_int[self._last_rgn_idx] == 1 or (self._eof_int[self._last_rgn_idx] == 1 and (self._rgn_bit_width >= (self._last_blk_idx*self._blk_bit_width + len(data)))):
+        if  self._sof_int[self._last_rgn_idx] == 1 or (self._eof_int[self._last_rgn_idx] == 1 and (self._rgn_bit_width >= (self._last_blk_idx*self._blk_bit_width + data_bit_len))):
             self.log.debug(f"Either a SOF: {self._sof_int[self._last_rgn_idx]} or an EOF: {self._eof_int[self._last_rgn_idx]} is in the current region but the packet is too small.")
             self._last_rgn_idx = (self._last_rgn_idx + 1) % self._regions
             self._last_blk_idx = 0
@@ -185,7 +200,7 @@ class MFBDriver(ValidatedBusDriver):
                 self._wordQ.appendleft((self._data_int, self._meta_int, self._sof_int, self._eof_int, self._sof_pos_int, self._eof_pos_int, self._src_rdy_int, self._be_int))
                 self._clr_internal_bus()
 
-        while inp_data_blk_idx*self._blk_bit_width < len(data):
+        while inp_data_blk_idx*self._blk_bit_width < data_bit_len:
             self.log.debug("==================================================================================================")
             self.log.debug(f"Initiated new word starting in {inp_data_blk_idx*self._blk_bit_width} bit of input data.")
             self.log.debug(f"(RGN, BLK) = ({self._last_rgn_idx}, {self._last_blk_idx})")
@@ -195,7 +210,7 @@ class MFBDriver(ValidatedBusDriver):
                 # Iterate over blocks in every region
                 for blk_idx in range(self._last_blk_idx, self._region_size):
                     self.log.debug("--------------------------------------------------------------------------------------------------")
-                    self.log.debug(f"Processing (RGN, BLK) = ({rgn_idx}, {blk_idx}) and bits {inp_data_blk_idx*self._blk_bit_width}/{len(data)} of data")
+                    self.log.debug(f"Processing (RGN, BLK) = ({rgn_idx}, {blk_idx}) and bits {inp_data_blk_idx*self._blk_bit_width}/{data_bit_len} of data")
                     self.log.debug(f"Valid blocks: {self.on}, invalid blocks: {self.off}")
 
                     self._src_rdy_int = 1
@@ -208,7 +223,7 @@ class MFBDriver(ValidatedBusDriver):
                             self._sof_pos_int[rgn_idx*self._sof_pos_w_pr + self._sof_pos_w_pr -1 : rgn_idx*self._sof_pos_w_pr] = blk_idx
 
                     # Truncate as necessary if this is a last block, otherwise keep the size of the MFB block
-                    data_rest_len = len(data) - inp_data_blk_idx*self._blk_bit_width
+                    data_rest_len = data_bit_len - inp_data_blk_idx*self._blk_bit_width
                     data_rest_len = self._blk_bit_width if self._blk_bit_width < data_rest_len else data_rest_len
                     assert data_rest_len >= 0
 
@@ -216,8 +231,18 @@ class MFBDriver(ValidatedBusDriver):
                     bus_idx_high = rgn_idx*self._rgn_bit_width + blk_idx*self._blk_bit_width + data_rest_len -1
                     self.log.debug(f"Bus range to write [{bus_idx_high} : {bus_idx_low}]")
                     self.log.debug(f"Range of input data [{inp_data_blk_idx*self._blk_bit_width + data_rest_len -1} : {inp_data_blk_idx*self._blk_bit_width}]")
-                    self._data_int[bus_idx_high : bus_idx_low] \
-                        = data[inp_data_blk_idx*self._blk_bit_width + data_rest_len -1 : inp_data_blk_idx*self._blk_bit_width]
+                    if data_bytes is not None:
+                        # Fast path: block boundaries are byte-aligned (blk_bit_width and
+                        # data_rest_len are multiples of item_width=8), so slice the raw bytes
+                        # (cheap) and convert just this block, instead of re-slicing the whole
+                        # payload LogicArray on every block (which is O(n^2) over the packet).
+                        byte_lo = (inp_data_blk_idx*self._blk_bit_width) // 8
+                        byte_hi = byte_lo + (data_rest_len // 8)
+                        self._data_int[bus_idx_high : bus_idx_low] \
+                            = LogicArray.from_bytes(data_bytes[byte_lo:byte_hi], byteorder="little")
+                    else:
+                        self._data_int[bus_idx_high : bus_idx_low] \
+                            = data[inp_data_blk_idx*self._blk_bit_width + data_rest_len -1 : inp_data_blk_idx*self._blk_bit_width]
                     if hasattr(self.bus, 'be'):
                         self.log.debug(f"BE Bus range to write [{bus_idx_high // 8} : {bus_idx_low // 8}]")
                         self.log.debug(f"Range of input BE [{inp_data_blk_idx*self._blk_byte_width + (data_rest_len // 8) -1} : {inp_data_blk_idx*self._blk_byte_width}]")
@@ -229,7 +254,7 @@ class MFBDriver(ValidatedBusDriver):
                     if self.on is not True and self.on > 0:
                         self.on -= 1
 
-                    if len(data) <= inp_data_blk_idx*self._blk_bit_width:
+                    if data_bit_len <= inp_data_blk_idx*self._blk_bit_width:
                         self._eof_int[rgn_idx] = 1
                         self._eof_pos_int[rgn_idx*self._eof_pos_w_pr + self._eof_pos_w_pr -1 : rgn_idx*self._eof_pos_w_pr] \
                             = (blk_idx * self._blk_bit_width + data_rest_len - 1) // self._item_width
