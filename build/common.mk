@@ -10,12 +10,14 @@ TCLSH ?= tclsh
 
 .PHONY: simulation vhdocl cocotb clean_common
 
-GEN_MK_TARGETS += simulation vhdocl cocotb ghdl-sim nvc nvc-sim
+GEN_MK_TARGETS += simulation vhdocl cocotb ghdl-sim nvc nvc-sim nvc-elab nvc-run
 simulation: GEN_MK_ENV=SIM_SCRIPT=$(SIM_SCRIPT) SIM_FLAGS=$(SIM_FLAGS)
 
 NVC_PLATFORM_TAGS ?= altera xilinx
 nvc: NETCOPE_ENV+=PLATFORM_TAGS="$(NVC_PLATFORM_TAGS)"
 nvc-sim: NETCOPE_ENV+=PLATFORM_TAGS="$(NVC_PLATFORM_TAGS)"
+nvc-elab: NETCOPE_ENV+=PLATFORM_TAGS="$(NVC_PLATFORM_TAGS)"
+nvc-run: NETCOPE_ENV+=PLATFORM_TAGS="$(NVC_PLATFORM_TAGS)"
 
 # INFO: NETCOPE_TEMP is generated directory
 clean_common:
@@ -80,10 +82,15 @@ COCOTB_RUN_ARGS += COCOTB_RANDOM_SEED=$(RANDOM_SEED)
 endif
 
 # Debug / NVC options
+# When DEBUG_ENABLE=true, waveform/introspection flags are added to the
+# relevant nvc step: --no-collapse at elaboration (keep all signals visible),
+# -w and --dump-arrays at run (dump the waveform incl. array-typed signals).
+# With DEBUG_ENABLE=false (default) none of these are emitted, so simulation
+# runs without the substantial waveform-dumping overhead.
 DEBUG_ENABLE?=false
 ifeq ($(DEBUG_ENABLE),true)
 NVC_ELAB_ARGS += --no-collapse
-NVC_RUN_ARGS += --dump-arrays
+NVC_RUN_ARGS  += -w --dump-arrays
 endif
 
 # Coverage options
@@ -112,6 +119,7 @@ ghdl-sim: $(MOD)
 NVC_LOAD ?=
 nvc-sim: NVC_LOAD=--load $(shell cocotb-config --lib-name-path vhpi nvc)
 nvc-sim: nvc
+nvc-run: NVC_LOAD=--load $(shell cocotb-config --lib-name-path vhpi nvc)
 
 # NVC_RUN_ENV: extra environment variables prepended only to the nvc -r step.
 # Use this to set LD_LIBRARY_PATH or similar per-project without affecting
@@ -120,8 +128,24 @@ NVC_RUN_ENV ?=
 nvc: $(MOD)
 	$(eval TOP_LEVEL_ENT_LC:=$(shell echo $(TOP_LEVEL_ENT) | tr '[:upper:]' '[:lower:]'))
 	nvc --work=nvcwork -H 1G -M 16G --std=2008 -a --relaxed $(filter %.vhd,$(MOD))
-	nvc --work=nvcwork -H 1G -M 16G -e $(NVC_ELAB_ARGS) $(TOP_LEVEL_ENT_LC)
-	$(NVC_RUN_ENV) $(COCOTB_ENV) nvc --work=nvcwork -H 1G -M 16G -rw $(TOP_LEVEL_ENT_LC) --dump-arrays --ieee-warnings=off $(NVC_LOAD)
+	nvc --work=nvcwork -H 1G -M 16G -e -O3 $(NVC_ELAB_ARGS) $(TOP_LEVEL_ENT_LC)
+	$(NVC_RUN_ENV) $(COCOTB_ENV) nvc --work=nvcwork -H 1G -M 16G -r $(NVC_RUN_ARGS) $(TOP_LEVEL_ENT_LC) --ieee-warnings=off $(NVC_LOAD)
+
+# nvc-elab: analyze + elaborate only (no run). Used by the parallel runner
+# (make sim-parallel) to build nvcwork/ once before launching per-test shards.
+nvc-elab: $(MOD)
+	$(eval TOP_LEVEL_ENT_LC:=$(shell echo $(TOP_LEVEL_ENT) | tr '[:upper:]' '[:lower:]'))
+	nvc --work=nvcwork -H 1G -M 16G --std=2008 -a --relaxed $(filter %.vhd,$(MOD))
+	nvc --work=nvcwork -H 1G -M 16G -e -O3 $(NVC_ELAB_ARGS) $(TOP_LEVEL_ENT_LC)
+
+# nvc-run: run only, reusing an already-built nvcwork/ (no analyze/elaborate).
+# For fast iteration on cocotb Python (models/tests) — which nvc loads at run time,
+# so the elaborated design does not change. Run `make nvc-elab` (or `make nvc-sim`)
+# once, then `COCOTB_TESTCASE=<name> make nvc-run` per Python edit (skips the ~50 s
+# analyze+elaborate). Requires nvcwork/ to already exist from a prior elaboration.
+nvc-run: $(MOD)
+	$(eval TOP_LEVEL_ENT_LC:=$(shell echo $(TOP_LEVEL_ENT) | tr '[:upper:]' '[:lower:]'))
+	$(NVC_RUN_ENV) $(COCOTB_ENV) nvc --work=nvcwork -H 1G -M 16G -r $(NVC_RUN_ARGS) $(TOP_LEVEL_ENT_LC) --ieee-warnings=off $(NVC_LOAD)
 
 else
 .PHONY: $(GEN_MK_NAME)
