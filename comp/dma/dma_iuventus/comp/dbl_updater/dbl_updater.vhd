@@ -297,7 +297,7 @@ begin
                 IN_TAG        => (others => '0'),
                 IN_DW_CNT     => std_logic_vector(to_unsigned(1, 11)),
                 IN_ATTRIBUTES => "001",
-                IN_FBE        => "0011",
+                IN_FBE        => "1111",
                 IN_LBE        => "0000",
                 IN_ADDR_LEN   => '1',   -- NOTE: needs to be dynamic for Intel devices
                 IN_REQ_TYPE   => '1',   -- always write
@@ -306,7 +306,7 @@ begin
         tx_mfb_data_arr(rgn) <= (MFB_LENGTH/MFB_REGIONS -1 downto PCIE_META_REQ_HDR_W + 16 => '0')
                                 & fifo_do_arr(rgn)(16+64 -1 downto 64) & dbl_upd_pcie_hdr;
         tx_mfb_eof_pos_arr(rgn) <= std_logic_vector(to_unsigned(4, PCIE_RQ_MFB_EOF_POS'length/MFB_REGIONS));
-        tx_mfb_meta_arr(rgn)    <= (PCIE_RQ_META_FBE => "0011", PCIE_RQ_META_LBE => "0000", others => '0');
+        tx_mfb_meta_arr(rgn)    <= (PCIE_RQ_META_FBE => "1111", PCIE_RQ_META_LBE => "0000", others => '0');
     end generate;
 
     PCIE_RQ_MFB_DATA    <= slv_array_ser(tx_mfb_data_arr);
