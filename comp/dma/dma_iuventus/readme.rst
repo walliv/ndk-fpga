@@ -143,6 +143,66 @@ attribution is a local hardware finding. The *general* phenomenon — consumer N
 unreliable/unsupported for P2P, particularly for queues-in-peer-memory and peer-originated doorbells —
 is firmly established and consistent with the local observations.
 
+Host-bypass acceleration reports the same limitations
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+DMA Iuventus belongs to the hardware-acceleration category commonly called **host-bypass** (or
+*host-bypassing* / *CPU-bypass*) storage: an accelerator (FPGA, GPU or SmartNIC) drives the NVMe SSD
+**directly** — it owns the Submission/Completion Queues, rings the SSD's doorbell, and consumes
+completions itself — so the host CPU is out of both the control and the data path. Placing the NVMe
+queues and buffers in the accelerator's BAR memory (as this design does) and ringing the doorbell from
+the accelerator is exactly the mechanism used by that whole body of work:
+
+- **GPU-initiated I/O — BaM / libnvm / ssd-gpu-dma.** BaM "manages NVMe Submission and Completion
+  Queues directly in GPU memory so that GPU kernels can enqueue commands, ring the NVMe doorbell, and
+  observe completions entirely from device code." That is the GPU analogue of what DMA Iuventus does
+  from the FPGA. (BaM, arXiv:2203.04910; ``enfiskutensykkel/ssd-gpu-dma``.)
+- **FPGA/SoC NVMe host accelerators** — e.g. the AMD *NVMe Host Accelerator* (NVMeHA), iWave and
+  BittWare NVMe-on-FPGA IP — offload IO-queue management and doorbell ringing into the FPGA fabric,
+  bypassing the (embedded or host) CPU. (AMD NVMeHA; iWave; BittWare.)
+- **GPUDirect Storage (GDS)** — the vendor productisation of GPU↔SSD host-bypass DMA. (NVIDIA GDS.)
+
+The published experience in this category reports **the same class of incompatibilities observed
+here**, and treats them as an inherent property of driving commodity NVMe SSDs outside their intended
+usage — not as isolated bugs:
+
+- **Current NVMe / SSDs are not designed for accelerator-driven access.** The problem is recognised at
+  the standards level: SNIA's session *"Why does NVMe Need to Evolve for Efficient Storage Access from
+  GPUs?"* takes as its premise that today's queue/doorbell model and controller behaviour are
+  inadequate for host-bypass, and a companion session addresses the access-control gaps of GPU-Direct.
+  The root mismatch — the SSD's expectations vs. an accelerator managing its queues/doorbells — is the
+  same one that manifested here as the Samsung 990 PRO refusing to act on the FPGA's peer doorbell.
+  (SNIA sessions 19283, 19591.)
+- **Compatibility is per-device, and the field manages it with allow-/block-lists.** The GPU-SSD
+  host-bypass projects explicitly maintain lists of NVMe drives that do and do not work in this mode,
+  and FPGA NVMe host-IP vendors document that the design must be *tuned per SSD model* (queue depth,
+  outstanding-command count, on-chip buffer allocation). This mirrors the local result exactly: on the
+  same host and PCIe path an SK hynix PC611 works while both Samsung 990 PRO drives fail — a
+  device-specific outcome, not a property of the FPGA design. (ssd-gpu-dma; iWave.)
+- **The two pain points the literature centres on are the two that failed here.** (1) *The doorbell.*
+  BaM describes device-side doorbell ringing as a first-class difficulty and a "high cost" operation;
+  our Samsung failure is precisely a doorbell that the SSD honours from the root complex but not from
+  the FPGA peer. (2) *Queues/buffers in non-host memory.* Standard NVMe P2PDMA is only defined for
+  drives exposing a Controller Memory Buffer (CMB); placing queues in a *peer's* BAR and having the
+  SSD fetch them peer-to-peer is outside the standardised envelope, and is exactly where consumer SSD
+  behaviour becomes unreliable (fetch stalls, idle-queue eviction). (BaM; SPDK Peer-2-Peer; NVM
+  Express CMB/PMR.)
+- **Host-bypass work overwhelmingly relies on enterprise/CMB-class drives.** Published GPU/FPGA-SSD
+  systems are built and benchmarked on datacenter NVMe or Intel Optane and CMB-capable devices — a
+  tacit acknowledgement that client/consumer drives are the unreliable class for this access pattern.
+  (BaM; NVIDIA GDS.)
+
+Additionally, host-bypass deliberately steps around the OS storage stack, which the security
+literature flags as a hazard in its own right (direct queue/doorbell access bypasses kernel-level
+protection and namespace-level reservations). (*Pandora's Box in Your SSD*, arXiv:2411.00439.)
+
+**Reconciling with the local observations.** Two honest qualifications. First, no public source names
+the **Samsung 990 PRO specifically**; the device attribution is a local hardware finding — but it is a
+concrete *instance* of the documented pattern, not an anomaly. Second, both local drives are
+client-class (SK hynix PC611, Samsung 990 PRO) and only one works, which fits the *per-device
+allow-list* framing better than a clean consumer-vs-enterprise split: host-bypass compatibility must be
+qualified drive-by-drive.
+
 **Practical guidance:** treat P2P SSD support as a per-device qualification step, and prefer
 datacenter/enterprise NVMe SSDs (ideally with CMB) and a topology that keeps the FPGA and SSD under a
 common PCIe switch or a P2P-capable root complex.
@@ -159,3 +219,14 @@ Sources (compiled by Claude):
 - BaM — *GPU-Initiated On-Demand High-Throughput Storage Access* (arXiv:2203.04910):
   https://arxiv.org/pdf/2203.04910
 - NVIDIA — *GPUDirect Storage*: https://developer.nvidia.com/blog/gpudirect-storage/
+- SNIA — *Why does NVMe Need to Evolve for Efficient Storage Access from GPUs?*:
+  https://www.snia.org/sniadeveloper/session/19283
+- SNIA — *NVMe LBA Access Control for GPU-Direct Storage in AI/HPC Workloads*:
+  https://www.snia.org/sniadeveloper/session/19591
+- AMD — *NVMe Host Accelerator (NVMeHA)* IP:
+  https://www.amd.com/en/products/adaptive-socs-and-fpgas/intellectual-property/ef-di-nvmeha.html
+- iWave — *Unlocking High Speed NVMe SSD Access on FPGAs*:
+  https://iwave-global.com/articles/high-speed-nvme-ssd-access-on-fpgas/
+- BittWare — *FPGA-Accelerated NVMe Storage*: https://www.bittware.com/resources/nvme-storage/
+- *Pandora's Box in Your SSD: The Untold Dangers of NVMe* (arXiv:2411.00439):
+  https://arxiv.org/html/2411.00439v1
