@@ -681,8 +681,12 @@ def req_gen(tb, req_count, size_reduce_factor = 1, rd_en = True, wr_en = True):
             lba_num = random.randint(1, BUFF_SIZE_LBAS // size_reduce_factor)
             tb.nvme_rd(lba_ptr, lba_num)
         elif wr_en:
-            data_len = random.randint(1, BUFF_SIZE // size_reduce_factor)
-            data = bytearray(random.randbytes(data_len))
+            # NVMe writes are whole-LBA: a command covers ceil(len/SECT_SIZE) LBAs, so the SSD reads
+            # that many full sectors from the Read Buffer. Generate LBA-aligned write payloads so the
+            # read never runs past the written data into a don't-care tail (which the DUT returns as
+            # stale RdBuf bytes but the model as zeros -> a seed-dependent CC scoreboard mismatch).
+            lba_num = random.randint(1, BUFF_SIZE_LBAS // size_reduce_factor)
+            data = bytearray(random.randbytes(lba_num * SECT_SIZE))
             tb.nvme_wr(lba_ptr, data)
 
 
