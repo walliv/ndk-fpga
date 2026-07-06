@@ -8,9 +8,13 @@ lappend PACKAGES "$OFM_PATH/comp/base/pkg/math_pack.vhd"
 lappend PACKAGES "$OFM_PATH/comp/base/pkg/type_pack.vhd"
 lappend PACKAGES "$OFM_PATH/comp/base/pkg/nvme_meta_pack.vhd"
 
-set MVB_PIPE_PATH "$OFM_PATH/comp/mvb_tools/flow/pipe"
+set MVB_PIPE_PATH      "$OFM_PATH/comp/mvb_tools/flow/pipe"
+set PAGE_ALLOCATOR_PATH "$ENTITY_BASE/comp/page_allocator"
+set FIFOX_PATH         "$OFM_PATH/comp/base/fifo/fifox"
 
-lappend COMPONENTS [list "MVB_PIPE" $MVB_PIPE_PATH "FULL"]
+lappend COMPONENTS [list "MVB_PIPE"              $MVB_PIPE_PATH      "FULL"]
+lappend COMPONENTS [list "IUVENTUS_PAGE_ALLOCATOR" $PAGE_ALLOCATOR_PATH "FULL"]
+lappend COMPONENTS [list "FIFOX"                 $FIFOX_PATH         "FULL"]
 
 # Source files for implemented component
 lappend MOD "$ENTITY_BASE/op_ctrl.vhd"

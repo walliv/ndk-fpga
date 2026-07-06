@@ -37,7 +37,9 @@ entity DMA_IUVENTUS is
         -- If True the MI clock is the same as CLK and no CDC is necessary
         MI_SAME_CLK     : boolean  := false;
         -- The allowed is only "ULTRASCALE"
-        DEVICE          : string   := "ULTRASCALE"
+        DEVICE          : string   := "ULTRASCALE";
+        -- Amount of tags/Command Identifiers available for outstanding NVMe commands
+        QUEUE_DEPTH     : natural  := 16
         );
 
     port (
@@ -209,6 +211,9 @@ architecture FULL of DMA_IUVENTUS is
     signal cqp_last_cqe    : std_logic_vector(CQ_ENTRY_RANGE);
     signal cqp_status_upd  : std_logic;
 
+    signal disp_cmd_id     : std_logic_vector(15 downto 0);
+    signal disp_cmd_id_vld : std_logic;
+
     -- ============================================================================================
     -- Software management interface
     -- ============================================================================================
@@ -341,6 +346,9 @@ architecture FULL of DMA_IUVENTUS is
     signal ovs_force_drp_reg  : std_logic;
     signal ovs_mfb_eof        : std_logic_vector(USR_MFB_REGIONS -1 downto 0);
     signal opc_wr_mfb_dst_rdy : std_logic;
+    -- Page (within RDBUFF) reserved for the write currently in flight; becomes the WR_REQ_MFB_META
+    -- fed to the C2N controller's write-data path.
+    signal opc_wr_buff_page_addr : std_logic_vector(POINTER_WIDTH -1 downto 0);
 
     -- =============================================================================================
     -- Otput pipe interfaces
@@ -591,7 +599,8 @@ begin
 
     operation_control_i : entity work.OP_CTRL
     generic map (
-        BUFF_PTR_WIDTH => POINTER_WIDTH)
+        BUFF_PTR_WIDTH => POINTER_WIDTH,
+        QUEUE_DEPTH    => QUEUE_DEPTH)
     port map (
         CLK => CLK,
         RST => RST or user_rst,
@@ -628,6 +637,10 @@ begin
         CQP_CQE_SC_TYPE   => cqp_last_cqe(CQ_ENTRY_SC_TYPE),
         CQP_CQE_STAT_CODE => cqp_last_cqe(CQ_ENTRY_STAT_CODE),
         CQP_CQE_VLD       => cqp_status_upd,
+        CQP_CQE_CID       => cqp_last_cqe(CQ_ENTRY_CMD_ID),
+
+        DISP_CMD_ID     => disp_cmd_id,
+        DISP_CMD_ID_VLD => disp_cmd_id_vld,
 
         C2N_TRIGG_DISP    => opc_trigg_disp,
         C2N_RDY_FOR_DISP  => opc_rdy_for_disp,
@@ -642,7 +655,9 @@ begin
         NVME_WR_REQ_END             => WR_MFB_EOF(0) and WR_MFB_SRC_RDY and inp_mfb_dst_rdy,
         NVME_WR_REQ_FRAME_LNG       => wr_frame_lng_sel,
         NVME_WR_REQ_FRAME_LNG_VLD   => wr_frame_lng_vld,
-        WR_MFB_DST_RDY              => opc_wr_mfb_dst_rdy
+        WR_MFB_DST_RDY              => opc_wr_mfb_dst_rdy,
+
+        WR_BUFF_PAGE_ADDR           => opc_wr_buff_page_addr
     );
 
     -- =============================================================================================
@@ -889,7 +904,8 @@ begin
             USR_MFB_ITEM_WIDTH   => USR_MFB_ITEM_WIDTH,
 
             DEVICE               => DEVICE,
-            BUFF_PTR_WIDTH       => POINTER_WIDTH)
+            BUFF_PTR_WIDTH       => POINTER_WIDTH,
+            QUEUE_DEPTH          => QUEUE_DEPTH)
         port map (
             CLK                 => CLK,
             RST                 => RST or user_rst,
@@ -903,9 +919,10 @@ begin
             PCIE_HDR_DST_RDY    => pcie_hdr_dst_rdy,
 
             WR_REQ_MFB_DATA     => fr_lng_mfb_data,
-            -- The packet always starts from address 0 of the buffer
-            -- TODO: This should be assigned dynamically based on the free pages in the buffer
-            WR_REQ_MFB_META     => (others => '0'),
+            -- Byte offset of the page reserved by OP_CTRL's write-side allocator for the frame
+            -- currently in flight (always 0 with the default MAX_WR_PAGES, i.e. whole-buffer
+            -- reservation).
+            WR_REQ_MFB_META     => opc_wr_buff_page_addr,
             WR_REQ_MFB_SOF      => fr_lng_mfb_sof,
             WR_REQ_MFB_EOF      => ovs_mfb_eof,
             WR_REQ_MFB_SOF_POS  => fr_lng_mfb_sof_pos,
@@ -941,6 +958,9 @@ begin
             TAG_FIFO_STATUS     => c2n_tag_fifo_status,
             TAG_INIT_DONE       => c2n_tag_init_done,
             SQTDBL_VAL          => c2n_sqtdbl_data,
+
+            DISP_CMD_ID         => disp_cmd_id,
+            DISP_CMD_ID_VLD     => disp_cmd_id_vld,
 
             PCIE_CC_MFB_DATA    => pcie_cc_mfb_data_piped,
             PCIE_CC_MFB_META    => pcie_cc_mfb_meta_piped,

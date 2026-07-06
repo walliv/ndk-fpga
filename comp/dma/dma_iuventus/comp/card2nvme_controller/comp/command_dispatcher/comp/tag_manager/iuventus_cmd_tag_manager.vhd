@@ -9,12 +9,15 @@ library IEEE;
 use IEEE.std_logic_1164.all;
 use IEEE.numeric_std.all;
 
+use work.math_pack.all;
+
 -- Note:
 
 entity IUVENTUS_CMD_TAG_MANAGER is
 
     generic (
-        DEVICE : string := "ULTRASCALE"
+        DEVICE      : string   := "ULTRASCALE";
+        QUEUE_DEPTH : positive := 2048
         );
 
     port (
@@ -50,6 +53,8 @@ architecture FULL of IUVENTUS_CMD_TAG_MANAGER is
 
     signal tag_counter_pst : unsigned(15 downto 0);
     signal tag_counter_nst : unsigned(15 downto 0);
+
+    signal tag_fifo_status_int : std_logic_vector(log2(QUEUE_DEPTH) downto 0);
 begin
 
     data_overwrite_check_p : process (CLK) is
@@ -91,7 +96,7 @@ begin
                 tag_fifo_wr     <= '1';
 
                 -- Switch to the next state when the FIFO has been filled
-                if (tag_counter_pst = 2047) then
+                if (tag_counter_pst = to_unsigned(QUEUE_DEPTH-1, tag_counter_pst'length)) then
                     init_fsm_nst <= S_OPERATING;
                 end if;
 
@@ -106,7 +111,7 @@ begin
     tag_fifo_i : entity work.FIFOX
         generic map (
             DATA_WIDTH          => 16,
-            ITEMS               => 2048,
+            ITEMS               => QUEUE_DEPTH,
             RAM_TYPE            => "BRAM",
             DEVICE              => DEVICE,
             ALMOST_FULL_OFFSET  => 0,
@@ -121,7 +126,7 @@ begin
             FULL => tag_fifo_full,
 
             AFULL  => open,
-            STATUS => TAG_FIFO_STATUS,
+            STATUS => tag_fifo_status_int,
 
             DO    => TAG_OUT_DATA,
             RD    => tag_fifo_rd,
@@ -132,4 +137,6 @@ begin
     tag_fifo_rd     <= TAG_OUT_DST_RDY and (not tag_fifo_empty);
     TAG_OUT_SRC_RDY <= (not tag_fifo_empty) and fifo_init_done;
     INIT_DONE       <= fifo_init_done;
+
+    TAG_FIFO_STATUS <= std_logic_vector(resize(unsigned(tag_fifo_status_int), TAG_FIFO_STATUS'length));
 end architecture;

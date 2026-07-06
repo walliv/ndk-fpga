@@ -31,7 +31,9 @@ entity NVME_CMD_DISPATCHER is
         -- FPGA device string
         DEVICE          : string  := "ULTRASCALE";
         -- The size of a pointer to the transaction buffer with SQ/Read buffer
-        BUFF_PTR_WIDTH : positive := 17
+        BUFF_PTR_WIDTH : positive := 17;
+        -- Amount of tags/Command Identifiers available for outstanding NVMe commands
+        QUEUE_DEPTH    : positive := 2048
         );
     port(
         CLK     : in std_logic;
@@ -81,6 +83,11 @@ entity NVME_CMD_DISPATCHER is
         -- Set to 1 if tags used as Command Identifiers have been asserted
         TAG_INIT_DONE      : out std_logic;
         SQTDBL_VAL         : out std_logic_vector(15 downto 0);
+
+        -- Command Identifier assigned to the command being dispatched, valid when DISP_CMD_ID_VLD
+        -- is asserted
+        DISP_CMD_ID        : out std_logic_vector(15 downto 0);
+        DISP_CMD_ID_VLD    : out std_logic;
 
         -- =========================================================================================
         -- Update of the SQTBL pointer and return of a tag
@@ -158,7 +165,8 @@ begin
     -- backpressure, can be a source of error.
     tag_manager_i : entity work.IUVENTUS_CMD_TAG_MANAGER
         generic map (
-            DEVICE => DEVICE
+            DEVICE      => DEVICE,
+            QUEUE_DEPTH => QUEUE_DEPTH
             )
         port map (
             CLK   => CLK,
@@ -177,6 +185,9 @@ begin
             );
 
     TAG_INIT_DONE <= tag_fifo_init_done;
+
+    DISP_CMD_ID     <= cmd_id;
+    DISP_CMD_ID_VLD <= cmd_id_dst_rdy;
 
     -- =============================================================================================
     -- Dispatching logic with command generation
