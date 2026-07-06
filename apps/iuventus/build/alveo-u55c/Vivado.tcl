@@ -89,10 +89,14 @@ lappend SYNTH_FLAGS(CONSTR) "$CARD_BASE/src/pblock.xdc"
 # Comment this constraint out if you don't want to see the received data in the hardware
 lappend SYNTH_FLAGS(CONSTR) "$CARD_BASE/src/ilas.xdc"
 
-lappend SYNTH_FLAGS(CONSTR) "$COMBO_BASE/cards/amd/alveo-u55c/constr/pcie_half.xdc"
+# Base PCIe pins (SYSRST_N, SYSCLK, lanes 0-3) always required; pcie_x8 adds lanes 4-7 for x8.
+# (The "unify PCIe constraints" card refactor split the old pcie_half.xdc into pcie_x4 + pcie_x8;
+# this app build script must include both, mirroring cards/.../src/Vivado.inc.tcl.)
+lappend SYNTH_FLAGS(CONSTR) "$COMBO_BASE/cards/amd/alveo-u55c/constr/pcie_x4.xdc"
+lappend SYNTH_FLAGS(CONSTR) "$COMBO_BASE/cards/amd/alveo-u55c/constr/pcie_x8.xdc"
 
 if {$PCIE_ENDPOINT_MODE == 0 || $PCIE_ENDPOINT_MODE == 1} {
-    lappend SYNTH_FLAGS(CONSTR) "$COMBO_BASE/cards/amd/alveo-u55c/constr/pcie_full.xdc"
+    lappend SYNTH_FLAGS(CONSTR) "$COMBO_BASE/cards/amd/alveo-u55c/constr/pcie_x16.xdc"
 }
 
 # Call main function which handle targets
