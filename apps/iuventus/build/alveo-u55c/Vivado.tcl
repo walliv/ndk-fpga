@@ -58,6 +58,12 @@ set SYNTH_FLAGS(PROJ_ONLY) "0"
 # "1" ... synthesize the project
 set SYNTH_FLAGS(SYNTH_ONLY) "0"
 
+# Timing closure: this QD16 design is marginal on pcie_clks (mfb_merger / perf-counter data-logger
+# paths); the default flow lands slightly negative on some P&R draws. Bias placement toward timing
+# and run a post-route physical optimization to close the small (~0.2 ns) violation.
+set SYNTH_FLAGS(PLACE_DIRECTIVE)            "ExtraTimingOpt"
+set SYNTH_FLAGS(PROUTE_PHYS_OPT_DIRECTIVE) "AggressiveExplore"
+
 # Associative array which is propagated throughout Modules.tcl files
 set APP_ARCHGRP(CORE_BASE)       $CORE_BASE
 set APP_ARCHGRP(CLOCK_GEN_ARCH)  $CLOCK_GEN_ARCH
