@@ -16,7 +16,7 @@ Assets in this skill dir (edit the paths/instance names for your app):
 - `ila_capture.tcl` — arm a trigger, wait, upload, write CSV
 
 Toolchain: local Vivado `2025.1` (`/opt/Xilinx/2025.1/Vivado`), Vivado_Lab + `hw_server` on the card
-host (`nct`). See also `bitstream-flash` and `nfb-access`.
+host (use your configured ssh host alias). See also `bitstream-flash` and `nfb-access`.
 
 ## 1. Mark the signals (RTL)
 
