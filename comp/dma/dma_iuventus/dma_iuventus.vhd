@@ -151,7 +151,6 @@ architecture FULL of DMA_IUVENTUS is
     constant POINTER_WIDTH  : natural := 17;
 
     constant UPDATE_DELAY : positive := 2**8;
-    constant REPEAT_DELAY : positive := 2**28;
 
     package iuventus_mfb_meta_pkg_i is new work.iuventus_mfb_meta_pkg
     generic map (
@@ -202,9 +201,7 @@ architecture FULL of DMA_IUVENTUS is
     signal mex_pcie_wr_req_total_bytes  : std_logic_vector(log2(PCIE_TRANS_SIZE_MAX+1) -1 downto 0);
 
     signal dup_cqhdbl_reg_upd_disp : std_logic;
-    signal dup_cqhdbl_rpt_upd_disp : std_logic;
     signal dup_sqtdbl_reg_upd_disp : std_logic;
-    signal dup_sqtdbl_rpt_upd_disp : std_logic;
 
     signal cqp_sqhdbl      : std_logic_vector(15 downto 0);
     signal cqp_cqhdbl      : std_logic_vector(15 downto 0);
@@ -230,7 +227,6 @@ architecture FULL of DMA_IUVENTUS is
 
     signal swm_cqhdbl_base_addr : std_logic_vector(63 downto 0);
     signal swm_sqtdbl_base_addr : std_logic_vector(63 downto 0);
-    signal swm_rpt_update_en    : std_logic;
 
     -- =============================================================================================
     -- PCIe Header interface from Metadata Extractor
@@ -577,12 +573,9 @@ begin
 
         CQHDBL_BASE_ADDR => swm_cqhdbl_base_addr,
         SQTDBL_BASE_ADDR => swm_sqtdbl_base_addr,
-        RPT_UPDATE_EN    => swm_rpt_update_en,
 
         CQHDBL_REG_UPD_DISP  => dup_cqhdbl_reg_upd_disp,
-        CQHDBL_RPT_UPD_DISP  => dup_cqhdbl_rpt_upd_disp,
         SQTDBL_REG_UPD_DISP  => dup_sqtdbl_reg_upd_disp,
-        SQTDBL_RPT_UPD_DISP  => dup_sqtdbl_rpt_upd_disp,
 
         OPC_TRIGG_DISP  => opc_trigg_disp,
 
@@ -978,13 +971,10 @@ begin
             MFB_REGION_SIZE => PCIE_MFB_REGION_SIZE,
             MFB_BLOCK_SIZE  => PCIE_MFB_BLOCK_SIZE,
             MFB_ITEM_WIDTH  => PCIE_MFB_ITEM_WIDTH,
-            UPDATE_DELAY    => UPDATE_DELAY,
-            REPEAT_DELAY    => REPEAT_DELAY)
+            UPDATE_DELAY    => UPDATE_DELAY)
         port map (
             CLK => CLK,
             RST => RST or user_rst or cmd_disp_rst,
-
-            REPEAT_UPDATE_EN => swm_rpt_update_en,
 
             CQHDBL_BASE_ADDR => swm_cqhdbl_base_addr,
             CQHDBL_DATA      => cqp_cqhdbl,
@@ -995,9 +985,7 @@ begin
             SQTDBL_VLD       => c2n_sqes_disp_incr,
 
             CQHDBL_REG_UPD_DISP => dup_cqhdbl_reg_upd_disp,
-            CQHDBL_RPT_UPD_DISP => dup_cqhdbl_rpt_upd_disp,
             SQTDBL_REG_UPD_DISP => dup_sqtdbl_reg_upd_disp,
-            SQTDBL_RPT_UPD_DISP => dup_sqtdbl_rpt_upd_disp,
 
             PCIE_RQ_MFB_DATA    => pcie_rq_mfb_data_piped,
             PCIE_RQ_MFB_META    => pcie_rq_mfb_meta_piped,

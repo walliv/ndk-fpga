@@ -113,12 +113,9 @@ entity NVME_SW_MANAGER is
         -- =========================================================================================
         CQHDBL_BASE_ADDR : out std_logic_vector(63 downto 0);
         SQTDBL_BASE_ADDR : out std_logic_vector(63 downto 0);
-        RPT_UPDATE_EN    : out std_logic;
 
         CQHDBL_REG_UPD_DISP : in std_logic;
-        CQHDBL_RPT_UPD_DISP : in std_logic;
         SQTDBL_REG_UPD_DISP : in std_logic;
-        SQTDBL_RPT_UPD_DISP : in std_logic;
 
         -- ========================================================================================
         -- Performance Counters
@@ -708,7 +705,9 @@ architecture FULL of NVME_SW_MANAGER is
     constant CTRL_SAMPLE_CNTRS   : natural := 1;
     constant CTRL_CLR_ERR_MASK   : natural := 2;
     constant CTRL_RST_CNTRS      : natural := 3;
-    constant CTRL_RPT_PTR_UPDATE : natural := 4;
+    -- Bit 4 (formerly CTRL_RPT_PTR_UPDATE, doorbell repeat-update enable) is retired: the doorbell
+    -- repeat-update logic was removed (re-writing an unchanged doorbell is an NVMe "Invalid Doorbell
+    -- Write Value"). The CONTROL bit is now ignored; kept reserved to preserve the register map.
 
     -- ============================================================================================
     -- Status register fields
@@ -992,11 +991,13 @@ begin
     cntr_incrs_sizes(R_CQ_PCIE_WR_BYTES_CNTR_L)         <= std_logic_vector(resize(unsigned(PCIE_WR_REQ_BYTES(CQ_BAR_ID_INT)), CNTR_WIDTH));
     cntr_incrs(R_CQHDBL_REG_UPDS_CNTR_L)                <= CQHDBL_REG_UPD_DISP;
     cntr_incrs_sizes(R_CQHDBL_REG_UPDS_CNTR_L)          <= std_logic_vector(to_unsigned(1, CNTR_WIDTH));
-    cntr_incrs(R_CQHDBL_RPT_UPDS_CNTR_L)                <= CQHDBL_RPT_UPD_DISP;
+    -- Reserved counter (doorbell repeat-update removed); kept at 0 to preserve the register map.
+    cntr_incrs(R_CQHDBL_RPT_UPDS_CNTR_L)                <= '0';
     cntr_incrs_sizes(R_CQHDBL_RPT_UPDS_CNTR_L)          <= std_logic_vector(to_unsigned(1, CNTR_WIDTH));
     cntr_incrs(R_SQTDBL_REG_UPDS_CNTR_L)                <= SQTDBL_REG_UPD_DISP;
     cntr_incrs_sizes(R_SQTDBL_REG_UPDS_CNTR_L)          <= std_logic_vector(to_unsigned(1, CNTR_WIDTH));
-    cntr_incrs(R_SQTDBL_RPT_UPDS_CNTR_L)                <= SQTDBL_RPT_UPD_DISP;
+    -- Reserved counter (doorbell repeat-update removed); kept at 0 to preserve the register map.
+    cntr_incrs(R_SQTDBL_RPT_UPDS_CNTR_L)                <= '0';
     cntr_incrs_sizes(R_SQTDBL_RPT_UPDS_CNTR_L)          <= std_logic_vector(to_unsigned(1, CNTR_WIDTH));
     cntr_incrs(R_NVME_RD_BYTES_CNTR_L)                  <= SQES_DISP_INCR when SQES_DISP_TYPE = RD_CMD_OPCODE else '0';
     cntr_incrs_sizes(R_NVME_RD_BYTES_CNTR_L)            <= std_logic_vector(resize(unsigned(SQES_DISP_BYTES), CNTR_WIDTH));
@@ -1071,7 +1072,6 @@ begin
 
     SQTDBL_BASE_ADDR <= regs_arr(R_SQTDBL_BADDR_H) & regs_arr(R_SQTDBL_BADDR_L);
     CQHDBL_BASE_ADDR <= regs_arr(R_CQHDBL_BADDR_H) & regs_arr(R_CQHDBL_BADDR_L);
-    RPT_UPDATE_EN    <= regs_arr(R_CONTROL)(CTRL_RPT_PTR_UPDATE);
 
     -- =============================================================================================
     -- Selecting registers to READ
