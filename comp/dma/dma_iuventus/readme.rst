@@ -39,7 +39,9 @@ An NVMe I/O operation driven by DMA Iuventus proceeds as follows:
    Submission Queue region of the FPGA BAR.
 3. **Ring the doorbell.** ``DBL_UPDATER`` writes the SSD's SQ-tail doorbell register (``SQTDBL``) — and
    the CQ-head doorbell (``CQHDBL``) — via a PCIe RQ MemWr to the doorbell base addresses programmed in
-   the C/S registers. It also contains an optional *repeat* mechanism (see below).
+   the C/S registers. A doorbell is written **only when its value changes** (throttled by
+   ``UPDATE_DELAY``); the FPGA never re-writes an unchanged doorbell value (see the doorbell-write
+   compliance note below).
 4. **SSD fetches and executes.** On the doorbell, the SSD peer-**reads** the new SQE from the FPGA-BAR
    Submission Queue, and — for a WRITE command — peer-reads the write-data from the FPGA-BAR Read
    Buffer (referenced by the PRP pointers). It then performs the media access.
@@ -51,6 +53,27 @@ An NVMe I/O operation driven by DMA Iuventus proceeds as follows:
 **Queue / buffer placement.** SQ, CQ, Read Buffer and Write Buffer all reside in the FPGA BAR
 (``iuventus_bar_map_pkg``: ``SQ_BAR_ID`` / ``CQ_BAR_ID`` / ``RDBUFF_BAR_ID`` / ``WRBUFF_BAR_ID``); the
 SSD reaches them peer-to-peer.
+
+Queue depth and concurrent commands
+-----------------------------------
+
+DMA Iuventus sustains a **queue depth of 16 with up to 16 commands outstanding simultaneously**
+(``QUEUE_DEPTH`` generic, default 16). ``OP_CTRL`` issues a command and returns immediately to admit
+the next one instead of blocking on the previous command's completion; a per-CID **context table**
+records each in-flight command's parameters (operation type, LBA count, allocated buffer pages) and is
+looked up when the matching CQE returns. Completions are matched by the CQE's command-ID, so they may
+return out of order. Reads are dispatched multiple-outstanding; write **data** is serialized on the
+single ``WR_MFB`` bus, but writes still pipeline their SQEs and completions.
+
+**Dynamic page allocation.** The Read Buffer and Write Buffer are each 128 KiB = 32 × 4 KiB pages. A
+first-fit page allocator (``IUVENTUS_PAGE_ALLOCATOR``, one instance per buffer) hands each command a
+contiguous run of pages and frees it on completion, and the command's PRP1/PRP2 pointers are rebased
+by the allocated page offset. This replaces the earlier fixed-offset-0 placement, which allowed only
+one command's data to occupy a buffer at a time. Admission backpressures on any of **three**
+independent limits: the SQ being full (dispatcher), the command-ID free-list being exhausted, or the
+relevant buffer lacking a large-enough contiguous free run. A read frees its Write-Buffer pages only
+once its data has fully drained to the user (not merely on the CQE), so a later command's peer-write
+cannot race the still-draining read data.
 
 .. note::
 
@@ -67,8 +90,9 @@ Control and Status (C/S) registers
 ``NVME_SW_MANAGER`` implements the register file reached over the MI bus. The main registers:
 
 - ``R_CONTROL`` — control bits: ``DESIGN_EN`` (bit 0, enable the controller FSM), ``SAMPLE_CNTRS``
-  (bit 1), ``CLR_ERR_MASK`` (bit 2), ``RST_CNTRS`` (bit 3), and ``RPT_PTR_UPDATE`` (bit 4, enable the
-  doorbell-repeat logic — **off by default**).
+  (bit 1), ``CLR_ERR_MASK`` (bit 2), ``RST_CNTRS`` (bit 3). Bit 4 (formerly ``RPT_PTR_UPDATE``, the
+  doorbell-repeat enable) is now **reserved / no-op** — the repeat logic has been removed (see the
+  doorbell-write compliance note below).
 - ``R_STATUS`` — run/ready status of the controller.
 - ``R_SQTDBL`` / ``R_SQHDBL`` / ``R_CQHDBL`` — the FPGA's view of the SQ tail, SQ head and CQ head.
 - ``R_*_BADDR_{L,H}`` — 64-bit base addresses programmed at init (the SSD's ``SQTDBL`` / ``CQHDBL``
@@ -79,16 +103,26 @@ Control and Status (C/S) registers
   ``sqes_dispatched``, ``cqes_processed``, ``succ_cpls``, ``unsucc_cpls``, ``sq_pcie_rds`` (SSD peer
   reads of the SQ), ``rdbuff_pcie_rds`` (SSD peer reads of the Read Buffer).
 
-**Command-ID (tag) management.** ``IUVENTUS_CMD_TAG_MANAGER`` is a free-list FIFO seeded at reset with
-the unique tags ``0 .. 2047``. A tag is popped when a command is composed and pushed back when its
-completion returns (via the CQE's command-ID field), guaranteeing that command IDs are unique among
-outstanding commands, as required by NVMe.
+**Command-ID (tag) management.** ``IUVENTUS_CMD_TAG_MANAGER`` is a free-list FIFO of unique NVMe
+command identifiers (``QUEUE_DEPTH`` generic, default ``2048`` tags ``0 .. 2047``). A tag is popped
+when a command is composed and pushed back when its completion returns (via the CQE's command-ID
+field), guaranteeing that command IDs are unique among outstanding commands, as required by NVMe. The
+number of *concurrently* outstanding commands is separately bounded to 16 by ``OP_CTRL``'s context
+table and the buffer page allocators (see above).
 
-**Doorbell-repeat (anti-idle) mechanism.** ``DBL_UPDATER`` can re-issue a doorbell write if the
-doorbell value has been unchanged for ``REPEAT_DELAY`` clock cycles (top-level default ``2**28`` ≈ 1 s
-at the PCIe user clock). It is gated by ``R_CONTROL`` bit 4 (``RPT_PTR_UPDATE``) and is **off after
-reset**; software (e.g. the control application) enables it during operation. It is intended to keep
-an idle-sensitive SSD's queue-fetch engine alive by periodically re-ringing the doorbell.
+.. _dma_iuventus_doorbell_compliance:
+
+**Doorbell-write compliance (no repeat writes).** ``DBL_UPDATER`` writes each doorbell **only when its
+value changes**, throttled by ``UPDATE_DELAY``. An earlier revision also carried an optional
+*repeat / anti-idle* path that periodically re-rang an **unchanged** doorbell value to try to keep an
+idle-sensitive SSD's fetch engine alive. That path has been **removed**: re-writing a doorbell with the
+value already written is exactly NVMe's *"Invalid Doorbell Write Value"* condition (NVM Express base
+spec — "the value written is the same as the previously written doorbell value"), which a compliant SSD
+may reject. The Samsung 990 PRO did exactly that — it raised the corresponding asynchronous-event error
+and refused to peer-fetch the Submission Queue, wedging P2P. With the repeat path gone, only compliant
+on-change doorbell writes remain. ``R_CONTROL`` bit 4 (formerly ``RPT_PTR_UPDATE``) and the
+``R_*DBL_RPT_UPDS_CNTR`` registers are now **reserved** (the bit is a no-op and the counters read 0);
+their register indices are retained so the MI address map is unchanged.
 
 Verification and test results
 -----------------------------
@@ -96,14 +130,18 @@ Verification and test results
 DMA Iuventus is verified both in simulation (cocotb, ``nvc``) and on hardware (an SPDK-based control
 application on an Alveo U55C):
 
-- **Cocotb** — the suite (random read / write / read-write, phase-wrap and wrap-collision stress, and
-  the completion-queue nullification test) passes; re-run across multiple random seeds with 0 failures
-  (repeatable). Fast iteration is provided by the ``sim-elab`` / ``sim-run`` and parallel-runner
-  targets and by gating the ``nvc`` waveform dump behind ``DEBUG_ENABLE``.
-- **Hardware, SK hynix PC611** — fully works and is repeatable for both slow-paced (paced writes +
-  reads) and high-throughput workflows.
-- **Hardware, Samsung 990 PRO** — see the P2P compatibility notes: this consumer SSD is unreliable as
-  a P2P target; it is not a supported drive for DMA Iuventus.
+- **Cocotb** — the suite (random read / write / read-write, phase-wrap and wrap-collision stress, the
+  completion-queue nullification test, and the page-aware multiple-outstanding / fragmentation tests)
+  passes; re-run across multiple random seeds with 0 failures (repeatable). Fast iteration is provided
+  by the ``sim-elab`` / ``sim-run`` and parallel-runner targets and by gating the ``nvc`` waveform dump
+  behind ``DEBUG_ENABLE``.
+- **Hardware, SK hynix PC611** (Gen3 x4) — fully works and is repeatable for both slow-paced (paced
+  writes + reads) and high-throughput workflows.
+- **Hardware, Samsung 990 PRO** (Gen4 x4) — **now works** once the non-compliant doorbell-repeat path
+  was removed (see the doorbell-write compliance note above): both 990 PRO drives peer-fetch reliably
+  with zero *"Invalid Doorbell Write Value"* events and no wedge across idle gaps. Earlier revisions
+  treated the 990 PRO as an unsupported P2P target; that failure was ultimately a requester-side bug,
+  not a fundamental device limitation (see the compatibility notes below).
 
 .. _dma_iuventus_p2p_compat:
 
@@ -115,8 +153,20 @@ depends on **PCIe peer-to-peer (P2P)** transactions with the SSD (the FPGA writi
 and the SSD reading its SQ / Read Buffer from — and writing its CQ / Write Buffer into — the FPGA
 BAR). P2P support is **strongly device- and platform-dependent**, and *consumer / client* NVMe SSDs
 are the least reliable class for this use. Verified drives should be qualified individually; do not
-assume an arbitrary NVMe SSD will work as a P2P target. On the ZITI test host an SK hynix PC611 works
-fully while both Samsung 990 PRO drives fail.
+assume an arbitrary NVMe SSD will work as a P2P target. On the local test host an SK hynix PC611 works
+fully; both Samsung 990 PRO drives initially failed but were **recovered** once a requester-side
+doorbell bug was fixed (see the root-cause update below).
+
+.. important::
+
+   **Root-cause update (2026-07).** The Samsung 990 PRO failure that originally motivated the
+   compatibility research below was traced to a **bug in this requester**, not to the drive: the FPGA's
+   optional doorbell-repeat path re-wrote unchanged doorbell values, which NVMe classifies as an
+   *"Invalid Doorbell Write Value"*. The 990 PRO defensively stopped fetching the Submission Queue.
+   Removing that path (see :ref:`the doorbell-write compliance note<dma_iuventus_doorbell_compliance>`)
+   makes **both** 990 PRO drives peer-fetch reliably. The general P2P caveats below remain valid
+   background and the per-device-qualification advice still holds, but the specific "the 990 PRO cannot
+   do P2P" conclusion has been **superseded**.
 
 The following summary of the state of the art was **researched and sourced by Claude** (AI assistant)
 and reflects public sources as of July 2026:
@@ -176,13 +226,16 @@ usage — not as isolated bugs:
 - **Compatibility is per-device, and the field manages it with allow-/block-lists.** The GPU-SSD
   host-bypass projects explicitly maintain lists of NVMe drives that do and do not work in this mode,
   and FPGA NVMe host-IP vendors document that the design must be *tuned per SSD model* (queue depth,
-  outstanding-command count, on-chip buffer allocation). This mirrors the local result exactly: on the
-  same host and PCIe path an SK hynix PC611 works while both Samsung 990 PRO drives fail — a
-  device-specific outcome, not a property of the FPGA design. (ssd-gpu-dma; iWave.)
-- **The two pain points the literature centres on are the two that failed here.** (1) *The doorbell.*
+  outstanding-command count, on-chip buffer allocation) — parameters this design also exposes. The
+  original local result — SK hynix working while both Samsung 990 PROs failed — first looked like such
+  a per-device outcome, but was ultimately traced to a requester-side doorbell-protocol bug in the FPGA
+  (a same-value doorbell write); with it fixed, both drives work. (ssd-gpu-dma; iWave.)
+- **The two pain points the literature centres on are the two that surfaced here.** (1) *The doorbell.*
   BaM describes device-side doorbell ringing as a first-class difficulty and a "high cost" operation;
-  our Samsung failure is precisely a doorbell that the SSD honours from the root complex but not from
-  the FPGA peer. (2) *Queues/buffers in non-host memory.* Standard NVMe P2PDMA is only defined for
+  our Samsung issue was doorbell-related — but specifically a **non-compliant** doorbell write from the
+  FPGA (re-writing an unchanged value), not an inability of the SSD to accept a peer doorbell at all.
+  Once the writes were made compliant the 990 PRO honours the FPGA's peer doorbell.
+  (2) *Queues/buffers in non-host memory.* Standard NVMe P2PDMA is only defined for
   drives exposing a Controller Memory Buffer (CMB); placing queues in a *peer's* BAR and having the
   SSD fetch them peer-to-peer is outside the standardised envelope, and is exactly where consumer SSD
   behaviour becomes unreliable (fetch stalls, idle-queue eviction). (BaM; SPDK Peer-2-Peer; NVM
@@ -196,12 +249,13 @@ Additionally, host-bypass deliberately steps around the OS storage stack, which 
 literature flags as a hazard in its own right (direct queue/doorbell access bypasses kernel-level
 protection and namespace-level reservations). (*Pandora's Box in Your SSD*, arXiv:2411.00439.)
 
-**Reconciling with the local observations.** Two honest qualifications. First, no public source names
-the **Samsung 990 PRO specifically**; the device attribution is a local hardware finding — but it is a
-concrete *instance* of the documented pattern, not an anomaly. Second, both local drives are
-client-class (SK hynix PC611, Samsung 990 PRO) and only one works, which fits the *per-device
-allow-list* framing better than a clean consumer-vs-enterprise split: host-bypass compatibility must be
-qualified drive-by-drive.
+**Reconciling with the local observations.** With the requester-side doorbell bug fixed, **both** local
+client-class drives (SK hynix PC611 and Samsung 990 PRO) now work as P2P targets. The original
+one-works / one-fails split turned out to be self-inflicted rather than an inherent device property — a
+useful caution that an apparent "device incompatibility" in this access mode can equally be a
+requester-side protocol violation (here, a same-value doorbell write). The general guidance still holds:
+host-bypass P2P compatibility must be qualified drive-by-drive, and datacenter/CMB-class drives remain
+the safest choice.
 
 **Practical guidance:** treat P2P SSD support as a per-device qualification step, and prefer
 datacenter/enterprise NVMe SSDs (ideally with CMB) and a topology that keeps the FPGA and SSD under a
