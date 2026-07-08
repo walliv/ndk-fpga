@@ -20,12 +20,32 @@ which give three very different answers, so the method matters.
 | FPGA **completion-based** (`fpga_cpl_throughput.py`) | ~0.79 | ~1.09 | **Effective** P2P throughput (actual NVMe completions) |
 | host **`spdk_nvme_perf`** | ~3.47 | ~2.76 | The drive's real capability |
 
-**Conclusion:** the FPGA P2P datapath is the bottleneck (~0.8 GB/s), **~4x below** what the drive can
-do (~3.5 GB/s, host). The MFB speed meter overstates the effective rate by ~10-19x and must **not** be
-reported as P2P throughput. Likely limiters: op_ctrl's dispatch/completion loop and the single shared
-WRBUFF-drain MFB bus. All runs had 0 unsuccessful completions (a rate limit, not errors). Sub-finding:
-the sequential-address generator is ~10x slower than random at 512 B (`rd_seq` 59k IOPS vs `rd_rand`
-618k) — a read-path optimization target.
+**Conclusion (hynix / Gen3):** on this drive the FPGA P2P datapath is the bottleneck (~0.8 GB/s),
+**~4x below** what the drive can do (~3.5 GB/s, host). **This ~0.8 GB/s is a hynix/Gen3-specific
+result, not a general FPGA-P2P ceiling** — on a Gen4 Samsung 990 PRO the read path nearly saturates the
+drive (see the cross-drive note below). The MFB speed meter overstates the effective rate by ~10-19x
+and must **not** be reported as P2P throughput. Likely limiters: op_ctrl's dispatch/completion loop and
+the single shared WRBUFF-drain MFB bus. All runs had 0 unsuccessful completions (a rate limit, not
+errors). Sub-finding: the sequential-address generator is ~10x slower than random at 512 B (`rd_seq`
+59k IOPS vs `rd_rand` 618k) — a read-path optimization target.
+
+## Cross-drive note — Samsung 990 PRO (Gen4 x4)
+
+Repeating the completion-based sweep on a **Samsung 990 PRO** (Gen4 x4, on the repeat-update-removed
+firmware) tells a very different story: the FPGA read P2P path is **efficient**, not the bottleneck.
+Effective (completion-based) vs host `spdk_nvme_perf` peaks, no speed-meter data:
+
+| Mode | FPGA effective (GBps) | Host (GBps) | % of host |
+|---|---|---|---|
+| Read random | ~6.61 | ~6.8 | ~97% |
+| Read sequential | ~6.20 | ~6.9 | ~89% |
+| Write random | ~3.83 | ~6.9 | ~56% |
+| Write sequential | ~3.66 | ~6.9 | ~53% |
+
+So on a Gen4 drive the **read** P2P path nearly saturates the SSD, while the **write** path (~half of
+host) is the real FPGA limiter — consistent with writes being serialized on the single WRBUFF-drain MFB
+bus. Both Samsung 990 PROs behave the same. (Only the hynix data set is committed here; the Samsung
+sweep was captured on the test host and is reproducible with the same scripts against a 990 PRO.)
 
 ## Files
 - `fpga_mfb_meter.json` — FPGA MFB speed-meter sweep (`throughput_bps`), from `iuventus_rw_test.py -t`.
