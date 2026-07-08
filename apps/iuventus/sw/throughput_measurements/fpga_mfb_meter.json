@@ -1,0 +1,254 @@
+[
+  {
+    "mode": "rd",
+    "addressing": "rand",
+    "lba_num": 0,
+    "iops": 513171.77808503015,
+    "throughput_bps": 1679348761.138874
+  },
+  {
+    "mode": "rd",
+    "addressing": "rand",
+    "lba_num": 1,
+    "iops": 486234.2038866769,
+    "throughput_bps": 3187879192.7839785
+  },
+  {
+    "mode": "rd",
+    "addressing": "rand",
+    "lba_num": 3,
+    "iops": 438627.7877513836,
+    "throughput_bps": 5748797628.837814
+  },
+  {
+    "mode": "rd",
+    "addressing": "rand",
+    "lba_num": 7,
+    "iops": 365589.7460236954,
+    "throughput_bps": 9584497868.95699
+  },
+  {
+    "mode": "rd",
+    "addressing": "rand",
+    "lba_num": 15,
+    "iops": 275686.3837608814,
+    "throughput_bps": 13952907995.704218
+  },
+  {
+    "mode": "rd",
+    "addressing": "rand",
+    "lba_num": 31,
+    "iops": 139078.59127796922,
+    "throughput_bps": 14658984429.608973
+  },
+  {
+    "mode": "rd",
+    "addressing": "rand",
+    "lba_num": 63,
+    "iops": 70767.94294783461,
+    "throughput_bps": 14790118081.830881
+  },
+  {
+    "mode": "rd",
+    "addressing": "rand",
+    "lba_num": 127,
+    "iops": 29959.715958609646,
+    "throughput_bps": 12648425721.557533
+  },
+  {
+    "mode": "rd",
+    "addressing": "rand",
+    "lba_num": 255,
+    "iops": 10707.881321586447,
+    "throughput_bps": 8978125033.446121
+  },
+  {
+    "mode": "rd",
+    "addressing": "seq",
+    "lba_num": 0,
+    "iops": 568726.5667481843,
+    "throughput_bps": 1863903815.5373328
+  },
+  {
+    "mode": "rd",
+    "addressing": "seq",
+    "lba_num": 1,
+    "iops": 491697.3421195472,
+    "throughput_bps": 3494036878.2506766
+  },
+  {
+    "mode": "rd",
+    "addressing": "seq",
+    "lba_num": 3,
+    "iops": 298219.7334956745,
+    "throughput_bps": 503454591.7192645
+  },
+  {
+    "mode": "rd",
+    "addressing": "seq",
+    "lba_num": 7,
+    "iops": 152119.43565331292,
+    "throughput_bps": 4331225602.072573
+  },
+  {
+    "mode": "rd",
+    "addressing": "seq",
+    "lba_num": 15,
+    "iops": 176886.562587482,
+    "throughput_bps": 9440234410.167614
+  },
+  {
+    "mode": "rd",
+    "addressing": "seq",
+    "lba_num": 31,
+    "iops": 82231.59254012925,
+    "throughput_bps": 7545507840.609207
+  },
+  {
+    "mode": "rd",
+    "addressing": "seq",
+    "lba_num": 63,
+    "iops": 61535.742248475064,
+    "throughput_bps": 12906445360.580256
+  },
+  {
+    "mode": "rd",
+    "addressing": "seq",
+    "lba_num": 127,
+    "iops": 30746.21787433739,
+    "throughput_bps": 12873916673.935638
+  },
+  {
+    "mode": "rd",
+    "addressing": "seq",
+    "lba_num": 255,
+    "iops": 10473.188032346196,
+    "throughput_bps": 8537500031.804666
+  },
+  {
+    "mode": "wr",
+    "addressing": "rand",
+    "lba_num": 0,
+    "iops": 67607.96544627838,
+    "throughput_bps": 232797242.0781748
+  },
+  {
+    "mode": "wr",
+    "addressing": "rand",
+    "lba_num": 1,
+    "iops": 59931.07344942367,
+    "throughput_bps": 399862672.38804203
+  },
+  {
+    "mode": "wr",
+    "addressing": "rand",
+    "lba_num": 3,
+    "iops": 54050.23704106032,
+    "throughput_bps": 709191897.1731957
+  },
+  {
+    "mode": "wr",
+    "addressing": "rand",
+    "lba_num": 7,
+    "iops": 47822.94863429469,
+    "throughput_bps": 1257861332.8108985
+  },
+  {
+    "mode": "wr",
+    "addressing": "rand",
+    "lba_num": 15,
+    "iops": 46051.107432788434,
+    "throughput_bps": 2400292977.691788
+  },
+  {
+    "mode": "wr",
+    "addressing": "rand",
+    "lba_num": 31,
+    "iops": 38830.09783705714,
+    "throughput_bps": 4234412781.277346
+  },
+  {
+    "mode": "wr",
+    "addressing": "rand",
+    "lba_num": 63,
+    "iops": 25955.960202880127,
+    "throughput_bps": 6728320337.564946
+  },
+  {
+    "mode": "wr",
+    "addressing": "rand",
+    "lba_num": 127,
+    "iops": 18492.806737297782,
+    "throughput_bps": 7938671904.573857
+  },
+  {
+    "mode": "wr",
+    "addressing": "rand",
+    "lba_num": 255,
+    "iops": 10248.739291445796,
+    "throughput_bps": 8971093783.419928
+  },
+  {
+    "mode": "wr",
+    "addressing": "seq",
+    "lba_num": 0,
+    "iops": 57604.62965370086,
+    "throughput_bps": 138427734.8906835
+  },
+  {
+    "mode": "wr",
+    "addressing": "seq",
+    "lba_num": 1,
+    "iops": 58147.125054424854,
+    "throughput_bps": 383349610.80308855
+  },
+  {
+    "mode": "wr",
+    "addressing": "seq",
+    "lba_num": 3,
+    "iops": 54031.61058953331,
+    "throughput_bps": 706115725.286736
+  },
+  {
+    "mode": "wr",
+    "addressing": "seq",
+    "lba_num": 7,
+    "iops": 48499.08882472494,
+    "throughput_bps": 1261572270.3247228
+  },
+  {
+    "mode": "wr",
+    "addressing": "seq",
+    "lba_num": 15,
+    "iops": 47554.72773230584,
+    "throughput_bps": 2493750009.2899427
+  },
+  {
+    "mode": "wr",
+    "addressing": "seq",
+    "lba_num": 31,
+    "iops": 41207.298713191034,
+    "throughput_bps": 4342675797.427728
+  },
+  {
+    "mode": "wr",
+    "addressing": "seq",
+    "lba_num": 63,
+    "iops": 25630.928623733907,
+    "throughput_bps": 4460351579.116104
+  },
+  {
+    "mode": "wr",
+    "addressing": "seq",
+    "lba_num": 127,
+    "iops": 18238.55567395418,
+    "throughput_bps": 6701953149.966721
+  },
+  {
+    "mode": "wr",
+    "addressing": "seq",
+    "lba_num": 255,
+    "iops": 8055.940285429247,
+    "throughput_bps": 8331250031.0363245
+  }
+]
