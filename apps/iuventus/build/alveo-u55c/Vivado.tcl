@@ -87,7 +87,9 @@ lappend HIERARCHY(MOD) "$CARD_BASE/src/card_top.vhd"
 lappend SYNTH_FLAGS(CONSTR) "$CARD_BASE/src/general.xdc"
 lappend SYNTH_FLAGS(CONSTR) "$CARD_BASE/src/pblock.xdc"
 # Comment this constraint out if you don't want to see the received data in the hardware
-lappend SYNTH_FLAGS(CONSTR) "$CARD_BASE/src/ilas.xdc"
+# Disabled for the functional timing-clean build (the ILA + dbg_hub cost ~0.15 ns and push the
+# marginal page-allocator path on pcie_clks negative); re-enable for hardware waveform debug.
+# lappend SYNTH_FLAGS(CONSTR) "$CARD_BASE/src/ilas.xdc"
 
 # Base PCIe pins (SYSRST_N, SYSCLK, lanes 0-3) always required; pcie_x8 adds lanes 4-7 for x8.
 # (The "unify PCIe constraints" card refactor split the old pcie_half.xdc into pcie_x4 + pcie_x8;
