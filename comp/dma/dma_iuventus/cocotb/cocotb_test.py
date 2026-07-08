@@ -17,6 +17,8 @@ from typing import List
 from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge, FallingEdge, ClockCycles, Event, ReadOnly, Timer
 
+from scapy.utils import hexdump
+
 from cocotb_bus.drivers import BitDriver
 # from cocotb_bus.monitors import BusMonitor
 from cocotb_bus.scoreboard import Scoreboard
@@ -31,7 +33,7 @@ from cocotbext.ofm.mfb.transaction import MfbTransactionWithMeta, MfbTransaction
 from cocotbext.ofm.ver.generators import random_integers, random_packets
 
 from misc_const import BUFF_SIZE_PAGES, SECT_SIZE, STORAGE_CAP_LBAS, PAGE_SIZE, BUFF_SIZE, \
-    BUFF_SIZE_LBAS, IuventusBuffers
+    BUFF_SIZE_LBAS, IuventusBuffers, QUEUE_DEPTH
 from iuventus_model import IuventusModel
 from nvme_ctrl_model import NVMEControllerModel
 from read_req_driver import ReadReqDriver
@@ -105,9 +107,25 @@ class Testbench:
         self.cq_baddr = cq_baddr
 
         self.m_scoreboard = Scoreboard(dut)
-        self.m_scoreboard.add_interface(self.m_cc_mfb_monitor, self.iuventus_model.m_cc_exp_out, strict_type=True)
-        self.m_scoreboard.add_interface(self.op_stat_mon, self.iuventus_model.m_op_stat_exp_out, strict_type=True)
-        self.m_scoreboard.add_interface(self.m_rd_mfb_monitor, self.iuventus_model.m_rd_mfb_exp_out, strict_type=True)
+        # Custom compare_fn: the SQE's PRP1/PRP2 fields on SQ-read CC responses are unpredictable
+        # (the RTL's dynamic first-fit page allocator decides the actual buffer page `k`, which
+        # the model no longer predicts) -- see IuventusModel.disp_cc_resps / self._cc_compare.
+        self.m_scoreboard.add_interface(self.m_cc_mfb_monitor, self.iuventus_model.m_cc_exp_out, compare_fn=self._cc_compare)
+        # OP_STAT reorder window: with multiple outstanding NVMe commands, completions can retire
+        # out of submission order (nvme_ctrl_model shuffles SQE processing), and an OOR command's
+        # status is appended synchronously at dispatch time (it never becomes a real SQE) while a
+        # real command's status is appended only when its completion is actually processed -- so an
+        # OOR status can legitimately race ahead of / behind an already-outstanding real command's
+        # status. reorder_depth lets the scoreboard match content regardless of position within the
+        # window instead of false-positiving on ORDER; a genuine {type,code} content mismatch still
+        # fails once outside the window. QUEUE_DEPTH bounds the number of commands that can be
+        # concurrently outstanding, so it bounds how far a status can legitimately be reordered.
+        op_stat_reorder_depth = int(os.getenv("OP_STAT_REORDER_DEPTH", str(QUEUE_DEPTH)))
+        self.m_scoreboard.add_interface(self.op_stat_mon, self.iuventus_model.m_op_stat_exp_out, strict_type=True, reorder_depth=op_stat_reorder_depth)
+        # RD_MFB expected data comes from the nvme_ctrl_model only: it derives the actual buffer
+        # page `k` from the real SQE it read (nvme_ctrl_model._proc_sq_entries) and builds the
+        # expected read data from the actual storage, whereas iuventus_model can no longer predict
+        # `k` (see the RD_MFB removal in IuventusModel.proc_cqes).
         self.m_scoreboard.add_interface(self.m_rd_mfb_monitor, self.nvme_ctrl_model.rd_mfb_exp_out, strict_type=True)
         # RQ reorder window: default 1 (strict, as the validated tests expect). The phase-wrap stress
         # test uses a small queue with heavy out-of-order completion, which legitimately reorders the
@@ -150,6 +168,50 @@ class Testbench:
             self.nvme_ctrl_model.log.setLevel(logging.WARNING)
             self.op_stat_mon.log.setLevel(logging.WARNING)
             self.log.setLevel(logging.WARNING)
+
+    def _cc_compare(self, transaction):
+        """Custom scoreboard comparator for the PCIE_CC_MFB (SQ-read/RDBUFF-read completion)
+        interface. Mirrors cocotb_bus.scoreboard.Scoreboard's default check_received_transaction
+        + compare exactly, except: if the popped expected transaction carries a `_prp_mask`
+        attribute (set by IuventusModel.disp_cc_resps for SQ-read CC responses -- the SQE's
+        PRP1/PRP2 fields are unpredictable since the RTL's dynamic first-fit page allocator, not
+        the model, decides the actual buffer page `k`), the listed byte ranges are zeroed in both
+        the received and the expected data before comparing.
+        """
+        expected_output = self.iuventus_model.m_cc_exp_out
+        scoreboard = self.m_scoreboard
+        monitor = self.m_cc_mfb_monitor
+
+        if monitor.name:
+            log_name = scoreboard.log.name + "." + monitor.name
+        else:
+            log_name = scoreboard.log.name + "." + type(monitor).__qualname__
+        log = logging.getLogger(log_name)
+
+        if len(expected_output):
+            exp = expected_output.pop(0)
+        else:
+            scoreboard.errors += 1
+            log.error("Received a transaction but wasn't expecting anything")
+            log.info("Got: %s" % (hexdump(str(transaction), dump=True)))
+            if scoreboard._imm:
+                assert False, "Received a transaction but wasn't expecting anything"
+            return
+
+        prp_mask = getattr(exp, "_prp_mask", None)
+        if prp_mask:
+            got_data = bytearray(transaction.data)
+            exp_data = bytearray(exp.data)
+            for start, end in prp_mask:
+                for i in range(start, end):
+                    got_data[i] = 0
+                    exp_data[i] = 0
+            got = MfbTransactionWithMeta(data=bytes(got_data), meta=transaction.meta)
+            exp = MfbTransactionWithMeta(data=bytes(exp_data), meta=exp.meta)
+        else:
+            got = transaction
+
+        scoreboard.compare(got, exp, log, strict_type=True)
 
     def bpsr_start(self):
         self.m_rd_mfb_bpsr.start(random_tuple_iterator(100,500,1,5))
@@ -301,8 +363,12 @@ class Testbench:
         # the DUT hardware counter.
         assert self.nvme_ctrl_model.c_cqhdbl_reg_upds <= self.iuventus_model.c_cqhdbl_reg_upds, \
             f"nvme received more CQHDBL TLPs than iuventus dispatched: NVME Model={self.nvme_ctrl_model.c_cqhdbl_reg_upds}, Iuventus Model={self.iuventus_model.c_cqhdbl_reg_upds}"
-        assert self.nvme_ctrl_model.c_sqtdbl_reg_upds == self.iuventus_model.c_sqtdbl_reg_upds, \
-            f"Mismatch in SQTDBL register updates: NVME Model={self.nvme_ctrl_model.c_sqtdbl_reg_upds}, Iuventus Model={self.iuventus_model.c_sqtdbl_reg_upds}"
+        # iuventus.c_sqtdbl_reg_upds counts disp_dbl_update calls (one per dispatched SQE), while
+        # nvme.c_sqtdbl_reg_upds counts TLPs actually received. Under multiple outstanding commands
+        # the RTL dbl_updater coalesces rapid tail updates exactly like it does for CQHDBL above, so
+        # the SSD can legitimately receive fewer SQTDBL TLPs than commands were dispatched.
+        assert self.nvme_ctrl_model.c_sqtdbl_reg_upds <= self.iuventus_model.c_sqtdbl_reg_upds, \
+            f"nvme received more SQTDBL TLPs than iuventus dispatched: NVME Model={self.nvme_ctrl_model.c_sqtdbl_reg_upds}, Iuventus Model={self.iuventus_model.c_sqtdbl_reg_upds}"
         assert self.nvme_ctrl_model.c_sqe_rd_cmds == self.iuventus_model.c_sqe_rd_cmds, \
             f"Mismatch in SQE read commands: NVME Model={self.nvme_ctrl_model.c_sqe_rd_cmds}, Iuventus Model={self.iuventus_model.c_sqe_rd_cmds}"
         assert self.nvme_ctrl_model.c_sqe_rd_cmd_size == self.iuventus_model.c_sqe_rd_cmd_size, \
@@ -381,8 +447,12 @@ class Testbench:
         assert int.from_bytes(cntr, 'little') == self.nvme_ctrl_model.c_cqhdbl_reg_upds, \
             f"Mismatch in CQHDBL_REG_UPD_CNTR: DUT={int.from_bytes(cntr, 'little')}, NVME Model={self.nvme_ctrl_model.c_cqhdbl_reg_upds}"
         cntr = await self.m_mi_driver.read(IuventusMiRegMap.SQTDBL_REG_UPDS_CNTR_L, 8)
-        assert int.from_bytes(cntr, 'little') == self.iuventus_model.c_sqtdbl_reg_upds, \
-            f"Mismatch in SQTDBL_REG_UPD_CNTR: DUT={int.from_bytes(cntr, 'little')}, Iuventus Model={self.iuventus_model.c_sqtdbl_reg_upds}"
+        # Compare against the nvme model's received count (= actual TLPs dispatched by the RTL
+        # dbl_updater). iuventus.c_sqtdbl_reg_upds overcounts when dbl_updater coalesces rapid
+        # updates; the DUT hardware counter matches the actually-dispatched-TLP count tracked by
+        # the nvme model (mirrors the CQHDBL_REG_UPD_CNTR check above).
+        assert int.from_bytes(cntr, 'little') == self.nvme_ctrl_model.c_sqtdbl_reg_upds, \
+            f"Mismatch in SQTDBL_REG_UPD_CNTR: DUT={int.from_bytes(cntr, 'little')}, NVME Model={self.nvme_ctrl_model.c_sqtdbl_reg_upds}"
         cntr = await self.m_mi_driver.read(IuventusMiRegMap.NVME_RD_BYTES_CNTR_L, 8)
         assert int.from_bytes(cntr, 'little') == self.iuventus_model.c_sqe_rd_cmd_size, \
             f"Mismatch in NVME_RD_BYTES_CNTR: DUT={int.from_bytes(cntr, 'little')}, Iuventus Model={self.iuventus_model.c_sqe_rd_cmd_size}"
@@ -555,21 +625,20 @@ class Testbench:
         while drain_cycles < drain_timeout:
             await RisingEdge(self.dut.CLK)
             drain_cycles += 1
-            # Only require SQTDBL counts to match here.  CQHDBL is intentionally
-            # excluded: the RTL dbl_updater coalesces rapid CQHDBL updates (two
-            # CQHDBLs arriving within UPDATE_DELAY=256 cycles produce one TLP),
-            # so iuventus.c_cqhdbl_reg_upds (one call per CQE) can legitimately
-            # exceed nvme.c_cqhdbl_reg_upds (actual received TLPs).  The
-            # src_rdy_idle_threshold condition below guarantees the last CQHDBL
-            # TLP has been delivered before the drain exits.
-            dbls_synced = (
-                self.nvme_ctrl_model.c_sqtdbl_reg_upds == self.iuventus_model.c_sqtdbl_reg_upds
-            )
+            # Neither doorbell's counts are used as a convergence condition here: the RTL
+            # dbl_updater coalesces rapid updates on BOTH CQHDBL (two CQHDBLs arriving within
+            # UPDATE_DELAY=256 cycles produce one TLP) and, under multiple outstanding commands,
+            # SQTDBL as well -- so iuventus.c_{cq,sq}tdbl_reg_upds (one call per CQE/dispatched SQE)
+            # can permanently exceed nvme.c_{cq,sq}tdbl_reg_upds (actual received TLPs); they need
+            # never become equal. The RQ channel going idle (SRC_RDY low) for
+            # src_rdy_idle_threshold consecutive cycles -- with DST_RDY held high so the FIFO is
+            # free to empty -- is the only reliable "everything that will ever be sent has been
+            # sent" signal, so it is the sole termination condition.
             if not bool(self.dut.PCIE_RQ_MFB_SRC_RDY.value):
                 src_rdy_idle_count += 1
             else:
                 src_rdy_idle_count = 0
-            if dbls_synced and src_rdy_idle_count >= src_rdy_idle_threshold:
+            if src_rdy_idle_count >= src_rdy_idle_threshold:
                 break
         else:
             cocotb.log.error(
@@ -692,19 +761,28 @@ def req_gen(tb, req_count, size_reduce_factor = 1, rd_en = True, wr_en = True):
 
 @cocotb.test()
 async def run_random_read_test(dut, req_count: int = 20, size_reduce_factor: int = 1):
-    tb = await prepare(dut)
+    # strict_rq=False: multiple NVMe reads are now legitimately outstanding at once (dynamic page
+    # allocator), so their doorbell/RQ writes complete/coalesce out of the in-order scoreboard's
+    # predicted sequence; correctness is covered by the CC/RD/OP_STAT scoreboards. Same rationale
+    # as run_random_rw_test / that_first_bloody_error_test.
+    tb = await prepare(dut, strict_rq=False)
     req_gen(tb, req_count, size_reduce_factor=size_reduce_factor, wr_en=False)
     await tb.post_test_checks(req_count)
 
 @cocotb.test()
 async def run_random_write_test(dut, req_count: int = 20, size_reduce_factor: int = 1):
-    tb = await prepare(dut)
+    # strict_rq=False: see run_random_read_test.
+    tb = await prepare(dut, strict_rq=False)
     req_gen(tb, req_count, size_reduce_factor=size_reduce_factor, rd_en=False)
     await tb.post_test_checks(req_count)
 
 @cocotb.test()
 async def run_random_rw_test(dut, req_count: int = 20, size_reduce_factor: int = 1):
-    tb = await prepare(dut)
+    # strict_rq=False: mixed read+write traffic interleaves SQE-MemWr and doorbell TLPs on the shared
+    # PCIE_RQ bus under multiple outstanding commands, which the in-order RQ scoreboard cannot
+    # predict (spurious ordering mismatches); correctness is covered by the CC/RD/OP_STAT
+    # scoreboards.
+    tb = await prepare(dut, strict_rq=False)
     req_gen(tb, req_count, size_reduce_factor=size_reduce_factor)
     await tb.post_test_checks(req_count)
 
@@ -741,16 +819,18 @@ async def run_phase_wrap_stress(dut, req_count: int = 300, qsize: int = 16, size
     `max_stall_cycles`. The NVMe model completes out-of-order with randomized CQ-write timing, so
     re-running across seeds explores different read-vs-write phase relationships at the wrap.
 
-    Default qsize=16 is the queue size the reference model + RQ scoreboard are validated for, so the
-    test is a clean regression. For an AGGRESSIVE wrap rate, invoke with a small qsize, e.g.
-    `COCOTB_TESTCASE=run_phase_wrap_stress RQ_REORDER_DEPTH=128 ... make` and override qsize=4 — but
-    note the RQ scoreboard mis-predicts SQ/CQ-doorbell *ordering* at qsize<16 (it raises spurious
-    "unexpected transaction" mismatches that are NOT the wedge); rely on the stall detector for the
-    wedge in that mode. Empirically (2026-06-30) the wedge did NOT reproduce in functional sim across
-    ~250 wraps / 4 seeds at qsize=4 (no stall), consistent with the hw issue being a single-clock
-    cycle-alignment / real-device CQ-write-timing effect rather than a phase-wrap logic bug.
+    Default qsize=16 is the queue size the reference model was originally validated for. It now runs
+    with strict_rq=False: with multiple NVMe commands legitimately outstanding at once (dynamic page
+    allocator), the doorbell/RQ writes coalesce/complete out of the in-order scoreboard's predicted
+    sequence even at qsize=16 (see run_random_rw_test); the wedge this test targets is still caught by
+    the stall detector, and data/status correctness is still covered by the CC/RD/OP_STAT scoreboards.
+    For an AGGRESSIVE wrap rate, invoke with a small qsize, e.g. override qsize=4 -- the RQ scoreboard
+    is disabled regardless of qsize here, so only the stall detector matters for the wedge in that
+    mode. Empirically (2026-06-30) the wedge did NOT reproduce in functional sim across ~250 wraps / 4
+    seeds at qsize=4 (no stall), consistent with the hw issue being a single-clock cycle-alignment /
+    real-device CQ-write-timing effect rather than a phase-wrap logic bug.
     """
-    tb = await prepare(dut, qsize=qsize)
+    tb = await prepare(dut, qsize=qsize, strict_rq=False)
     cocotb.log.info(f"PHASE-WRAP STRESS: qsize={qsize} req_count={req_count} "
                     f"(~{req_count // qsize} phase wraps) seed={cocotb.RANDOM_SEED}")
     req_gen(tb, req_count, size_reduce_factor=size_reduce_factor)
