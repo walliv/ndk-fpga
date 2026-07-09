@@ -5,6 +5,10 @@
 - each background task running in Claude should be actively monitored so it doesn't stuck
 - results can be deemed successful if the experiment they came from is
   repeatable at least 10 times and each iteration yielded comparable results 
+- use multiple agents with various models:
+  - Opus as a main orchestrator and conductor
+  - Sonnet for code writing, testing and debugging
+  - Haiku for rapid testing, research and explore
 
 ## Commit Style
 

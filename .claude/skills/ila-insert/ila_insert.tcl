@@ -20,7 +20,7 @@ read_checkpoint -cell {axi_qspi_flash_i/axi_quad_ctrl_i} \
 # for STATUS_LEDS, HBM_CATTRIP, SYSCLK3, PCIE_SYSRST_N, ...). Without them place_design assigns a
 # wrong pinout and write_bitstream fails DRC NSTD-1/UCIO-1. Re-read the top-level card XDCs (the
 # component XDCs are already baked into the synth netlist).
-set REPO /home/vladislav/projects/work_files/ndk-fpga
+set REPO [expr {[info exists ::env(NDK_FPGA_ROOT)] ? $::env(NDK_FPGA_ROOT) : [pwd]}]
 foreach xdc [list \
     $REPO/apps/iuventus/build/alveo-u55c/src/general.xdc \
     $REPO/apps/iuventus/build/alveo-u55c/src/pblock.xdc \
