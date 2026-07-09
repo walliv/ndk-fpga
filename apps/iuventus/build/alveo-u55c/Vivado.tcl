@@ -58,6 +58,12 @@ set SYNTH_FLAGS(PROJ_ONLY) "0"
 # "1" ... synthesize the project
 set SYNTH_FLAGS(SYNTH_ONLY) "0"
 
+# Timing closure: this QD16 design is marginal on pcie_clks (mfb_merger / perf-counter data-logger
+# paths); the default flow lands slightly negative on some P&R draws. Bias placement toward timing
+# and run a post-route physical optimization to close the small (~0.2 ns) violation.
+set SYNTH_FLAGS(PLACE_DIRECTIVE)            "ExtraTimingOpt"
+set SYNTH_FLAGS(PROUTE_PHYS_OPT_DIRECTIVE) "AggressiveExplore"
+
 # Associative array which is propagated throughout Modules.tcl files
 set APP_ARCHGRP(CORE_BASE)       $CORE_BASE
 set APP_ARCHGRP(CLOCK_GEN_ARCH)  $CLOCK_GEN_ARCH
@@ -87,12 +93,18 @@ lappend HIERARCHY(MOD) "$CARD_BASE/src/card_top.vhd"
 lappend SYNTH_FLAGS(CONSTR) "$CARD_BASE/src/general.xdc"
 lappend SYNTH_FLAGS(CONSTR) "$CARD_BASE/src/pblock.xdc"
 # Comment this constraint out if you don't want to see the received data in the hardware
-lappend SYNTH_FLAGS(CONSTR) "$CARD_BASE/src/ilas.xdc"
+# Disabled for the functional timing-clean build (the ILA + dbg_hub cost ~0.15 ns and push the
+# marginal page-allocator path on pcie_clks negative); re-enable for hardware waveform debug.
+# lappend SYNTH_FLAGS(CONSTR) "$CARD_BASE/src/ilas.xdc"
 
-lappend SYNTH_FLAGS(CONSTR) "$COMBO_BASE/cards/amd/alveo-u55c/constr/pcie_half.xdc"
+# Base PCIe pins (SYSRST_N, SYSCLK, lanes 0-3) always required; pcie_x8 adds lanes 4-7 for x8.
+# (The "unify PCIe constraints" card refactor split the old pcie_half.xdc into pcie_x4 + pcie_x8;
+# this app build script must include both, mirroring cards/.../src/Vivado.inc.tcl.)
+lappend SYNTH_FLAGS(CONSTR) "$COMBO_BASE/cards/amd/alveo-u55c/constr/pcie_x4.xdc"
+lappend SYNTH_FLAGS(CONSTR) "$COMBO_BASE/cards/amd/alveo-u55c/constr/pcie_x8.xdc"
 
 if {$PCIE_ENDPOINT_MODE == 0 || $PCIE_ENDPOINT_MODE == 1} {
-    lappend SYNTH_FLAGS(CONSTR) "$COMBO_BASE/cards/amd/alveo-u55c/constr/pcie_full.xdc"
+    lappend SYNTH_FLAGS(CONSTR) "$COMBO_BASE/cards/amd/alveo-u55c/constr/pcie_x16.xdc"
 }
 
 # Call main function which handle targets

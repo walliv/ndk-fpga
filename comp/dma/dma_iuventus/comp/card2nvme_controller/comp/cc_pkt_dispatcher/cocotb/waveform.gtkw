@@ -2,10 +2,10 @@
 [*] GTKWave Analyzer v3.3.121 (w)1999-2024 BSI
 [*] Sun May 11 09:31:00 2025
 [*]
-[dumpfile] "/home/vladislav/projects/work_files/ndk-fpga/comp/dma/nvme_controller/comp/completion_engine/comp/cc_hdr_insertor/cocotb/nvme_cc_pkt_dispatcher.fst"
+[dumpfile] "nvme_cc_pkt_dispatcher.fst"
 [dumpfile_mtime] "Sun May 11 09:30:27 2025"
 [dumpfile_size] 80851662
-[savefile] "/home/vladislav/projects/work_files/ndk-fpga/comp/dma/nvme_controller/comp/completion_engine/comp/cc_hdr_insertor/cocotb/waveform.gtkw"
+[savefile] "waveform.gtkw"
 [timestart] 0
 [size] 3426 1332
 [pos] -1 -1

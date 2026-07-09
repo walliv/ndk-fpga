@@ -19,6 +19,17 @@ BUFF_SIZE = 2**17 # 128 KiB
 BUFF_SIZE_LBAS = BUFF_SIZE // SECT_SIZE
 BUFF_SIZE_PAGES = BUFF_SIZE // PAGE_SIZE
 
+# Number of NVMe Command Identifiers / outstanding commands, matching the RTL QUEUE_DEPTH
+# generic (op_ctrl / tag manager). Also the number of buffer slots the model tracks.
+QUEUE_DEPTH = 16
+# Bytes of Read/Write buffer per allocatable command region is decided dynamically by the RTL
+# page allocator; SLOT/PAGE granularity is PAGE_SIZE.
+
+# Number of pages a WRITE command reserves in RDBUFF, matching op_ctrl's MAX_WR_PAGES generic.
+# With the default (whole buffer), writes always land at page 0 and stay one-at-a-time; READs
+# always allocate their exact page count and can be multiple-outstanding.
+MAX_WR_PAGES = BUFF_SIZE_PAGES
+
 class IuventusBuffers:
     def __init__(self, qsize):
         self.qsize = qsize
@@ -32,6 +43,40 @@ class IuventusBuffers:
         self.cq = bytearray(self.qsize * CQE_SIZE)
         self.rd_buff = bytearray(BUFF_SIZE)
         self.wr_buff = bytearray(BUFF_SIZE)
+
+class PageAllocator:
+    """
+    First-fit contiguous page allocator, mirroring IUVENTUS_PAGE_ALLOCATOR (RTL) exactly: pages
+    are allocated as the lowest-address contiguous run of free pages, and freed back individually.
+    Used to predict, on the model side, the same buffer page (`k`) the RTL will hand out for each
+    command, so that PRP addresses / data placement stay in sync between RTL and model.
+    """
+
+    def __init__(self, pages):
+        self.pages = pages
+        self.occupancy = [False] * pages
+
+    def alloc(self, npages):
+        """Return the lowest page index `k` of a free contiguous run of `npages` pages, marking
+        it occupied, or None if no such run exists."""
+        if npages <= 0 or npages > self.pages:
+            return None
+
+        for k in range(self.pages - npages + 1):
+            if not any(self.occupancy[k:k + npages]):
+                for i in range(k, k + npages):
+                    self.occupancy[i] = True
+                return k
+
+        return None
+
+    def free(self, k, npages):
+        for i in range(k, k + npages):
+            self.occupancy[i] = False
+
+    def reset(self):
+        self.occupancy = [False] * self.pages
+
 
 class IuventusBarSelection(IntEnum):
     SQ_BAR = 0

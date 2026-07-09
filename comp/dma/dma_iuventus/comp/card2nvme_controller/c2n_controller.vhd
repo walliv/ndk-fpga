@@ -32,7 +32,9 @@ entity C2N_CONTROLLER is
         -- The allowed is only "ULTRASCALE"
         DEVICE : string := "ULTRASCALE";
         -- The size of a pointer to a buffer of one channel in the transaction buffer
-        BUFF_PTR_WIDTH : positive := 17
+        BUFF_PTR_WIDTH : positive := 17;
+        -- Amount of tags/Command Identifiers available for outstanding NVMe commands
+        QUEUE_DEPTH    : positive := 2048
     );
     port (
         CLK : in std_logic;
@@ -102,6 +104,11 @@ entity C2N_CONTROLLER is
         TAG_FIFO_STATUS    : out std_logic_vector(11 downto 0);
         TAG_INIT_DONE      : out std_logic;
         SQTDBL_VAL         : out std_logic_vector(15 downto 0);
+
+        -- Command Identifier assigned to the command being dispatched, valid when DISP_CMD_ID_VLD
+        -- is asserted
+        DISP_CMD_ID        : out std_logic_vector(15 downto 0);
+        DISP_CMD_ID_VLD    : out std_logic;
 
         -- =========================================================================================
         -- PCIE Interface to send responds for PCIe read commands to Submission Queue and Write
@@ -306,7 +313,8 @@ begin
             MFB_BLOCK_SIZE  => USR_MFB_BLOCK_SIZE,
             MFB_ITEM_WIDTH  => USR_MFB_ITEM_WIDTH,
             DEVICE          => DEVICE,
-            BUFF_PTR_WIDTH  => BUFF_PTR_WIDTH)
+            BUFF_PTR_WIDTH  => BUFF_PTR_WIDTH,
+            QUEUE_DEPTH     => QUEUE_DEPTH)
         port map (
             CLK                => CLK,
             RST                => RST,
@@ -329,6 +337,9 @@ begin
             SQTDBL_VAL         => SQTDBL_VAL,
             TAG_FIFO_STATUS    => TAG_FIFO_STATUS,
             TAG_INIT_DONE      => TAG_INIT_DONE,
+
+            DISP_CMD_ID        => DISP_CMD_ID,
+            DISP_CMD_ID_VLD    => DISP_CMD_ID_VLD,
 
             SQE_DISP_CNTR_TYPE => SQE_DISP_CNTR_TYPE,
             SQE_DISP_CNTR_SIZE => SQE_DISP_CNTR_SIZE,

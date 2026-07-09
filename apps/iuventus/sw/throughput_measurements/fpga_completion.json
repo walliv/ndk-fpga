@@ -1,0 +1,290 @@
+[
+  {
+    "mode": "rd",
+    "addressing": "seq",
+    "lba_num": 0,
+    "completions": 59394,
+    "unsucc": 0,
+    "throughput_gbps": 0.010136576
+  },
+  {
+    "mode": "rd",
+    "addressing": "seq",
+    "lba_num": 1,
+    "completions": 123001,
+    "unsucc": 0,
+    "throughput_gbps": 0.041984341333333335
+  },
+  {
+    "mode": "rd",
+    "addressing": "seq",
+    "lba_num": 3,
+    "completions": 178138,
+    "unsucc": 0,
+    "throughput_gbps": 0.12160887466666667
+  },
+  {
+    "mode": "rd",
+    "addressing": "seq",
+    "lba_num": 7,
+    "completions": 176735,
+    "unsucc": 0,
+    "throughput_gbps": 0.24130218666666667
+  },
+  {
+    "mode": "rd",
+    "addressing": "seq",
+    "lba_num": 15,
+    "completions": 135513,
+    "unsucc": 0,
+    "throughput_gbps": 0.370040832
+  },
+  {
+    "mode": "rd",
+    "addressing": "seq",
+    "lba_num": 31,
+    "completions": 73042,
+    "unsucc": 0,
+    "throughput_gbps": 0.39890670933333333
+  },
+  {
+    "mode": "rd",
+    "addressing": "seq",
+    "lba_num": 63,
+    "completions": 48016,
+    "unsucc": 0,
+    "throughput_gbps": 0.5244627626666667
+  },
+  {
+    "mode": "rd",
+    "addressing": "seq",
+    "lba_num": 127,
+    "completions": 29348,
+    "unsucc": 0,
+    "throughput_gbps": 0.6411168426666667
+  },
+  {
+    "mode": "rd",
+    "addressing": "seq",
+    "lba_num": 255,
+    "completions": 13080,
+    "unsucc": 0,
+    "throughput_gbps": 0.57147392
+  },
+  {
+    "mode": "rd",
+    "addressing": "rand",
+    "lba_num": 0,
+    "completions": 618540,
+    "unsucc": 0,
+    "throughput_gbps": 0.10556416
+  },
+  {
+    "mode": "rd",
+    "addressing": "rand",
+    "lba_num": 1,
+    "completions": 584162,
+    "unsucc": 0,
+    "throughput_gbps": 0.19939396266666667
+  },
+  {
+    "mode": "rd",
+    "addressing": "rand",
+    "lba_num": 3,
+    "completions": 526169,
+    "unsucc": 0,
+    "throughput_gbps": 0.35919803733333333
+  },
+  {
+    "mode": "rd",
+    "addressing": "rand",
+    "lba_num": 7,
+    "completions": 432584,
+    "unsucc": 0,
+    "throughput_gbps": 0.5906213546666667
+  },
+  {
+    "mode": "rd",
+    "addressing": "rand",
+    "lba_num": 15,
+    "completions": 275777,
+    "unsucc": 0,
+    "throughput_gbps": 0.7530550613333333
+  },
+  {
+    "mode": "rd",
+    "addressing": "rand",
+    "lba_num": 31,
+    "completions": 133472,
+    "unsucc": 0,
+    "throughput_gbps": 0.7289350826666666
+  },
+  {
+    "mode": "rd",
+    "addressing": "rand",
+    "lba_num": 63,
+    "completions": 72719,
+    "unsucc": 0,
+    "throughput_gbps": 0.7942853973333334
+  },
+  {
+    "mode": "rd",
+    "addressing": "rand",
+    "lba_num": 127,
+    "completions": 33191,
+    "unsucc": 0,
+    "throughput_gbps": 0.7250684586666667
+  },
+  {
+    "mode": "rd",
+    "addressing": "rand",
+    "lba_num": 255,
+    "completions": 12882,
+    "unsucc": 0,
+    "throughput_gbps": 0.562823168
+  },
+  {
+    "mode": "wr",
+    "addressing": "seq",
+    "lba_num": 0,
+    "completions": 156996,
+    "unsucc": 0,
+    "throughput_gbps": 0.026793984
+  },
+  {
+    "mode": "wr",
+    "addressing": "seq",
+    "lba_num": 1,
+    "completions": 152140,
+    "unsucc": 0,
+    "throughput_gbps": 0.051930453333333335
+  },
+  {
+    "mode": "wr",
+    "addressing": "seq",
+    "lba_num": 3,
+    "completions": 139627,
+    "unsucc": 0,
+    "throughput_gbps": 0.09531869866666667
+  },
+  {
+    "mode": "wr",
+    "addressing": "seq",
+    "lba_num": 7,
+    "completions": 109218,
+    "unsucc": 0,
+    "throughput_gbps": 0.149118976
+  },
+  {
+    "mode": "wr",
+    "addressing": "seq",
+    "lba_num": 15,
+    "completions": 93889,
+    "unsucc": 0,
+    "throughput_gbps": 0.25637956266666667
+  },
+  {
+    "mode": "wr",
+    "addressing": "seq",
+    "lba_num": 31,
+    "completions": 75377,
+    "unsucc": 0,
+    "throughput_gbps": 0.41165892266666665
+  },
+  {
+    "mode": "wr",
+    "addressing": "seq",
+    "lba_num": 63,
+    "completions": 58333,
+    "unsucc": 0,
+    "throughput_gbps": 0.6371519146666667
+  },
+  {
+    "mode": "wr",
+    "addressing": "seq",
+    "lba_num": 127,
+    "completions": 37543,
+    "unsucc": 0,
+    "throughput_gbps": 0.8201393493333333
+  },
+  {
+    "mode": "wr",
+    "addressing": "seq",
+    "lba_num": 255,
+    "completions": 24933,
+    "unsucc": 0,
+    "throughput_gbps": 1.089339392
+  },
+  {
+    "mode": "wr",
+    "addressing": "rand",
+    "lba_num": 0,
+    "completions": 161822,
+    "unsucc": 0,
+    "throughput_gbps": 0.02761762133333333
+  },
+  {
+    "mode": "wr",
+    "addressing": "rand",
+    "lba_num": 1,
+    "completions": 153659,
+    "unsucc": 0,
+    "throughput_gbps": 0.05244893866666667
+  },
+  {
+    "mode": "wr",
+    "addressing": "rand",
+    "lba_num": 3,
+    "completions": 138526,
+    "unsucc": 0,
+    "throughput_gbps": 0.09456708266666666
+  },
+  {
+    "mode": "wr",
+    "addressing": "rand",
+    "lba_num": 7,
+    "completions": 114039,
+    "unsucc": 0,
+    "throughput_gbps": 0.155701248
+  },
+  {
+    "mode": "wr",
+    "addressing": "rand",
+    "lba_num": 15,
+    "completions": 90003,
+    "unsucc": 0,
+    "throughput_gbps": 0.245768192
+  },
+  {
+    "mode": "wr",
+    "addressing": "rand",
+    "lba_num": 31,
+    "completions": 67969,
+    "unsucc": 0,
+    "throughput_gbps": 0.3712013653333333
+  },
+  {
+    "mode": "wr",
+    "addressing": "rand",
+    "lba_num": 63,
+    "completions": 47999,
+    "unsucc": 0,
+    "throughput_gbps": 0.5242770773333333
+  },
+  {
+    "mode": "wr",
+    "addressing": "rand",
+    "lba_num": 127,
+    "completions": 29858,
+    "unsucc": 0,
+    "throughput_gbps": 0.6522579626666667
+  },
+  {
+    "mode": "wr",
+    "addressing": "rand",
+    "lba_num": 255,
+    "completions": 20180,
+    "unsucc": 0,
+    "throughput_gbps": 0.8816776533333334
+  }
+]

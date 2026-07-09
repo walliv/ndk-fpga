@@ -150,11 +150,19 @@ class NVMEControllerModel:
 
     def _parse_sqe(self, sqe_data):
         """Parse a bytearray (or bytes) containing one or more SQ entries and
-        populate `self._sq_int` with parsed `SQEntry` objects.
+        APPEND the parsed `SQEntry` objects to `self._sq_int`.
+
+        A single SQ-ring fetch (one `_run_controller` iteration) can be split into several
+        separate MRDs -- e.g. one per wrap-split range in `_run_controller`, each completed and
+        handed to this method through its own `_process_rd_compls` call -- so this must accumulate
+        across calls rather than reset `self._sq_int`, or entries parsed from an earlier MRD in the
+        same fetch would be silently dropped when a later MRD's completion arrives. Callers that
+        start a new fetch batch rely on `self._sq_int` already having been cleared by the end of the
+        previous batch's `_proc_sq_entries` (see its trailing `self._sq_int.clear()`).
 
         The input may contain multiple contiguous SQ entries. Any trailing
         incomplete bytes are ignored but a warning will be logged.
-        Returns the number of parsed entries.
+        Returns the number of entries parsed from THIS call (not the running total).
         """
         if not isinstance(sqe_data, (bytes, bytearray)):
             raise TypeError("sqe_data must be bytes or bytearray")
@@ -176,9 +184,6 @@ class NVMEControllerModel:
         if self.log.isEnabledFor(logging.INFO):
             self.log.info(f"Parsing {num_entries} SQ entries from input data")
 
-        # reset parsed list
-        self._sq_int = []
-
         for i in range(num_entries):
             start = i * entry_len
             chunk = sqe_data[start:start + entry_len]
@@ -186,7 +191,7 @@ class NVMEControllerModel:
             sqe_obj = SQEntry.deserialize(sqe_int)
             self._sq_int.append(sqe_obj)
 
-        return len(self._sq_int)
+        return num_entries
 
     def _process_rd_compls(self, trans):
         hdr = int.from_bytes(trans.data[:len(CCHeader()) // 8], 'little')
@@ -257,7 +262,7 @@ class NVMEControllerModel:
         meta = RQMfbMeta.deserialize(trans.meta)
         hdr_deser = RQHeader.deserialize(hdr)
 
-        assert meta.firstBe == 0x3, "Invalid FBE for DBL pointer update command"
+        assert meta.firstBe == 0xF, "Invalid FBE for DBL pointer update command"
         assert meta.lastBe == 0, "Invalid LBE for DBL pointer update command"
         assert hdr_deser.req_type == 0b0001, "Invalid request type for DBL pointer update command"
         assert hdr_deser.addr == (self._sqtdbl_baddr >> 2) or hdr_deser.addr == (self._cqhdbl_baddr >> 2), "Invalid address for DBL pointer update command"
@@ -562,7 +567,13 @@ class NVMEControllerModel:
 
                     assert sqe.prp1 in self.wrbuff_prpl_data, f"SQE cmd_id={sqe.cmd_id}: PRP1 0x{sqe.prp1:x} not in write buffer PRP list"
                     assert sqe.prp2 != 0, f"SQE cmd_id={sqe.cmd_id}: PRP2 cannot be zero for multi-page read"
-                    assert sqe.prp2 == self.wrbuff_prpl_baddr, f"SQE cmd_id={sqe.cmd_id}: PRP2 0x{sqe.prp2:x} does not point to PRP List ({self.wrbuff_prpl_baddr:x})"
+
+                    # The page allocator can start a command at any page k of WRBUFF (not just
+                    # page 0), so PRP2 points k entries into the (fixed, whole-buffer) PRP list --
+                    # i.e. at the entry describing WRBUFF page k, PRP1's own page.
+                    k = (sqe.prp1 - self._wrbuff_baddr) // PAGE_SIZE
+                    expected_prp2 = self.wrbuff_prpl_baddr + k * 8
+                    assert sqe.prp2 == expected_prp2, f"SQE cmd_id={sqe.cmd_id}: PRP2 0x{sqe.prp2:x} does not point to PRP List entry for page {k} (0x{expected_prp2:x})"
 
                     # First page from PRP1
                     chunk = self._storage[byte_offset : byte_offset + PAGE_SIZE]
@@ -572,9 +583,9 @@ class NVMEControllerModel:
                         target_bar=IuventusBarSelection.WR_BUFF_BAR,
                         buffer_size=BUFF_SIZE)
 
-                    # Subsequent pages from PRP List
+                    # Subsequent pages from PRP List, continuing from page k+1 onward
                     rem_bytes = byte_count - PAGE_SIZE
-                    prpl_idx = 1
+                    prpl_idx = k + 1
                     while rem_bytes > 0:
                         prp_entry = self.wrbuff_prpl_data[prpl_idx]
                         byte_offset += PAGE_SIZE
@@ -713,14 +724,20 @@ class NVMEControllerModel:
 
             self._sqhdbl = (self._sqhdbl + 1) % self._qsize
             self.c_sqes_proc += 1
+            # _processed_cmd_ids tracks only CURRENTLY-outstanding cmd_ids on this model (added here,
+            # removed right after _complete_sqe below dispatches its CQE). With QUEUE_DEPTH=16 tags,
+            # cmd_ids legitimately repeat within a test once their prior command has fully completed;
+            # a hit here means the same cmd_id was dispatched again while still outstanding, which is
+            # a genuine host/RTL bug, not legitimate CID reuse.
             if sqe.cmd_id in self._processed_cmd_ids:
                 self.log.error(
-                    f"DUPLICATE SQE PROCESSING: cmd_id={sqe.cmd_id} "
+                    f"DUPLICATE SQE PROCESSING: cmd_id={sqe.cmd_id} is still outstanding "
                     f"sqes_proc={self.c_sqes_proc} sqhdbl={self._sqhdbl} sqtdbl={self._sqtdbl} "
                     f"cqtdbl={self._cqtdbl} cqhdbl={self._cqhdbl}"
                 )
             self._processed_cmd_ids.add(sqe.cmd_id)
             await self._complete_sqe(sqe.cmd_id)
+            self._processed_cmd_ids.discard(sqe.cmd_id)
 
         self._sq_int.clear()  # Clear processed entries
 
@@ -730,13 +747,28 @@ class NVMEControllerModel:
             await Timer(1, unit='ns')
 
             if self._sqhdbl != self._sqtdbl:
+                # Fetch the new SQ entries [sqhdbl .. sqtdbl). If that range wraps the SQ ring
+                # (sqtdbl < sqhdbl), a real NVMe controller issues TWO reads -- one up to the end
+                # of the ring and one from the start -- rather than a single linear read that would
+                # run past the ring's BAR region. The DUT's SQ is a linear buffer, so a past-the-end
+                # read returns zeros; splitting at the ring boundary keeps every read in-bounds.
+                # (Only reachable now that multiple-outstanding dispatch lets sqtdbl get several
+                # entries ahead of sqhdbl and wrap; single-outstanding fetched one entry at a time.)
+                if self._sqtdbl > self._sqhdbl:
+                    read_ranges = [(self._sqhdbl, self._sqtdbl - self._sqhdbl)]
+                else:
+                    read_ranges = [(self._sqhdbl, self._qsize - self._sqhdbl)]
+                    if self._sqtdbl > 0:
+                        read_ranges.append((0, self._sqtdbl))
+
                 # Send read requests for new SQ entries
-                await self._dispatch_rd_req(
-                    base_addr=self._sq_baddr + self._sqhdbl * SQE_SIZE,
-                    total_bytes=((self._sqtdbl - self._sqhdbl + self._qsize) % self._qsize) * SQE_SIZE,
-                    target_bar=IuventusBarSelection.SQ_BAR,
-                    buffer_size=self._qsize * SQE_SIZE
-                )
+                for start_slot, num_slots in read_ranges:
+                    await self._dispatch_rd_req(
+                        base_addr=self._sq_baddr + start_slot * SQE_SIZE,
+                        total_bytes=num_slots * SQE_SIZE,
+                        target_bar=IuventusBarSelection.SQ_BAR,
+                        buffer_size=self._qsize * SQE_SIZE
+                    )
 
                 # Wait until all outstanding read requests are completed. Otherwise, there would
                 # be multiple read requests dispatched for a single SQ entry.

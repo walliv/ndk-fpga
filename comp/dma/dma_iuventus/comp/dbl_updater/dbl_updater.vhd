@@ -14,6 +14,10 @@ use work.type_pack.all;
 use work.math_pack.all;
 use work.pcie_meta_pack.all;
 
+-- The doorbell is written to the NVMe controller only when its value actually changes
+-- (an on-change update). Re-writing an unchanged doorbell value is prohibited by the NVMe
+-- specification ("Invalid Doorbell Write Value", Asynchronous Event Information 01h) and is
+-- rejected by strict controllers, so no repeat/keep-alive re-write is performed.
 entity DBL_UPDATER is
 
     generic (
@@ -26,10 +30,7 @@ entity DBL_UPDATER is
 
         -- The maximum delay in clock cycles between the dispatch of two updates of DBL to the
         -- NVMe controller
-        UPDATE_DELAY : positive := 10;
-        -- The delay in clock periods where the update is repeated regardless if the DBL value
-        -- changed or not
-        REPEAT_DELAY : positive := 20);
+        UPDATE_DELAY : positive := 10);
 
     port (
         CLK : in std_logic;
@@ -38,8 +39,6 @@ entity DBL_UPDATER is
         -- =========================================================================================
         -- Control interface
         -- =========================================================================================
-        REPEAT_UPDATE_EN : in std_logic;
-
         CQHDBL_BASE_ADDR : in std_logic_vector(63 downto 0);
         CQHDBL_DATA      : in std_logic_vector(15 downto 0);
         CQHDBL_VLD       : in std_logic;
@@ -52,9 +51,7 @@ entity DBL_UPDATER is
         -- Status interface
         -- =========================================================================================
         CQHDBL_REG_UPD_DISP : out std_logic;
-        CQHDBL_RPT_UPD_DISP : out std_logic;
         SQTDBL_REG_UPD_DISP : out std_logic;
-        SQTDBL_RPT_UPD_DISP : out std_logic;
 
         -- =========================================================================================
         -- MFB for update dispatch
@@ -88,13 +85,7 @@ architecture FULL of DBL_UPDATER is
     signal delay_cntr_reg          : u_array_t(DBL_NUM -1 downto 0)(log2(UPDATE_DELAY) downto 0);
     signal delay_cntr_next         : u_array_t(DBL_NUM -1 downto 0)(log2(UPDATE_DELAY) downto 0);
 
-    signal repeat_cntr           : u_array_t(DBL_NUM -1 downto 0)(63 downto 0);
-    signal repeat_cntr_ovf       : std_logic_vector(DBL_NUM -1 downto 0);
-    signal repeat_cntr_en        : std_logic_vector(DBL_NUM -1 downto 0);
-    signal regular_upd_flag_reg  : std_logic_vector(DBL_NUM -1 downto 0);
-    signal regular_upd_flag_next : std_logic_vector(DBL_NUM -1 downto 0);
     signal dbl_reg_upd_disp      : std_logic_vector(DBL_NUM -1 downto 0);
-    signal dbl_rpt_upd_disp      : std_logic_vector(DBL_NUM -1 downto 0);
 
     -- Size of a PCIE RQ header and 2 pointers (HHP and HDP, that are aligned to 4 byte boundary)
     constant FIFO_DATA_W   : positive := 16 + 64;
@@ -146,32 +137,13 @@ begin
                     update_pst(idx)             <= S_WAIT_FOR_UPDATE;
                     last_updated_value_reg(idx) <= (others => '0');
                     delay_cntr_reg(idx)         <= (others => '0');
-                    regular_upd_flag_reg(idx)   <= '0';
                 else
                     update_pst(idx)             <= update_nst(idx);
                     last_updated_value_reg(idx) <= last_updated_value_next(idx);
                     delay_cntr_reg(idx)         <= delay_cntr_next(idx);
-                    regular_upd_flag_reg(idx)   <= regular_upd_flag_next(idx);
                 end if;
             end if;
         end process;
-
-        repeat_delay_cntr_p : process (CLK) is
-        begin
-            if (rising_edge(CLK)) then
-                if (RST = '1') then
-                    repeat_cntr(idx) <= (others => '0');
-                else
-                    if (repeat_cntr_en(idx) = '1' and repeat_cntr(idx) < REPEAT_DELAY) then
-                        repeat_cntr(idx) <= repeat_cntr(idx) + 1;
-                    else
-                        repeat_cntr(idx) <= (others => '0');
-                    end if;
-                end if;
-            end if;
-        end process;
-
-        repeat_cntr_ovf(idx) <= '1' when (repeat_cntr(idx) >= REPEAT_DELAY and REPEAT_UPDATE_EN = '1') else '0';
 
         update_state_nst_logic_p : process (all) is
         begin
@@ -179,29 +151,18 @@ begin
             last_updated_value_next(idx) <= last_updated_value_reg(idx);
             delay_cntr_next(idx)         <= delay_cntr_reg(idx);
             fifo_wr(idx)                 <= '0';
-            regular_upd_flag_next(idx)   <= regular_upd_flag_reg(idx);
             dbl_reg_upd_disp(idx)        <= '0';
-            dbl_rpt_upd_disp(idx)        <= '0';
-            repeat_cntr_en(idx)          <= '0';
 
             case update_pst(idx) is
                 when S_WAIT_FOR_UPDATE =>
 
-                    -- The dispatch can take place if the PCIe address is not zero and either one of two
-                    -- other conditions is met. Either the update is regular when both doorbell pointers
-                    -- are moving or they are not moving and the update needs to be repeated.
+                    -- The dispatch can take place if the PCIe address is not zero and the doorbell
+                    -- value has changed since the last update. An unchanged value is never
+                    -- re-written (that would be a prohibited "Invalid Doorbell Write Value").
                     if (dbl_base_addr(idx) /= x"0000000000000000") then
                         if (dbl_reg(idx) /= last_updated_value_reg(idx)) then
-                            update_nst(idx)            <= S_DISPATCH_UPDATE;
-                            delay_cntr_next(idx)       <= delay_cntr_reg(idx) + 1;
-                            regular_upd_flag_next(idx) <= '1';
-                        elsif (dbl_reg(idx) = last_updated_value_reg(idx)) then
-                            repeat_cntr_en(idx) <= '1';
-
-                            if (repeat_cntr_ovf(idx) = '1') then
-                                update_nst(idx)            <= S_DISPATCH_UPDATE;
-                                regular_upd_flag_next(idx) <= '0';
-                            end if;
+                            update_nst(idx)      <= S_DISPATCH_UPDATE;
+                            delay_cntr_next(idx) <= delay_cntr_reg(idx) + 1;
                         end if;
                     end if;
 
@@ -216,8 +177,7 @@ begin
                             if (fifo_full = '0') then
                                 update_nst(idx)              <= S_WAIT_FOR_UPDATE;
                                 last_updated_value_next(idx) <= dbl_reg(idx);
-                                dbl_reg_upd_disp(idx)        <= regular_upd_flag_reg(idx);
-                                dbl_rpt_upd_disp(idx)        <= not regular_upd_flag_reg(idx);
+                                dbl_reg_upd_disp(idx)        <= '1';
                             else
                                 update_nst(idx) <= S_DISPATCH_UPDATE;
                             end if;
@@ -233,8 +193,7 @@ begin
                     if (fifo_full = '0') then
                         update_nst(idx)              <= S_RUN_COUNTER;
                         last_updated_value_next(idx) <= dbl_reg(idx);
-                        dbl_reg_upd_disp(idx)        <= regular_upd_flag_reg(idx);
-                        dbl_rpt_upd_disp(idx)        <= not regular_upd_flag_reg(idx);
+                        dbl_reg_upd_disp(idx)        <= '1';
                     end if;
             end case;
         end process;
@@ -245,9 +204,7 @@ begin
     dbl_base_addr(0)    <= CQHDBL_BASE_ADDR;
     dbl_base_addr(1)    <= SQTDBL_BASE_ADDR;
     CQHDBL_REG_UPD_DISP <= dbl_reg_upd_disp(0);
-    CQHDBL_RPT_UPD_DISP <= dbl_rpt_upd_disp(0);
     SQTDBL_REG_UPD_DISP <= dbl_reg_upd_disp(1);
-    SQTDBL_RPT_UPD_DISP <= dbl_rpt_upd_disp(1);
 
     -- =============================================================================================
     -- Dispatch FIFO where all of the update requests get collected
