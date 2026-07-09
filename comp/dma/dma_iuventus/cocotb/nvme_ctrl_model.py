@@ -16,7 +16,7 @@ from cocotbext.ofm.pcie import RQHeader, RQMfbMeta, CCHeader, CQMfbMeta, CQHeade
 from cocotbext.ofm.mfb.monitors import MFBMonitor
 from cocotbext.ofm.mfb.drivers import MFBDriver
 
-from misc_const import SECT_SIZE, IuventusBarSelection, PcieReqType, SQE_SIZE, MRRS, MPS, PAGE_SIZE, CQE_SIZE, BUFF_SIZE, STORAGE_CAP
+from misc_const import SECT_SIZE, IuventusBarSelection, PcieReqType, SQE_SIZE, MRRS, MPS, PAGE_SIZE, CQE_SIZE, BUFF_SIZE, STORAGE_CAP, WC_MAX_FRAGS, WC_WEAK_ORDER, CQE_PHASE_TAG_BYTE
 from cocotbext.ofm.dma.iuventus import CQEStatCodeTypes, CQEStatusCodes, SQEntry, SQEOpCodes, CQEntry
 
 class NVMEControllerModel:
@@ -302,56 +302,94 @@ class NVMEControllerModel:
         assert buffer_size is not None and buffer_size != 0, "buffer_size cannot be zero if provided."
         assert target_bar in (IuventusBarSelection.CQ_BAR, IuventusBarSelection.WR_BUFF_BAR), "Invalid target_bar for write request."
 
+        # --- Write-combining (WC) emulation ------------------------------------------------
+        # Model the NVMe controller writing to the FPGA BARs like a CPU storing to a
+        # write-combined memory region: split the write into randomly sized, byte-granular
+        # bursts (down to a single byte, using the PCIe first/last byte enables) and emit them
+        # weakly ordered. For CQ (CQE) writes the burst carrying the Phase Tag byte -- the byte
+        # that makes the CQE visible -- is always emitted last, mirroring the fence a real
+        # controller places before that flag store (every other CQE byte is then written no
+        # later). Read-data (WR buffer) bursts carry no in-transfer flag and are fully
+        # reordered; the following CQE write is their ordering barrier. See WC_MAX_FRAGS /
+        # WC_WEAK_ORDER / CQE_PHASE_TAG_BYTE in misc_const.
+
+        # 1. Carve the write into mandatory segments (bounded by MPS, the 4 KiB boundary and
+        #    the ring-buffer wrap), then split each segment into 1..WC_MAX_FRAGS byte-granular
+        #    bursts at random byte boundaries. Each burst is (data_index, buffer_offset, size).
+        bursts = []
         bytes_sent = 0
         current_offset = 0
-
         while bytes_sent < total_bytes:
-            # 2. Physical Address Calculation
             phys_addr = base_addr + current_offset
+            seg = min(total_bytes - bytes_sent, MPS)
+            seg = min(seg, PAGE_SIZE - (phys_addr % PAGE_SIZE))
+            seg = min(seg, buffer_size - (current_offset % buffer_size))
 
-            # 3. Determine Chunk Size (TLP Payload Size)
-            # Rule A: Cannot exceed MPS (Maximum Payload Size) constant
-            chunk_size = min(total_bytes - bytes_sent, MPS)
+            n_frag = random.randint(1, min(seg, WC_MAX_FRAGS))
+            if n_frag == 1:
+                sizes = [seg]
+            else:
+                cuts = sorted(random.sample(range(1, seg), n_frag - 1))
+                edges = [0, *cuts, seg]
+                sizes = [edges[i + 1] - edges[i] for i in range(n_frag)]
 
-            # Rule B: Cannot cross a 4KB address boundary (PCIe Spec)
-            bytes_to_4k = 4096 - (phys_addr % 4096)
-            chunk_size = min(chunk_size, bytes_to_4k)
+            frag_off = 0
+            for size in sizes:
+                bursts.append((bytes_sent + frag_off, current_offset + frag_off, size))
+                frag_off += size
 
-            # Rule C: Ring Buffer Wrap Guard
-            # Ensure the chunk is truncated at the end of the buffer to wrap properly
-            bytes_to_buf_end = buffer_size - (current_offset % buffer_size)
-            chunk_size = min(chunk_size, bytes_to_buf_end)
+            bytes_sent += seg
+            current_offset = (current_offset + seg) % buffer_size
 
-            # 4. Extract data slice for this specific TLP
-            payload = data[bytes_sent : bytes_sent + chunk_size]
+        # 2. Weakly reorder the bursts (WC gives no ordering guarantee between stores).
+        if WC_WEAK_ORDER and len(bursts) > 1:
+            if target_bar == IuventusBarSelection.CQ_BAR:
+                # Pin the burst covering the Phase Tag byte last; shuffle everything else.
+                pin = next(i for i, (didx, _off, size) in enumerate(bursts)
+                           if didx <= CQE_PHASE_TAG_BYTE < didx + size)
+                rest = bursts[:pin] + bursts[pin + 1:]
+                random.shuffle(rest)
+                bursts = rest + [bursts[pin]]
+            else:
+                random.shuffle(bursts)
+
+        # 3. Emit each burst as an independent MWr TLP, in the (reordered) emission order.
+        for data_idx, buf_off, chunk_size in bursts:
+            phys_addr = base_addr + buf_off
+            payload = data[data_idx : data_idx + chunk_size]
 
             if self.log.isEnabledFor(logging.DEBUG):
                 self.log.debug(f"Preparing WR TLP: phys_addr=0x{phys_addr:x}, chunk_size={chunk_size},\n"
-                            f"current_offset={current_offset}, bytes_sent={bytes_sent}, total_bytes={total_bytes}")
+                            f"buf_off={buf_off}, data_idx={data_idx}, total_bytes={total_bytes}")
 
-            # 6. Construct PCIe Header
+            # Byte-enable geometry for an arbitrary contiguous byte range [start .. end).
+            start_be = buf_off % 4                      # first valid byte within the first DWORD
+            end_be = (buf_off + chunk_size) % 4         # 0 => last DWORD is full
+            dword_count = (start_be + chunk_size + 3) // 4
+
             cq_hdr = CQHeader()
             cq_hdr.bar_apper = 26
             cq_hdr.tgt_func = 1
             cq_hdr.bar_id = target_bar
             cq_hdr.addr = phys_addr >> 2
-            cq_hdr.dword_count = chunk_size // 4
+            cq_hdr.dword_count = dword_count
             cq_hdr.req_type = PcieReqType.MWR
 
             cq_mfb_meta = CQMfbMeta()
-            cq_mfb_meta.firstBe = [0xF, 0xE, 0xC, 0x8][current_offset % 4]
-            cq_mfb_meta.lastBe = [0xF, 0x1, 0x3, 0x7][(current_offset + chunk_size) % 4]
+            cq_mfb_meta.firstBe = [0xF, 0xE, 0xC, 0x8][start_be]   # enable bytes start_be..3
+            cq_mfb_meta.lastBe = [0xF, 0x1, 0x3, 0x7][end_be]      # enable bytes 0..end_be-1
 
-            if chunk_size <= 4:
+            if dword_count == 1:
+                # Single DWORD: intersect the start and end masks; last BE must be 0.
                 cq_mfb_meta.firstBe &= cq_mfb_meta.lastBe
                 cq_mfb_meta.lastBe = 0
 
             if self.log.isEnabledFor(logging.DEBUG):
                 self.log.debug(f"Constructed WR Header: {cq_hdr} with Meta: {cq_mfb_meta}")
 
-            # 7. Dispatch Transaction (Header + Payload)
+            # Dispatch Transaction (Header + start_be pad bytes + payload)
             cq_trans = MfbTransactionWithMeta(
-                data=cq_hdr.serialize().to_bytes(len(CQHeader()) // 8, 'little') + (b'\x00' * (current_offset % 4)) + payload,
+                data=cq_hdr.serialize().to_bytes(len(CQHeader()) // 8, 'little') + (b'\x00' * start_be) + payload,
                 meta=cq_mfb_meta.serialize()
             )
             self._cq_drv.append(cq_trans)
@@ -366,13 +404,6 @@ class NVMEControllerModel:
             elif target_bar == IuventusBarSelection.WR_BUFF_BAR:
                 self.c_pcie_wrbuff_wr_bytes += chunk_size
                 self.c_pcie_wrbuff_wrs += 1
-
-            # 9. Update loop cursors
-            bytes_sent += chunk_size
-            current_offset = (current_offset + chunk_size) % buffer_size
-
-            assert bytes_sent > 0, "FATAL: bytes_sent iterated to negative!"
-            assert chunk_size > 0, "FATAL: chunk_size iterated to negative!"
 
     async def _dispatch_rd_req(self, base_addr, total_bytes,
                             target_bar, buffer_size):
