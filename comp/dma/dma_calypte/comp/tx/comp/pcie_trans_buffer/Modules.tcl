@@ -20,4 +20,5 @@ lappend COMPONENTS [ list "TDP_BRAM"            $TDP_BRAM_BASE          "FULL" ]
 lappend COMPONENTS [ list "BARREL_SHIFTER_GEN"  $BARREL_SHIFTER_BASE    "FULL" ]
 
 # Source files for implemented component
+lappend MOD "$ENTITY_BASE/tdp_bram_be.vhd"
 lappend MOD "$ENTITY_BASE/tx_dma_pcie_trans_buffer.vhd"

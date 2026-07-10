@@ -30,6 +30,25 @@ QUEUE_DEPTH = 16
 # always allocate their exact page count and can be multiple-outstanding.
 MAX_WR_PAGES = BUFF_SIZE_PAGES
 
+# --- Write-combining (WC) emulation for the CQ-side MFB write generator -------------------
+# The NVMe controller model writes CQEs and read-data into the FPGA BARs like a CPU storing to a
+# write-combined memory region: each MemWr is split into randomly sized, byte-granular bursts (down
+# to a single byte, expressed via the PCIe first/last byte enables) and those bursts are emitted
+# weakly ordered (out of address order).
+# WC_MAX_FRAGS bounds how many bursts a single MPS-sized segment is broken into (>=1); a 16-byte CQE
+# can therefore be split into up to 16 one-byte writes. Larger values mean finer fragmentation and
+# more TLPs (slower sim).
+WC_MAX_FRAGS = 16
+# WC_WEAK_ORDER toggles the out-of-order emission. For CQ (CQE) writes the burst carrying the Phase
+# Tag byte -- the byte that makes the CQE visible to the FPGA -- is always emitted last (a real
+# controller fences before that flag store, so every other CQE byte is written no later); read-data
+# bursts carry no in-transfer flag and are fully reordered, the subsequent CQE write being their
+# ordering barrier.
+WC_WEAK_ORDER = True
+# Byte offset of the Phase Tag within a CQE. CQEntry lays the phase_tag bit at bit 112
+# (cmd_specific 32 + rsv1 32 + sqhdbl 16 + sq_id 16 + cmd_id 16), i.e. bit 0 of byte 14.
+CQE_PHASE_TAG_BYTE = 14
+
 class IuventusBuffers:
     def __init__(self, qsize):
         self.qsize = qsize

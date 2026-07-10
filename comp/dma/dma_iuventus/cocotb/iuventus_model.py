@@ -293,7 +293,10 @@ class IuventusModel:
 
         return resolved
 
-    # TODO: Shuffle transactions with writes to the qq write buffer in the NVME controller model
+    # NOTE: CQ-buffer / read-data writes are split into randomly sized bursts and emitted weakly
+    # ordered by the NVMe controller model (nvme_ctrl_model._dispatch_wr_req, WC emulation). This
+    # callback is address-based and updates the model buffers atomically per transaction, so it is
+    # order-independent; only the DUT observes the weakly ordered wire sequence.
 
     # Process CQ requests on the PCIe (assign as a callback for the CQ driver)
     def proc_pcie_cq_reqs(self, transaction):
@@ -307,11 +310,14 @@ class IuventusModel:
         # Calculate the real length of data payload in bytes based on
         byte_count = pcie_byte_count(cq_hdr.dword_count, meta.firstBe, meta.lastBe)
 
-        if meta.firstBe & 0x0001: offset = 0
-        elif meta.firstBe & 0x0010: offset = 1
-        elif meta.firstBe & 0x0100: offset = 2
-        elif meta.firstBe & 0x1000: offset = 3
-        else: offset = 0  # Should not happen due to assertions in pcie_byte
+        # Byte offset of the first valid byte within the first DWORD = position of the
+        # lowest set bit in firstBe (0..3). With byte-granular WC writes firstBe can be any
+        # contiguous mask (e.g. 0xE -> offset 1, 0xC -> offset 2), so decode it properly
+        # rather than assuming a DWORD-aligned start.
+        if meta.firstBe == 0:
+            offset = 0  # zero-length; byte_count == 1 per pcie_byte_count
+        else:
+            offset = (meta.firstBe & -meta.firstBe).bit_length() - 1
 
         addr = (cq_hdr.addr << 2) + offset
 

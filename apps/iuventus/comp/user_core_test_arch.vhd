@@ -12,14 +12,14 @@ use work.math_pack.all;
 use work.type_pack.all;
 
 architecture TEST of USER_CORE is
-    constant ADDR_LENGTH    : natural := 6;
-    constant MI_SPLIT_PORTS : natural := 5;
-    constant MI_SPLIT_BASES : slv_array_t(MI_SPLIT_PORTS-1 downto 0)(MI_WIDTH-1 downto 0) := (
-        0 => X"00000000",       -- Control and Status Registers
-        1 => X"00000100",       -- MFB Generator
-        2 => X"00000200",       -- Data Logger for latency meter
-        3 => X"00000300",       -- MFB speed meter for NVME_RD_MFB_*
-        4 => X"00000400"        -- MFB speed meter for NVME_WR_MFB_*
+    constant ADDR_LENGTH        : natural := 7;   -- decode 0x00..0x7C (integrity regs live at 0x30..0x54)
+    constant MI_SPLIT_PORTS     : natural := 5;
+    constant MI_SPLIT_BASES     : slv_array_t(MI_SPLIT_PORTS-1 downto 0)(MI_WIDTH-1 downto 0) := (
+        0 => X"00000000",                         -- Control and Status Registers
+        1 => X"00000100",                         -- MFB Generator
+        2 => X"00000200",                         -- Data Logger for latency meter
+        3 => X"00000300",                         -- MFB speed meter for NVME_RD_MFB_*
+        4 => X"00000400"                          -- MFB speed meter for NVME_WR_MFB_*
         );
     constant MI_SPLIT_ADDR_MASK : std_logic_vector(MI_WIDTH -1 downto 0) := X"00000700";
 
@@ -70,7 +70,7 @@ architecture TEST of USER_CORE is
     signal gen_mfb_src_rdy : std_logic;
     signal gen_mfb_dst_rdy : std_logic;
 
-    function gen_wr_mfb_data(
+    function gen_wr_mfb_data (
         pkt_cnt : unsigned(15 downto 0);
         word_cnt : unsigned(15 downto 0);
         sof      : std_logic_vector;
@@ -84,32 +84,32 @@ architecture TEST of USER_CORE is
         flag_byte := resize(pkt_cnt(15 downto 8), flag_byte'length);
 
         if (unsigned(sof) /= to_unsigned(0, sof'length)) then
-            flag_byte := flag_byte or x"80";
+            flag_byte := flag_byte or X"80";
         end if;
 
         if (unsigned(eof) /= to_unsigned(0, eof'length)) then
-            flag_byte := flag_byte or x"40";
+            flag_byte := flag_byte or X"40";
         end if;
 
         for byte_idx in 0 to (NVME_WR_MFB_DATA'length/8) - 1 loop
             tile_idx := to_unsigned(byte_idx/8, tile_idx'length);
 
             case (byte_idx mod 8) is
-                when 0 => ret_data((byte_idx + 1)*8 - 1 downto byte_idx*8) := x"4E"; -- N
-                when 1 => ret_data((byte_idx + 1)*8 - 1 downto byte_idx*8) := x"56"; -- V
-                when 2 => ret_data((byte_idx + 1)*8 - 1 downto byte_idx*8) := x"4D"; -- M
-                when 3 => ret_data((byte_idx + 1)*8 - 1 downto byte_idx*8) := x"45"; -- E
+                when 0 => ret_data((byte_idx + 1)*8 - 1 downto byte_idx*8) := X"4E"; -- N
+                when 1 => ret_data((byte_idx + 1)*8 - 1 downto byte_idx*8) := X"56"; -- V
+                when 2 => ret_data((byte_idx + 1)*8 - 1 downto byte_idx*8) := X"4D"; -- M
+                when 3 => ret_data((byte_idx + 1)*8 - 1 downto byte_idx*8) := X"45"; -- E
                 when 4 =>
-                    dyn_byte := resize(word_cnt(7 downto 0), dyn_byte'length) + tile_idx;
+                    dyn_byte                                         := resize(word_cnt(7 downto 0), dyn_byte'length) + tile_idx;
                     ret_data((byte_idx + 1)*8 - 1 downto byte_idx*8) := std_logic_vector(dyn_byte);
                 when 5 =>
-                    dyn_byte := resize(word_cnt(15 downto 8), dyn_byte'length) + tile_idx;
+                    dyn_byte                                         := resize(word_cnt(15 downto 8), dyn_byte'length) + tile_idx;
                     ret_data((byte_idx + 1)*8 - 1 downto byte_idx*8) := std_logic_vector(dyn_byte);
                 when 6 =>
-                    dyn_byte := resize(pkt_cnt(7 downto 0), dyn_byte'length) + tile_idx;
+                    dyn_byte                                         := resize(pkt_cnt(7 downto 0), dyn_byte'length) + tile_idx;
                     ret_data((byte_idx + 1)*8 - 1 downto byte_idx*8) := std_logic_vector(dyn_byte);
                 when others =>
-                    dyn_byte := flag_byte + tile_idx;
+                    dyn_byte                                         := flag_byte + tile_idx;
                     ret_data((byte_idx + 1)*8 - 1 downto byte_idx*8) := std_logic_vector(dyn_byte);
             end case;
         end loop;
@@ -126,7 +126,7 @@ architecture TEST of USER_CORE is
     constant SM_CNT_BYTES_WIDTH       : natural := 35;
     constant EVCR_MAX_INTERVAL_CYCLES : natural := 2**SM_CNT_TICKS_WIDTH;
 
-    type lat_meas_fsm_state_t is (S_IDLE, S_COUNT_TESTING_PACKETS);
+    type   lat_meas_fsm_state_t is (S_IDLE, S_COUNT_TESTING_PACKETS);
     signal meas_fsm_pst : lat_meas_fsm_state_t := S_IDLE;
     signal meas_fsm_nst : lat_meas_fsm_state_t := S_IDLE;
     signal pkt_cnt_pst  : unsigned(MI_WIDTH -1 downto 0);
@@ -156,6 +156,47 @@ architecture TEST of USER_CORE is
     signal evcr_total_events_reg     : std_logic_vector(log2((EVCR_MAX_INTERVAL_CYCLES + 1)*2) -1 downto 0);
     signal evcr_total_cycles_reg     : std_logic_vector(log2(EVCR_MAX_INTERVAL_CYCLES + 1) -1 downto 0);
     signal evcr_update               : std_logic;
+
+    -- ---- SSD data-integrity self-test (write pattern -> read back -> compare in fabric) -------
+    -- Control registers (0x30..0x3C) and status (0x40..0x54); integ_en steers the WR/RD MFB and
+    -- RD_REQ ports away from the throughput generator to the checker.
+    signal integ_en             : std_logic;
+    signal integ_start          : std_logic;
+    signal integ_lba_base_reg   : std_logic_vector(63 downto 0);
+    signal integ_lba_count_reg  : std_logic_vector(31 downto 0);
+    signal integ_ctrl_reg_sel   : std_logic;
+    signal integ_base_l_reg_sel : std_logic;
+    signal integ_base_h_reg_sel : std_logic;
+    signal integ_count_reg_sel  : std_logic;
+
+    signal chk_busy    : std_logic;
+    signal chk_done    : std_logic;
+    signal chk_err_cnt : std_logic_vector(31 downto 0);
+    signal chk_err_lba : std_logic_vector(63 downto 0);
+    signal chk_err_exp : std_logic_vector(31 downto 0);
+    signal chk_err_got : std_logic_vector(31 downto 0);
+
+    -- Checker datapath (write side) and read request.
+    signal chk_wr_data        : std_logic_vector(NVME_WR_MFB_DATA'range);
+    signal chk_wr_meta        : std_logic_vector(NVME_WR_MFB_META'range);
+    signal chk_wr_sof         : std_logic_vector(NVME_WR_MFB_SOF'range);
+    signal chk_wr_eof         : std_logic_vector(NVME_WR_MFB_EOF'range);
+    signal chk_wr_sof_pos     : std_logic_vector(NVME_WR_MFB_SOF_POS'range);
+    signal chk_wr_eof_pos     : std_logic_vector(NVME_WR_MFB_EOF_POS'range);
+    signal chk_wr_src_rdy     : std_logic;
+    signal chk_rd_req_lba_ptr : std_logic_vector(63 downto 0);
+    signal chk_rd_req_lba_num : std_logic_vector(7 downto 0);
+    signal chk_rd_req_vld     : std_logic;
+    signal chk_rd_mfb_dst_rdy : std_logic;
+
+    -- Throughput-generator write path (formerly wired straight to the entity WR MFB outputs).
+    signal gen_nvme_wr_sof     : std_logic_vector(NVME_WR_MFB_SOF'range);
+    signal gen_nvme_wr_eof     : std_logic_vector(NVME_WR_MFB_EOF'range);
+    signal gen_nvme_wr_sof_pos : std_logic_vector(NVME_WR_MFB_SOF_POS'range);
+    signal gen_nvme_wr_eof_pos : std_logic_vector(NVME_WR_MFB_EOF_POS'range);
+    signal gen_nvme_wr_src_rdy : std_logic;
+    signal gen_nvme_wr_dst_rdy : std_logic;
+    signal gen_nvme_rd_req_vld : std_logic;
 
     attribute mark_debug                        : string;
     attribute mark_debug of NVME_RD_MFB_DATA    : signal is "true";
@@ -244,7 +285,7 @@ begin
         TX_DRDY => mi_split_drdy
     );
 
-    reg_sel_proc : process(all)
+    reg_sel_proc : process (all)
         variable reg_sel_addr : std_logic_vector(7 downto 0);
     begin
         -- Default selections
@@ -257,6 +298,10 @@ begin
         tst_iterations_reg_sel                 <= '0';
         tst_sel_reg_sel                        <= '0';
         evcr_interval_reg_sel                  <= '0';
+        integ_ctrl_reg_sel                     <= '0';
+        integ_base_l_reg_sel                   <= '0';
+        integ_base_h_reg_sel                   <= '0';
+        integ_count_reg_sel                    <= '0';
 
         -- Zero-extend to 12 bits to match x"000" style
         reg_sel_addr                          := (others => '0');
@@ -272,6 +317,10 @@ begin
             when x"1C" => tst_iterations_reg_sel             <= '1';
             when x"20" => tst_sel_reg_sel                    <= '1';
             when x"24" => evcr_interval_reg_sel              <= '1';
+            when x"30" => integ_ctrl_reg_sel                 <= '1';
+            when x"34" => integ_base_l_reg_sel               <= '1';
+            when x"38" => integ_base_h_reg_sel               <= '1';
+            when x"3C" => integ_count_reg_sel                <= '1';
             when others => null;
         end case;
     end process;
@@ -291,15 +340,45 @@ begin
     begin
         if (rising_edge(DMA_CLK)) then
             if (DMA_RST = '1') then
-                NVME_RD_REQ_VLD <= '0';
+                gen_nvme_rd_req_vld <= '0';
             else
                 if ((nvme_rd_req_vld_reg_sel = '1' and mi_split_wr(0) = '1')
                     or (tst_finished = '0' and tst_sel_reg(1) = '1')
                     or (contig_test = '1' and tst_sel_reg(1) = '1')) then
 
-                    NVME_RD_REQ_VLD <= '1';
+                    gen_nvme_rd_req_vld <= '1';
                 elsif (NVME_RD_REQ_RDY = '1') then
-                    NVME_RD_REQ_VLD <= '0';
+                    gen_nvme_rd_req_vld <= '0';
+                end if;
+            end if;
+        end if;
+    end process;
+
+    -- SSD data-integrity control registers (0x30 CTRL[start,en], 0x34/0x38 LBA base, 0x3C count).
+    integ_ctrl_reg_p : process (DMA_CLK)
+    begin
+        if (rising_edge(DMA_CLK)) then
+            if (DMA_RST = '1') then
+                integ_en            <= '0';
+                integ_start         <= '0';
+                integ_lba_base_reg  <= (others => '0');
+                integ_lba_count_reg <= (others => '0');
+            else
+                integ_start <= '0';
+                if (mi_split_wr(0) = '1') then
+                    if (integ_ctrl_reg_sel = '1') then
+                        integ_start <= mi_split_dwr(0)(0);
+                        integ_en    <= mi_split_dwr(0)(1);
+                    end if;
+                    if (integ_base_l_reg_sel = '1') then
+                        integ_lba_base_reg(31 downto 0) <= mi_split_dwr(0);
+                    end if;
+                    if (integ_base_h_reg_sel = '1') then
+                        integ_lba_base_reg(63 downto 32) <= mi_split_dwr(0);
+                    end if;
+                    if (integ_count_reg_sel = '1') then
+                        integ_lba_count_reg <= mi_split_dwr(0);
+                    end if;
                 end if;
             end if;
         end if;
@@ -383,8 +462,8 @@ begin
     begin
         if (rising_edge(DMA_CLK)) then
             if (DMA_RST = '1') then
-                tst_sel_reg  <= (others => '0');
-                tmsp_ovf_reg <= '0';
+                tst_sel_reg    <= (others => '0');
+                tmsp_ovf_reg   <= '0';
                 contig_test    <= '0';
             else
                 if ((lat_meas_val_vld = '1') and (unsigned(lat_meas_val) >= (2**LOG_TIMESTAMP_WIDTH))) then
@@ -392,20 +471,82 @@ begin
                 end if;
 
                 if ((tst_sel_reg_sel = '1') and (mi_split_wr(0) = '1')) then
-                    tst_sel_reg  <= mi_split_dwr(0)(1 downto 0);
-                    tmsp_ovf_reg <= mi_split_dwr(0)(2);
+                    tst_sel_reg    <= mi_split_dwr(0)(1 downto 0);
+                    tmsp_ovf_reg   <= mi_split_dwr(0)(2);
                     contig_test    <= mi_split_dwr(0)(3);
                 end if;
             end if;
         end if;
     end process;
 
-    NVME_RD_REQ_LBA_PTR <= nvme_rd_req_lba_ptr_reg when (tst_finished = '1' and contig_test = '0') else std_logic_vector(resize(std_logic_vector(tst_addr), NVME_RD_REQ_LBA_PTR'length));
-    NVME_RD_REQ_LBA_NUM <= nvme_rd_req_lba_num_reg;
-    NVME_WR_MFB_META    <= nvme_wr_req_lba_ptr_reg when (tst_finished = '1' and contig_test = '0') else std_logic_vector(resize(std_logic_vector(tst_addr), NVME_RD_REQ_LBA_PTR'length));
-    NVME_WR_MFB_DATA    <= gen_wr_mfb_data(wr_mfb_pkt_cnt_reg, wr_mfb_word_cnt_reg, NVME_WR_MFB_SOF, NVME_WR_MFB_EOF);
+    -- Datapath steering: the integrity checker owns the WR/RD MFB and the read request when
+    -- integ_en = '1'; otherwise the throughput generator drives them (behaviour unchanged).
+    NVME_RD_REQ_LBA_PTR <= chk_rd_req_lba_ptr when (integ_en = '1') else
+                           nvme_rd_req_lba_ptr_reg when (tst_finished = '1' and contig_test = '0') else
+                           std_logic_vector(resize(std_logic_vector(tst_addr), NVME_RD_REQ_LBA_PTR'length));
+    NVME_RD_REQ_LBA_NUM <= chk_rd_req_lba_num when (integ_en = '1') else nvme_rd_req_lba_num_reg;
+    NVME_RD_REQ_VLD     <= chk_rd_req_vld     when (integ_en = '1') else gen_nvme_rd_req_vld;
 
-    NVME_RD_MFB_DST_RDY <= '1'; -- Always ready to receive data for testing
+    NVME_WR_MFB_META    <= chk_wr_meta when (integ_en = '1') else
+                           nvme_wr_req_lba_ptr_reg when (tst_finished = '1' and contig_test = '0') else
+                           std_logic_vector(resize(std_logic_vector(tst_addr), NVME_RD_REQ_LBA_PTR'length));
+    NVME_WR_MFB_DATA    <= chk_wr_data when (integ_en = '1') else
+                           gen_wr_mfb_data(wr_mfb_pkt_cnt_reg, wr_mfb_word_cnt_reg, gen_nvme_wr_sof, gen_nvme_wr_eof);
+    NVME_WR_MFB_SOF     <= chk_wr_sof     when (integ_en = '1') else gen_nvme_wr_sof;
+    NVME_WR_MFB_EOF     <= chk_wr_eof     when (integ_en = '1') else gen_nvme_wr_eof;
+    NVME_WR_MFB_SOF_POS <= chk_wr_sof_pos when (integ_en = '1') else gen_nvme_wr_sof_pos;
+    NVME_WR_MFB_EOF_POS <= chk_wr_eof_pos when (integ_en = '1') else gen_nvme_wr_eof_pos;
+    NVME_WR_MFB_SRC_RDY <= chk_wr_src_rdy when (integ_en = '1') else gen_nvme_wr_src_rdy;
+    -- Stall the generator's write stream while the checker owns the bus.
+    gen_nvme_wr_dst_rdy <= NVME_WR_MFB_DST_RDY when (integ_en = '0') else '0';
+
+    NVME_RD_MFB_DST_RDY <= chk_rd_mfb_dst_rdy when (integ_en = '1') else '1';
+
+    integrity_checker_i : entity work.IUVENTUS_INTEGRITY_CHECKER
+    generic map (
+        MFB_REGION_SIZE => DMA_MFB_REGION_SIZE,
+        MFB_BLOCK_SIZE  => DMA_MFB_BLOCK_SIZE,
+        MFB_ITEM_WIDTH  => DMA_MFB_ITEM_WIDTH,
+        SECT_SIZE       => 512,
+        LBA_PTR_W       => 64
+    )
+    port map (
+        CLK => DMA_CLK,
+        RST => DMA_RST,
+
+        CTL_START     => integ_start,
+        CTL_LBA_BASE  => integ_lba_base_reg,
+        CTL_LBA_COUNT => integ_lba_count_reg,
+
+        STS_BUSY          => chk_busy,
+        STS_DONE          => chk_done,
+        STS_ERR_CNT       => chk_err_cnt,
+        STS_ERR_FIRST_LBA => chk_err_lba,
+        STS_ERR_FIRST_EXP => chk_err_exp,
+        STS_ERR_FIRST_GOT => chk_err_got,
+
+        WR_MFB_DATA    => chk_wr_data,
+        WR_MFB_META    => chk_wr_meta,
+        WR_MFB_SOF     => chk_wr_sof,
+        WR_MFB_EOF     => chk_wr_eof,
+        WR_MFB_SOF_POS => chk_wr_sof_pos,
+        WR_MFB_EOF_POS => chk_wr_eof_pos,
+        WR_MFB_SRC_RDY => chk_wr_src_rdy,
+        WR_MFB_DST_RDY => NVME_WR_MFB_DST_RDY,
+
+        RD_REQ_LBA_PTR => chk_rd_req_lba_ptr,
+        RD_REQ_LBA_NUM => chk_rd_req_lba_num,
+        RD_REQ_VLD     => chk_rd_req_vld,
+        RD_REQ_RDY     => NVME_RD_REQ_RDY,
+
+        OP_STAT_VLD    => NVME_OP_STAT_VLD,
+
+        RD_MFB_DATA    => NVME_RD_MFB_DATA,
+        RD_MFB_SOF     => NVME_RD_MFB_SOF,
+        RD_MFB_EOF     => NVME_RD_MFB_EOF,
+        RD_MFB_SRC_RDY => NVME_RD_MFB_SRC_RDY,
+        RD_MFB_DST_RDY => chk_rd_mfb_dst_rdy
+    );
 
     wr_mfb_data_cnt_p : process (DMA_CLK)
     begin
@@ -446,7 +587,17 @@ begin
                 when x"24" => mi_split_drd(0)(evcr_interval_cycles_reg'length - 1 downto 0)  <= evcr_interval_cycles_reg;
                 when x"28" => mi_split_drd(0)(evcr_total_events_reg'length - 1 downto 0)     <= evcr_total_events_reg;
                 when x"2C" => mi_split_drd(0)(evcr_total_cycles_reg'length - 1 downto 0)     <= evcr_total_cycles_reg;
-                when others => mi_split_drd(0)                                               <= x"CAFEBABE";
+                when x"30" => mi_split_drd(0)(1)                                             <= integ_en;
+                when x"34" => mi_split_drd(0)                                                <= integ_lba_base_reg(31 downto 0);
+                when x"38" => mi_split_drd(0)                                                <= integ_lba_base_reg(63 downto 32);
+                when x"3C" => mi_split_drd(0)                                                <= integ_lba_count_reg;
+                when x"40" => mi_split_drd(0)(1 downto 0)                                    <= chk_done & chk_busy;
+                when x"44" => mi_split_drd(0)                                                <= chk_err_cnt;
+                when x"48" => mi_split_drd(0)                                                <= chk_err_lba(31 downto 0);
+                when x"4C" => mi_split_drd(0)                                                <= chk_err_lba(63 downto 32);
+                when x"50" => mi_split_drd(0)                                                <= chk_err_exp;
+                when x"54" => mi_split_drd(0)                                                <= chk_err_got;
+                when others => mi_split_drd(0)                                               <= X"CAFEBABE";
             end case;
         end if;
     end process;
@@ -504,46 +655,46 @@ begin
     );
 
     mfb_reconfigurator_i : entity work.MFB_RECONFIGURATOR
-        generic map (
-            RX_REGIONS            => DMA_MFB_REGIONS,
-            RX_REGION_SIZE        => DMA_MFB_REGION_SIZE*2,
-            RX_BLOCK_SIZE         => DMA_MFB_BLOCK_SIZE/2,
-            RX_ITEM_WIDTH         => DMA_MFB_ITEM_WIDTH,
+    generic map (
+        RX_REGIONS            => DMA_MFB_REGIONS,
+        RX_REGION_SIZE        => DMA_MFB_REGION_SIZE*2,
+        RX_BLOCK_SIZE         => DMA_MFB_BLOCK_SIZE/2,
+        RX_ITEM_WIDTH         => DMA_MFB_ITEM_WIDTH,
 
-            TX_REGIONS            => DMA_MFB_REGIONS,
-            TX_REGION_SIZE        => DMA_MFB_REGION_SIZE,
-            TX_BLOCK_SIZE         => DMA_MFB_BLOCK_SIZE,
-            TX_ITEM_WIDTH         => DMA_MFB_ITEM_WIDTH,
+        TX_REGIONS            => DMA_MFB_REGIONS,
+        TX_REGION_SIZE        => DMA_MFB_REGION_SIZE,
+        TX_BLOCK_SIZE         => DMA_MFB_BLOCK_SIZE,
+        TX_ITEM_WIDTH         => DMA_MFB_ITEM_WIDTH,
 
-            META_WIDTH            => 0,
-            META_MODE             => 0,
-            FIFO_SIZE             => 32,
-            FRAMES_OVER_TX_BLOCK  => 1,
-            FRAMES_OVER_TX_REGION => 1,
-            DEVICE                => DEVICE
-        )
-        port map (
-            CLK        => DMA_CLK,
-            RESET      => DMA_RST,
+        META_WIDTH            => 0,
+        META_MODE             => 0,
+        FIFO_SIZE             => 32,
+        FRAMES_OVER_TX_BLOCK  => 1,
+        FRAMES_OVER_TX_REGION => 1,
+        DEVICE                => DEVICE
+    )
+    port map (
+        CLK        => DMA_CLK,
+        RESET      => DMA_RST,
 
-            RX_DATA    => (others => '0'),
-            RX_META    => (others => '0'),
-            RX_SOF     => gen_mfb_sof,
-            RX_EOF     => gen_mfb_eof,
-            RX_SOF_POS => gen_mfb_sof_pos,
-            RX_EOF_POS => gen_mfb_eof_pos,
-            RX_SRC_RDY => gen_mfb_src_rdy,
-            RX_DST_RDY => gen_mfb_dst_rdy,
+        RX_DATA    => (others => '0'),
+        RX_META    => (others => '0'),
+        RX_SOF     => gen_mfb_sof,
+        RX_EOF     => gen_mfb_eof,
+        RX_SOF_POS => gen_mfb_sof_pos,
+        RX_EOF_POS => gen_mfb_eof_pos,
+        RX_SRC_RDY => gen_mfb_src_rdy,
+        RX_DST_RDY => gen_mfb_dst_rdy,
 
-            TX_DATA    => open,
-            TX_META    => open,
-            TX_SOF     => NVME_WR_MFB_SOF,
-            TX_EOF     => NVME_WR_MFB_EOF,
-            TX_SOF_POS => NVME_WR_MFB_SOF_POS,
-            TX_EOF_POS => NVME_WR_MFB_EOF_POS,
-            TX_SRC_RDY => NVME_WR_MFB_SRC_RDY,
-            TX_DST_RDY => NVME_WR_MFB_DST_RDY
-        );
+        TX_DATA    => open,
+        TX_META    => open,
+        TX_SOF     => gen_nvme_wr_sof,
+        TX_EOF     => gen_nvme_wr_eof,
+        TX_SOF_POS => gen_nvme_wr_sof_pos,
+        TX_EOF_POS => gen_nvme_wr_eof_pos,
+        TX_SRC_RDY => gen_nvme_wr_src_rdy,
+        TX_DST_RDY => gen_nvme_wr_dst_rdy
+    );
 
     -- =============================================================================
     -- Latency measurement
@@ -647,7 +798,7 @@ begin
     begin
         meas_fsm_nst  <= meas_fsm_pst;
         pkt_cnt_nst   <= pkt_cnt_pst;
-        tst_finished <= '0';
+        tst_finished  <= '0';
 
         case meas_fsm_pst is
             when S_IDLE =>
@@ -776,7 +927,8 @@ begin
     iops_cntr_i : entity work.EVENT_COUNTER
     generic map (
         MAX_INTERVAL_CYCLES   => EVCR_MAX_INTERVAL_CYCLES,
-        MAX_CONCURRENT_EVENTS => 1)
+        MAX_CONCURRENT_EVENTS => 1
+    )
     port map (
         CLK   => DMA_CLK,
         RESET => DMA_RST,
@@ -789,7 +941,8 @@ begin
 
         TOTAL_EVENTS => evcr_total_events,
         TOTAL_CYCLES => evcr_total_cycles,
-        TOTAL_UPDATE => evcr_update);
+        TOTAL_UPDATE => evcr_update
+    );
 
     evcr_event_vld <= (NVME_RD_REQ_VLD and NVME_RD_REQ_RDY) or (NVME_WR_MFB_SOF(0) and NVME_WR_MFB_SRC_RDY and NVME_WR_MFB_DST_RDY);
 
