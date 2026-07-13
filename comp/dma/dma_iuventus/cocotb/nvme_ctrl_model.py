@@ -16,16 +16,26 @@ from cocotbext.ofm.pcie import RQHeader, RQMfbMeta, CCHeader, CQMfbMeta, CQHeade
 from cocotbext.ofm.mfb.monitors import MFBMonitor
 from cocotbext.ofm.mfb.drivers import MFBDriver
 
-from misc_const import SECT_SIZE, IuventusBarSelection, PcieReqType, SQE_SIZE, MRRS, MPS, PAGE_SIZE, CQE_SIZE, BUFF_SIZE, STORAGE_CAP, WC_MAX_FRAGS, WC_WEAK_ORDER, CQE_PHASE_TAG_BYTE
+from misc_const import SECT_SIZE, IuventusBarSelection, PHYS_BAR_ID, PcieReqType, SQE_SIZE, MRRS, MPS, PAGE_SIZE, CQE_SIZE, BUFF_SIZE, STORAGE_CAP, WC_MAX_FRAGS, WC_WEAK_ORDER, CQE_PHASE_TAG_BYTE, FIRST_DATA_PAGE
 from cocotbext.ofm.dma.iuventus import CQEStatCodeTypes, CQEStatusCodes, SQEntry, SQEOpCodes, CQEntry
 
 class NVMEControllerModel:
     def __init__(self, sq_id : int, mptr : int, qsize : int, sq_baddr : int, cq_baddr : int, sqtdbl_baddr : int,
                  cqhdbl_baddr : int, cq_drv : MFBDriver, cc_mon : MFBMonitor, rq_mon : MFBMonitor,
                  rdbuff_prpl_baddr : int, rdbuff_prpl_data : List[int], wrbuff_prpl_baddr : int, wrbuff_prpl_data : List[int],
-                 cq_drv_callback):
+                 cq_drv_callback, wr_placement_callback):
         self._cq_drv = cq_drv
         self.cq_drv_callback = cq_drv_callback
+        # Called (cmd_id, k) for every WRITE command with the real wr_alloc page k (derived below
+        # from the actual dispatched SQE's PRP1), so the model can place that command's
+        # already-received payload into RDBUFF at the same page the RTL actually used -- see
+        # IuventusModel.place_wr_payload. WRITEs can have more than one outstanding at once (a
+        # bounded MAX_WR_PAGES reservation per command rather than the whole buffer), so k need
+        # not be FIRST_DATA_PAGE and the model cannot predict it any more reliably than it predicts
+        # a READ's WRBUFF page (see the multi-page READ branch below, which resolves k the same
+        # way). Keyed by cmd_id rather than dispatch order because _proc_sq_entries shuffles a
+        # freshly-fetched batch of SQEs before processing them.
+        self.wr_placement_callback = wr_placement_callback
         self._total_lbas = (STORAGE_CAP * 1024**2) // SECT_SIZE  # 1 LBA = 512 bytes
         # self._storage = bytearray(STORAGE_CAP * 1024**2)
         random.seed(cocotb.RANDOM_SEED)
@@ -54,9 +64,15 @@ class NVMEControllerModel:
 
         self._wrbuff_baddr = wrbuff_prpl_data[0]
         self._rdbuff_baddr = rdbuff_prpl_data[0]
-        # Read/write buffer base addresses and size (128 KiB each)
+        # Read/write buffer base addresses and size (512 KiB flat space each: 1 queue page + data)
         assert (self._wrbuff_baddr == 0) or (self._wrbuff_baddr % PAGE_SIZE == 0), "Write buffer base address must be page aligned"
         assert (self._rdbuff_baddr == 0) or (self._rdbuff_baddr % PAGE_SIZE == 0), "Read buffer base address must be page aligned"
+
+        # Highest data page `k` actually used so far on each buffer (never FIRST_DATA_PAGE-1 or
+        # lower -- see the invariant asserts in _dispatch_wr_req/_dispatch_rd_req); used by the
+        # capacity test to prove pages beyond the pre-flat-addressing 32-page cap are reachable.
+        self.max_wrbuff_page_used = 0
+        self.max_rdbuff_page_used = 0
 
         self._no_out_reqs_ev = Event()
         self._no_tags_ev = Event()
@@ -302,6 +318,16 @@ class NVMEControllerModel:
         assert buffer_size is not None and buffer_size != 0, "buffer_size cannot be zero if provided."
         assert target_bar in (IuventusBarSelection.CQ_BAR, IuventusBarSelection.WR_BUFF_BAR), "Invalid target_bar for write request."
 
+        # Queue/data isolation invariant: WRBUFF is flat-addressed with the queue (SQ) reserved
+        # at page 0 -- the RTL allocator must never hand out that page, so a peer-write here must
+        # never land below FIRST_DATA_PAGE. Also tracks the deepest page reached (capacity test).
+        if target_bar == IuventusBarSelection.WR_BUFF_BAR:
+            k = (base_addr - self._wrbuff_baddr) // PAGE_SIZE
+            assert k >= FIRST_DATA_PAGE, (
+                f"WRBUFF peer-write landed on page {k} (< FIRST_DATA_PAGE={FIRST_DATA_PAGE}); "
+                "the allocator must never hand out the queue's reserved page 0")
+            self.max_wrbuff_page_used = max(self.max_wrbuff_page_used, k)
+
         # --- Write-combining (WC) emulation ------------------------------------------------
         # Model the NVMe controller writing to the FPGA BARs like a CPU storing to a
         # write-combined memory region: split the write into randomly sized, byte-granular
@@ -370,7 +396,7 @@ class NVMEControllerModel:
             cq_hdr = CQHeader()
             cq_hdr.bar_apper = 26
             cq_hdr.tgt_func = 1
-            cq_hdr.bar_id = target_bar
+            cq_hdr.bar_id = PHYS_BAR_ID[target_bar]
             cq_hdr.addr = phys_addr >> 2
             cq_hdr.dword_count = dword_count
             cq_hdr.req_type = PcieReqType.MWR
@@ -420,6 +446,16 @@ class NVMEControllerModel:
         assert buffer_size is not None and buffer_size != 0, "buffer_size cannot be zero if provided."
         assert target_bar in (IuventusBarSelection.SQ_BAR, IuventusBarSelection.RD_BUFF_BAR), "Invalid target_bar for read request."
 
+        # Queue/data isolation invariant: RDBUFF is flat-addressed with the queue (SQ) reserved
+        # at page 0 -- the RTL allocator must never hand out that page, so a peer-read here must
+        # never land below FIRST_DATA_PAGE. Also tracks the deepest page reached (capacity test).
+        if target_bar == IuventusBarSelection.RD_BUFF_BAR:
+            k = (base_addr - self._rdbuff_baddr) // PAGE_SIZE
+            assert k >= FIRST_DATA_PAGE, (
+                f"RDBUFF peer-read landed on page {k} (< FIRST_DATA_PAGE={FIRST_DATA_PAGE}); "
+                "the allocator must never hand out the queue's reserved page 0")
+            self.max_rdbuff_page_used = max(self.max_rdbuff_page_used, k)
+
         bytes_left = total_bytes
         current_offset = 0
 
@@ -460,7 +496,7 @@ class NVMEControllerModel:
             cq_hdr.tag = current_tag
             cq_hdr.bar_apper = 26
             cq_hdr.tgt_func = 1
-            cq_hdr.bar_id = target_bar
+            cq_hdr.bar_id = PHYS_BAR_ID[target_bar]
             cq_hdr.addr = phys_addr >> 2
             cq_hdr.dword_count = chunk_size // 4
             cq_hdr.req_type = PcieReqType.MRD
@@ -675,13 +711,26 @@ class NVMEControllerModel:
             elif sqe.opcode == SQEOpCodes.WRITE:
                 self._oust_lba_ptr = start_lba
 
+                # WRITEs reserve a bounded MAX_WR_PAGES run (see op_ctrl.vhd's wr_alloc_i), not the
+                # whole data buffer, so more than one can be outstanding and the real RDBUFF page k
+                # need not be FIRST_DATA_PAGE. Resolve it from the real dispatched PRP1 (valid
+                # regardless of this command's size) and hand it (keyed by cmd_id, since this batch
+                # of SQEs was just shuffled above and so is not processed in creation order) to the
+                # model so it can place this command's already-received payload at the real page
+                # the RTL actually used -- mirrors the multi-page READ branch above resolving
+                # WRBUFF's k the same way.
+                k = (sqe.prp1 - self._rdbuff_baddr) // PAGE_SIZE
+                self.wr_placement_callback(sqe.cmd_id, k)
+
                 if byte_count > 2 * PAGE_SIZE:
                     if self.log.isEnabledFor(logging.INFO):
                         self.log.info(f"SQE cmd_id={sqe.cmd_id}: Mult-page write, using PRP List for storage offset {byte_offset}")
 
                     assert sqe.prp1 in self.rdbuff_prpl_data, f"SQE cmd_id={sqe.cmd_id}: PRP1 0x{sqe.prp1:x} not in read buffer PRP list"
                     assert sqe.prp2 != 0, f"SQE cmd_id={sqe.cmd_id}: PRP2 cannot be zero for multi-page write"
-                    assert sqe.prp2 == self.rdbuff_prpl_baddr, f"SQE cmd_id={sqe.cmd_id}: PRP2 0x{sqe.prp2:x} does not point to PRP List ({self.rdbuff_prpl_baddr:x})"
+
+                    expected_prp2 = self.rdbuff_prpl_baddr + k * 8
+                    assert sqe.prp2 == expected_prp2, f"SQE cmd_id={sqe.cmd_id}: PRP2 0x{sqe.prp2:x} does not point to PRP List entry for page {k} (0x{expected_prp2:x})"
 
                     # First page from PRP1
                     await self._dispatch_rd_req(
@@ -690,9 +739,9 @@ class NVMEControllerModel:
                         target_bar=IuventusBarSelection.RD_BUFF_BAR,
                         buffer_size=BUFF_SIZE)
 
-                    # Subsequent pages from PRP List
+                    # Subsequent pages from PRP List, continuing from page k+1 onward
                     rem_bytes = byte_count - PAGE_SIZE
-                    prpl_idx = 1
+                    prpl_idx = k + 1
                     while rem_bytes > 0:
                         prp_entry = self.rdbuff_prpl_data[prpl_idx]
 

@@ -15,9 +15,19 @@ SECT_SIZE = 512
 STORAGE_CAP = 10 # in MB
 STORAGE_CAP_LBAS = (STORAGE_CAP * 1024**2) // SECT_SIZE
 STORAGE_CAP_PAGES = (STORAGE_CAP * 1024**2) // PAGE_SIZE
-BUFF_SIZE = 2**17 # 128 KiB
+# The RDBUFF/WRBUFF transaction buffer is flat-addressed (RTL MEM_PARTITIONING => FALSE): the
+# queue (SQ/CQ) and the data buffer (RDBUFF/WRBUFF) each occupy one flat 512 KiB space, with the
+# queue at page 0 and data at pages FIRST_DATA_PAGE..BUFF_SIZE_PAGES-1.
+BUFF_SIZE = 2**19 # 512 KiB (flat: 1 queue page + 127 data pages)
 BUFF_SIZE_LBAS = BUFF_SIZE // SECT_SIZE
 BUFF_SIZE_PAGES = BUFF_SIZE // PAGE_SIZE
+
+# Hardware cap on a SINGLE command's LBA count: NVME_RD_REQ_LBA_NUM (RTL top-level port) and the
+# SQE's own num_lba field are 8-bit, 0-based, so a single command can never move more than 256
+# LBAs (32 pages) regardless of buffer size. Before this change BUFF_SIZE_LBAS (256) happened to
+# equal this cap exactly (the whole old 32-page buffer *was* one command's max); now that the
+# buffer holds up to DATA_PAGES=127 pages, this must be a separate, buffer-size-independent bound.
+MAX_CMD_LBAS = 256
 
 # Number of NVMe Command Identifiers / outstanding commands, matching the RTL QUEUE_DEPTH
 # generic (op_ctrl / tag manager). Also the number of buffer slots the model tracks.
@@ -25,10 +35,17 @@ QUEUE_DEPTH = 16
 # Bytes of Read/Write buffer per allocatable command region is decided dynamically by the RTL
 # page allocator; SLOT/PAGE granularity is PAGE_SIZE.
 
-# Number of pages a WRITE command reserves in RDBUFF, matching op_ctrl's MAX_WR_PAGES generic.
-# With the default (whole buffer), writes always land at page 0 and stay one-at-a-time; READs
-# always allocate their exact page count and can be multiple-outstanding.
-MAX_WR_PAGES = BUFF_SIZE_PAGES
+# Page 0 of the flat RDBUFF/WRBUFF space is reserved for the queue (SQ/CQ); data pages start at
+# FIRST_DATA_PAGE, matching op_ctrl's IUVENTUS_PAGE_ALLOCATOR RESERVED_PAGES generic.
+FIRST_DATA_PAGE = 1
+# Number of data pages actually available to the allocators (excludes the reserved queue page).
+DATA_PAGES = BUFF_SIZE_PAGES - FIRST_DATA_PAGE
+
+# Number of pages a WRITE command reserves in RDBUFF, matching op_ctrl's MAX_WR_PAGES generic
+# (32: the largest single-command write, since NVME_WR_REQ_FRAME_LNG derives from an 8-bit LBA
+# count, i.e. <=256 LBAs). READs always allocate their exact page count and can be
+# multiple-outstanding.
+MAX_WR_PAGES = 32
 
 # --- Write-combining (WC) emulation for the CQ-side MFB write generator -------------------
 # The NVMe controller model writes CQEs and read-data into the FPGA BARs like a CPU storing to a
@@ -69,11 +86,15 @@ class PageAllocator:
     are allocated as the lowest-address contiguous run of free pages, and freed back individually.
     Used to predict, on the model side, the same buffer page (`k`) the RTL will hand out for each
     command, so that PRP addresses / data placement stay in sync between RTL and model.
+
+    `reserved` mirrors the RTL's RESERVED_PAGES generic: the first `reserved` pages (the queue's
+    page 0 in the flat-addressed buffer) are permanently marked occupied and never handed out.
     """
 
-    def __init__(self, pages):
+    def __init__(self, pages, reserved=0):
         self.pages = pages
-        self.occupancy = [False] * pages
+        self.reserved = reserved
+        self.occupancy = [i < reserved for i in range(pages)]
 
     def alloc(self, npages):
         """Return the lowest page index `k` of a free contiguous run of `npages` pages, marking
@@ -91,17 +112,31 @@ class PageAllocator:
 
     def free(self, k, npages):
         for i in range(k, k + npages):
-            self.occupancy[i] = False
+            if i >= self.reserved:
+                self.occupancy[i] = False
 
     def reset(self):
-        self.occupancy = [False] * self.pages
+        self.occupancy = [i < self.reserved for i in range(self.pages)]
 
 
 class IuventusBarSelection(IntEnum):
+    # Logical selector used by the SSD model to pick a buffer. Kept as four distinct values so the
+    # model logic can still tell SQ from RDBUFF (and CQ from WRBUFF); the *physical* PCIe BAR_ID
+    # driven on the wire is derived via PHYS_BAR_ID below.
     SQ_BAR = 0
     CQ_BAR = 1
     WR_BUFF_BAR = 2
     RD_BUFF_BAR = 3
+
+
+# Flat-addressed 2-BAR peer layout (matches iuventus_bar_map_pkg.vhd): SQ and RDBUFF share BAR0,
+# CQ and WRBUFF share BAR1. The queue vs data datum within a BAR is located by the flat address.
+PHYS_BAR_ID = {
+    IuventusBarSelection.SQ_BAR:      0,
+    IuventusBarSelection.RD_BUFF_BAR: 0,
+    IuventusBarSelection.CQ_BAR:      1,
+    IuventusBarSelection.WR_BUFF_BAR: 1,
+}
 
 
 class IuventusOpStatCode(IntEnum):

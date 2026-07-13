@@ -33,7 +33,7 @@ from cocotbext.ofm.mfb.transaction import MfbTransactionWithMeta, MfbTransaction
 from cocotbext.ofm.ver.generators import random_integers, random_packets
 
 from misc_const import BUFF_SIZE_PAGES, SECT_SIZE, STORAGE_CAP_LBAS, PAGE_SIZE, BUFF_SIZE, \
-    BUFF_SIZE_LBAS, IuventusBuffers, QUEUE_DEPTH
+    BUFF_SIZE_LBAS, IuventusBuffers, QUEUE_DEPTH, DATA_PAGES, FIRST_DATA_PAGE, MAX_CMD_LBAS
 from iuventus_model import IuventusModel
 from nvme_ctrl_model import NVMEControllerModel
 from read_req_driver import ReadReqDriver
@@ -101,7 +101,11 @@ class Testbench:
             rq_mon=self.m_rq_mfb_monitor, rdbuff_prpl_baddr=rdbuff_prpl_baddr,
             rdbuff_prpl_data=rdbuff_prpl_data, wrbuff_prpl_baddr=wrbuff_prpl_baddr,
             wrbuff_prpl_data=wrbuff_prpl_data,
-            cq_drv_callback=self.iuventus_model.proc_pcie_cq_reqs)
+            cq_drv_callback=self.iuventus_model.proc_pcie_cq_reqs,
+            # Lets nvme_ctrl_model tell the model where to place a WRITE's payload once it
+            # discovers the real wr_alloc page k from the actual dispatched SQE's PRP1 (see
+            # IuventusModel.place_wr_payload / _proc_sq_entries's WRITE branch).
+            wr_placement_callback=self.iuventus_model.place_wr_payload)
 
         self.qsize = qsize
         self.cq_baddr = cq_baddr
@@ -741,20 +745,25 @@ async def prepare(dut, qsize=16, strict_rq=True):
     await tb_instance.enable_dut()
     return tb_instance
 
+# Largest LBA count a single command may request: NVME_RD_REQ_LBA_NUM / the SQE's num_lba field
+# are 8-bit hardware caps independent of buffer size (see MAX_CMD_LBAS) -- min() with
+# BUFF_SIZE_LBAS keeps this correct even if the buffer were ever smaller than the field's range.
+MAX_REQ_LBAS = min(BUFF_SIZE_LBAS, MAX_CMD_LBAS)
+
 def req_gen(tb, req_count, size_reduce_factor = 1, rd_en = True, wr_en = True):
     random.seed(cocotb.RANDOM_SEED)
     for _ in range(req_count):
         lba_ptr = random.randint(0, STORAGE_CAP_LBAS-1)
 
         if (random.choice([True, False]) and rd_en) or not wr_en:
-            lba_num = random.randint(1, BUFF_SIZE_LBAS // size_reduce_factor)
+            lba_num = random.randint(1, MAX_REQ_LBAS // size_reduce_factor)
             tb.nvme_rd(lba_ptr, lba_num)
         elif wr_en:
             # NVMe writes are whole-LBA: a command covers ceil(len/SECT_SIZE) LBAs, so the SSD reads
             # that many full sectors from the Read Buffer. Generate LBA-aligned write payloads so the
             # read never runs past the written data into a don't-care tail (which the DUT returns as
             # stale RdBuf bytes but the model as zeros -> a seed-dependent CC scoreboard mismatch).
-            lba_num = random.randint(1, BUFF_SIZE_LBAS // size_reduce_factor)
+            lba_num = random.randint(1, MAX_REQ_LBAS // size_reduce_factor)
             data = bytearray(random.randbytes(lba_num * SECT_SIZE))
             tb.nvme_wr(lba_ptr, data)
 
@@ -873,3 +882,68 @@ async def run_wrap_collision_stress(dut, req_count: int = 600, qsize: int = 2, s
     wraps = tb.nvme_ctrl_model.c_cqes_disp // qsize
     cocotb.log.info(f"WRAP-COLLISION STRESS done: {tb.nvme_ctrl_model.c_cqes_disp} completions, "
                     f"~{wraps} CQ phase wraps, no completion lost (no stall).")
+
+
+@cocotb.test()
+async def run_capacity_test(dut, req_count: int = 60):
+    """Proves the flat-addressed RDBUFF/WRBUFF buffers (MEM_PARTITIONING => FALSE) can reach data
+    pages far beyond the 32-page cap of the pre-flat-addressing (per-channel, 128 KiB partition)
+    buffers.
+
+    A single READ command can request up to 256 LBAs (the NVME_RD_REQ_LBA_NUM 8-bit field's
+    hard cap) = 32 pages, and multiple READs can be legitimately outstanding at once (the dynamic
+    first-fit page allocator, see op_ctrl.vhd). Before this change the whole WRBUFF (32 pages) was
+    the allocator's entire span, so at most one maximal-size READ could ever be outstanding --
+    page indices > 31 were structurally unreachable. With size_reduce_factor=1 (max-size READs)
+    and strict_rq=False (multiple outstanding, as in run_random_read_test), a handful of
+    concurrently-outstanding commands push the allocator's high-water mark well past the old cap;
+    with DATA_PAGES=127 now available, this test asserts pages up to (33..127) get exercised.
+    """
+    OLD_BUFF_SIZE_PAGES = 32  # the pre-flat-addressing (partitioned, 128 KiB per channel) page count
+    tb = await prepare(dut, strict_rq=False)
+    # size_reduce_factor=1: max-size (up to 32-page) READs only -- WRITEs are excluded since this
+    # test's capacity claim is specifically about WRBUFF (the READ-data buffer, rd_alloc); RDBUFF
+    # (the write-data buffer, wr_alloc) is exercised by run_capacity-adjacent write tests instead.
+    req_gen(tb, req_count, size_reduce_factor=1, wr_en=False)
+    await tb.post_test_checks(req_count)
+
+    cocotb.log.info(
+        f"CAPACITY: max WRBUFF (READ-data) page reached = {tb.nvme_ctrl_model.max_wrbuff_page_used} "
+        f"(DATA_PAGES={DATA_PAGES}, pre-flat-addressing cap={OLD_BUFF_SIZE_PAGES})")
+    assert tb.nvme_ctrl_model.max_wrbuff_page_used >= OLD_BUFF_SIZE_PAGES, (
+        "Capacity test did not reach beyond the pre-flat-addressing page cap "
+        f"({OLD_BUFF_SIZE_PAGES}): max page used = {tb.nvme_ctrl_model.max_wrbuff_page_used}. "
+        "Increase req_count or lower size_reduce_factor further."
+    )
+
+
+@cocotb.test()
+async def run_queue_data_isolation_test(dut, req_count: int = 80, size_reduce_factor: int = 4):
+    """Proves that full-data-range RDBUFF/WRBUFF traffic never disturbs the SQ/CQ at flat page 0,
+    and vice-versa.
+
+    In this testbench the SQ/CQ and RDBUFF/WRBUFF live at entirely independent PCIe address
+    ranges (separate *_BADDR registers), so the isolation risk this actually protects against is
+    internal to the RTL's flat-addressed transaction buffer: its page allocator must never hand
+    out the queue's reserved page 0 as a data page (which would, on real hardware, alias a data
+    write/read onto the SQ/CQ physically sharing that buffer). NVMEControllerModel's
+    _dispatch_wr_req/_dispatch_rd_req assert `k >= FIRST_DATA_PAGE` on every single RDBUFF/WRBUFF
+    peer-write/read (see nvme_ctrl_model.py), so a violation fails immediately rather than
+    silently corrupting data. Correct SQE/CQE dispatch and content across the whole mixed
+    read+write workload (verified by the usual CC/RD/OP_STAT scoreboards plus check_doorbels/
+    check_dut_cntrs in post_test_checks) additionally proves the queue itself stayed intact
+    throughout.
+    """
+    tb = await prepare(dut, strict_rq=False)
+    req_gen(tb, req_count, size_reduce_factor=size_reduce_factor)
+    await tb.post_test_checks(req_count)
+
+    # Not vacuous: confirm both buffers' page-0-reservation invariant was actually exercised.
+    assert tb.nvme_ctrl_model.max_wrbuff_page_used >= FIRST_DATA_PAGE, \
+        "WRBUFF (READ-data) was never exercised -- isolation invariant untested"
+    assert tb.nvme_ctrl_model.max_rdbuff_page_used >= FIRST_DATA_PAGE, \
+        "RDBUFF (WRITE-data) was never exercised -- isolation invariant untested"
+    cocotb.log.info(
+        "QUEUE/DATA ISOLATION: SQ/CQ intact after full-range data traffic "
+        f"(max WRBUFF page={tb.nvme_ctrl_model.max_wrbuff_page_used}, "
+        f"max RDBUFF page={tb.nvme_ctrl_model.max_rdbuff_page_used}, page 0 never touched).")

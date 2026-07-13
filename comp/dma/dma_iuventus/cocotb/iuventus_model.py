@@ -59,6 +59,17 @@ class IuventusModel:
         self.outstanding_cmds = deque()
         self.tag_fifo = deque(range(QUEUE_DEPTH))
         self._completed_cmd_ids = set()  # detect duplicate CQE processing
+        # WRITEs (unlike READs) reserve a bounded MAX_WR_PAGES run rather than DATA_PAGES (the
+        # whole buffer), so more than one can legitimately be outstanding at once and the RTL's
+        # first-fit wr_alloc can hand out a page k other than FIRST_DATA_PAGE -- and the model
+        # cannot predict k any more reliably here than it can for READs (see create_nvme_rd_cmd):
+        # it depends on live wr_alloc occupancy this model does not track. Instead, mirror the
+        # READ side's approach exactly: don't predict k at all here. The write's payload is
+        # stashed (keyed by cmd_id, not FIFO order: nvme_ctrl_model._proc_sq_entries shuffles a
+        # batch of freshly-fetched SQEs before processing them, so processing order does not
+        # match creation/ring order) and only placed into _rd_buff_int once nvme_ctrl_model
+        # discovers the *real* k from the actual dispatched SQE's PRP1 -- see place_wr_payload.
+        self._pending_wr_payloads = {}  # cmd_id -> raw payload bytes
         # Per-command snapshot of serialized SQEs, in dispatch (creation) order: (slot, sqe_bytes).
         # The SSD reads SQ slots strictly in sqhdbl-increasing order, i.e. in the same order these
         # were created, so this FIFO lets disp_cc_resps predict the exact SQE content the DUT holds
@@ -117,6 +128,7 @@ class IuventusModel:
         self.m_pcie_rq_exp_out.clear()
         self.tag_fifo = deque(range(QUEUE_DEPTH))
         self._sq_snapshot.clear()
+        self._pending_wr_payloads.clear()
 
         self.c_sqes_disp = 0
         self.c_cqes_proc = 0
@@ -372,6 +384,20 @@ class IuventusModel:
             self.c_pcie_wr_reqs += 1
             self.c_pcie_wr_req_bytes += byte_count
 
+    def place_wr_payload(self, cmd_id, k):
+        """
+        Place the queued WRITE payload for `cmd_id` (see _pending_wr_payloads) into RDBUFF at the
+        real page `k` the RTL's wr_alloc actually granted it. Called from
+        nvme_ctrl_model._proc_sq_entries once it determines k from the *real* dispatched SQE's
+        PRP1, exactly the same way the READ side already resolves its WRBUFF placement (see
+        create_nvme_rd_cmd) -- so, like the READ side, this model never has to predict wr_alloc's
+        live occupancy or admission timing at all. Keyed by cmd_id rather than dispatch-order FIFO
+        because nvme_ctrl_model shuffles the processing order of a batch of freshly-fetched SQEs.
+        """
+        data = self._pending_wr_payloads.pop(cmd_id)
+        wr_offset = k * PAGE_SIZE
+        self._rd_buff_int[wr_offset : wr_offset + len(data)] = data
+
     async def proc_cqes(self):
         """
         Process Completion Queue Entries in the internal CQ memory
@@ -544,6 +570,8 @@ class IuventusModel:
         if transaction.meta + lba_num > STORAGE_CAP_LBAS:
             self.log.info(f"NVMe WR OOR: lba_ptr={transaction.meta} lba_num={lba_num} exceeds storage capacity {STORAGE_CAP_LBAS}. Reporting LBA_OUT_OF_RANGE.")
             self.m_op_stat_exp_out.append((False, IuventusOpStatCode.LBA_OUT_OF_RANGE))
+            # An OOR write never becomes a real SQE (op_ctrl's own "LEAK FIX" frees its wr_alloc
+            # reservation before ever dispatching one), so no payload is queued for it either.
             return
 
         self.c_sqes_disp += 1
@@ -559,6 +587,13 @@ class IuventusModel:
         # See create_nvme_rd_cmd: this cmd_id is being reissued, so it's no longer "completed".
         self._completed_cmd_ids.discard(sqe.cmd_id)
         sqe.mptr = self.mptr
+        # PRP1/PRP2 are masked out in the SQ-read CC scoreboard comparison (see create_nvme_rd_cmd
+        # and disp_cc_resps), so their exact value here is unused for scoreboard purposes -- k=0
+        # is kept for simplicity. The RTL's wr_alloc first-fit allocator decides the real RDBUFF
+        # page k (which need not be FIRST_DATA_PAGE, since WRITEs reserving a bounded MAX_WR_PAGES
+        # run rather than the whole buffer can be multiple-outstanding); this model does not try
+        # to predict it -- the payload is queued instead and placed once nvme_ctrl_model discovers
+        # the real k (see place_wr_payload).
         sqe.prp1 = self.rdbuff_baddr
 
         self.outstanding_cmds.appendleft((sqe.cmd_id, False, lba_num * SECT_SIZE))
@@ -577,5 +612,8 @@ class IuventusModel:
         # See create_nvme_rd_cmd: snapshot before overwriting the live ring slot.
         self._sq_snapshot.append((self.sqtdbl, sqe_ser))
         self._sq_int[self.sqtdbl * SQE_SIZE : (self.sqtdbl + 1) * SQE_SIZE] = sqe_ser
-        self._rd_buff_int[0 : len(transaction.data)] = transaction.data
+        # Stash this write's payload (keyed by cmd_id) for placement into RDBUFF once
+        # nvme_ctrl_model discovers the real page k from the actual dispatched SQE -- see
+        # place_wr_payload.
+        self._pending_wr_payloads[sqe.cmd_id] = transaction.data
         self.disp_dbl_update(self.sqtdbl_baddr)
