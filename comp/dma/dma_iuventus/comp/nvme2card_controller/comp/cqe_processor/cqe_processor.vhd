@@ -42,7 +42,9 @@ entity CQE_PROCESSOR is
         -- =========================================================================================
         DATA_BUFF_RD_CHAN     : out std_logic_vector(0 downto 0);
         DATA_BUFF_RD_DATA     : in  std_logic_vector(DATA_WIDTH-1 downto 0);
-        DATA_BUFF_RD_ADDR     : out std_logic_vector(BUFF_POINTER_WIDTH -1 downto 0);
+        -- One bit wider than BUFF_POINTER_WIDTH: the buffer is flat-addressed (MEM_PARTITIONING
+        -- => FALSE), so this address alone must reach the whole flat space (the CQ stays at page 0).
+        DATA_BUFF_RD_ADDR     : out std_logic_vector(BUFF_POINTER_WIDTH downto 0);
         DATA_BUFF_RD_EN       : out std_logic;
         -- Multiple region support
         DATA_BUFF_RD_DATA_VLD : in  std_logic;
@@ -126,7 +128,9 @@ begin
         buff_data_segm(segm_idx) <= DATA_BUFF_RD_DATA(CQ_ENTRY_WIDTH + segm_idx*CQ_ENTRY_WIDTH -1 downto segm_idx*CQ_ENTRY_WIDTH);
     end generate;
 
-    DATA_BUFF_RD_CHAN(0) <= CQ_BUFF_CHAN;
+    -- The buffer is flat-addressed (MEM_PARTITIONING => FALSE): the channel bit is a don't-care,
+    -- the address alone (CQ at flat page 0) locates the datum.
+    DATA_BUFF_RD_CHAN(0) <= '0';
     DATA_BUFF_RD_EN      <= '1';
 
     -- This machine expects data next clock

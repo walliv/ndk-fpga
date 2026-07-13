@@ -11,6 +11,13 @@ use IEEE.numeric_std.all;
 -- Note:
 
 package iuventus_bar_map_pkg is
+    -- Flat-addressed 2-BAR peer layout: physical PCIe BAR0 carries the SQ (flat page 0) and the
+    -- Read Buffer (flat pages 1..127); physical PCIe BAR1 carries the CQ (flat page 0) and the
+    -- Write Buffer (flat pages 1..127). These constants identify the four buffers with four
+    -- distinct LOGICAL BAR_IDs; the (physical BAR_ID, flat page) pair coming off the PCIe header
+    -- is translated to one of these logical IDs once, close to the PCIe input (see
+    -- nvme_cq_meta_extractor.vhd), so that every existing BAR_ID-indexed counter/route downstream
+    -- keeps working unchanged.
     constant SQ_BAR_ID     : std_logic_vector(2 downto 0) := "000";
     constant CQ_BAR_ID     : std_logic_vector(2 downto 0) := "001";
     constant WRBUFF_BAR_ID : std_logic_vector(2 downto 0) := "010";
@@ -20,11 +27,6 @@ package iuventus_bar_map_pkg is
     constant CQ_BAR_ID_INT     : integer := to_integer(unsigned(CQ_BAR_ID));
     constant WRBUFF_BAR_ID_INT : integer := to_integer(unsigned(WRBUFF_BAR_ID));
     constant RDBUFF_BAR_ID_INT : integer := to_integer(unsigned(RDBUFF_BAR_ID));
-
-    constant SQ_BUFF_CHAN : std_logic := '1';
-    constant CQ_BUFF_CHAN : std_logic := '1';
-    constant WRBUFF_CHAN  : std_logic := '0';
-    constant RDBUFF_CHAN  : std_logic := '0';
 end package;
 
 package body iuventus_bar_map_pkg is

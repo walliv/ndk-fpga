@@ -25,9 +25,7 @@ entity PKT_DISPATCHER is
         MFB_BLOCK_SIZE  : natural := 64;
         MFB_ITEM_WIDTH  : natural := 8;
 
-        BUFF_PTR_WIDTH : natural := 16;
-        -- Mapping of BAR to a memory sector 0 all other BAR indexes go to sector 1
-        WRBUFF_CHAN   : natural := 0
+        BUFF_PTR_WIDTH : natural := 16
         );
     port (
         CLK   : in std_logic;
@@ -38,7 +36,9 @@ entity PKT_DISPATCHER is
         --
         -- The values need to be set until RD_RESP_STAT_UPD asserts
         -- =========================================================================================
-        BUFF_RD_REQ_ADDR : in std_logic_vector(BUFF_PTR_WIDTH -1 downto 0);
+        -- One bit wider than BUFF_PTR_WIDTH: the buffer is flat-addressed (MEM_PARTITIONING =>
+        -- FALSE), so this address alone must reach the whole flat space (WRBUFF at pages 1+).
+        BUFF_RD_REQ_ADDR : in std_logic_vector(BUFF_PTR_WIDTH downto 0);
         BUFF_RD_REQ_SIZE : in std_logic_vector(BUFF_PTR_WIDTH downto 0);
         BUFF_RD_REQ_LAST : in std_logic;
         BUFF_RD_REQ_EN   : in std_logic;
@@ -49,7 +49,7 @@ entity PKT_DISPATCHER is
         -- =========================================================================================
         DATA_BUFF_RD_CHAN     : out std_logic_vector(0 downto 0);
         DATA_BUFF_RD_DATA     : in  std_logic_vector(MFB_REGIONS*MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH-1 downto 0);
-        DATA_BUFF_RD_ADDR     : out std_logic_vector(BUFF_PTR_WIDTH -1 downto 0);
+        DATA_BUFF_RD_ADDR     : out std_logic_vector(BUFF_PTR_WIDTH downto 0);
         DATA_BUFF_RD_EN       : out std_logic;
         -- Multiple region support
         DATA_BUFF_RD_DATA_VLD : in  std_logic;
@@ -139,7 +139,7 @@ begin
     end process;
 
     pkt_dispatch_fsm_output_logic_p : process (all) is
-        variable data_ptr_v    : unsigned(BUFF_PTR_WIDTH -1 downto 0);
+        variable data_ptr_v    : unsigned(BUFF_PTR_WIDTH downto 0);
         variable data_length_v : unsigned(BUFF_RD_REQ_SIZE'range);
     begin
         addr_cntr_nst    <= addr_cntr_pst;
@@ -226,7 +226,9 @@ begin
         end case;
     end process;
 
-    DATA_BUFF_RD_CHAN        <= std_logic_vector(to_unsigned(WRBUFF_CHAN, DATA_BUFF_RD_CHAN'length));
+    -- The buffer is flat-addressed (MEM_PARTITIONING => FALSE): the channel bit is a don't-care,
+    -- the address alone (WRBUFF at pages 1+) locates the datum.
+    DATA_BUFF_RD_CHAN        <= (others => '0');
     WRBUFF_USR_RDS_BYTES     <= BUFF_RD_REQ_SIZE;
 
     -- This process delays the set of all output MFB signals because the data come from the data

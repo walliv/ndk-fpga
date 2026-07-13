@@ -1007,13 +1007,16 @@ begin
     cntr_incrs_sizes(R_WRBUFF_USR_RDS_CNTR_L)           <= std_logic_vector(to_unsigned(1, CNTR_WIDTH));
     cntr_incrs(R_WRBUFF_USR_RD_BYTES_CNTR_L)            <= N2C_BUFF_USR_RDS_INCR;
     cntr_incrs_sizes(R_WRBUFF_USR_RD_BYTES_CNTR_L)      <= std_logic_vector(resize(unsigned(N2C_BUFF_USR_RDS_BYTES), CNTR_WIDTH));
-    cntr_incrs(R_RDBUFF_DISP_RDS_CNTR_L)                <= C2N_BUFF_DISP_RDS_INCR when C2N_BUFF_DISP_RDS_CHAN = RDBUFF_CHAN else '0';
+    -- C2N_BUFF_DISP_RDS_CHAN is a stats-only classification bit (produced by pcie_read_responder
+    -- from a BAR-ID compare, independent of the (now flat-addressed) buffer's channel port):
+    -- '0' => RDBUFF read dispatched, '1' => SQ read dispatched.
+    cntr_incrs(R_RDBUFF_DISP_RDS_CNTR_L)                <= C2N_BUFF_DISP_RDS_INCR when C2N_BUFF_DISP_RDS_CHAN = '0' else '0';
     cntr_incrs_sizes(R_RDBUFF_DISP_RDS_CNTR_L)          <= std_logic_vector(to_unsigned(1, CNTR_WIDTH));
-    cntr_incrs(R_RDBUFF_DISP_RD_BYTES_CNTR_L)           <= C2N_BUFF_DISP_RDS_INCR when C2N_BUFF_DISP_RDS_CHAN = RDBUFF_CHAN else '0';
+    cntr_incrs(R_RDBUFF_DISP_RD_BYTES_CNTR_L)           <= C2N_BUFF_DISP_RDS_INCR when C2N_BUFF_DISP_RDS_CHAN = '0' else '0';
     cntr_incrs_sizes(R_RDBUFF_DISP_RD_BYTES_CNTR_L)     <= std_logic_vector(resize(unsigned(C2N_BUFF_DISP_RDS_BYTES), CNTR_WIDTH));
-    cntr_incrs(R_SQ_DISP_RDS_CNTR_L)                    <= C2N_BUFF_DISP_RDS_INCR when C2N_BUFF_DISP_RDS_CHAN = SQ_BUFF_CHAN else '0';
+    cntr_incrs(R_SQ_DISP_RDS_CNTR_L)                    <= C2N_BUFF_DISP_RDS_INCR when C2N_BUFF_DISP_RDS_CHAN = '1' else '0';
     cntr_incrs_sizes(R_SQ_DISP_RDS_CNTR_L)              <= std_logic_vector(to_unsigned(1, CNTR_WIDTH));
-    cntr_incrs(R_SQ_DISP_RD_BYTES_CNTR_L)               <= C2N_BUFF_DISP_RDS_INCR when C2N_BUFF_DISP_RDS_CHAN = SQ_BUFF_CHAN else '0';
+    cntr_incrs(R_SQ_DISP_RD_BYTES_CNTR_L)               <= C2N_BUFF_DISP_RDS_INCR when C2N_BUFF_DISP_RDS_CHAN = '1' else '0';
     cntr_incrs_sizes(R_SQ_DISP_RD_BYTES_CNTR_L)         <= std_logic_vector(resize(unsigned(C2N_BUFF_DISP_RDS_BYTES), CNTR_WIDTH));
     cntr_incrs(R_NVME_FLUSH_CMD_DISP_CNTR_L)            <= SQES_DISP_INCR when SQES_DISP_TYPE = FLUSH_CMD_OPCODE else '0';
     cntr_incrs_sizes(R_NVME_FLUSH_CMD_DISP_CNTR_L)      <= std_logic_vector(to_unsigned(1, CNTR_WIDTH));

@@ -148,7 +148,7 @@ architecture FULL of DMA_IUVENTUS is
     constant PCIE_TRANS_SIZE_MAX : natural := 2**12;
     -- The maximum value that is allowed for a 2-channel PCIE_TRANS_BUFFER using only a single BRAM
     -- array
-    constant POINTER_WIDTH  : natural := 17;
+    constant POINTER_WIDTH  : natural := 18;
 
     constant UPDATE_DELAY : positive := 2**8;
 
@@ -254,7 +254,9 @@ architecture FULL of DMA_IUVENTUS is
     -- =============================================================================================
     -- Operation control
     -- =============================================================================================
-    signal opc_wrbuff_rd_req_addr : std_logic_vector(POINTER_WIDTH -1 downto 0);
+    -- One bit wider than POINTER_WIDTH: the buffer is flat-addressed (MEM_PARTITIONING =>
+    -- FALSE), so this address alone must reach the whole flat space (WRBUFF at pages 1+).
+    signal opc_wrbuff_rd_req_addr : std_logic_vector(POINTER_WIDTH downto 0);
     signal opc_wrbuff_rd_req_size : std_logic_vector(POINTER_WIDTH downto 0);
     signal opc_wrbuff_rd_req_last : std_logic;
     signal opc_wrbuff_rd_req_en   : std_logic;
@@ -343,8 +345,10 @@ architecture FULL of DMA_IUVENTUS is
     signal ovs_mfb_eof        : std_logic_vector(USR_MFB_REGIONS -1 downto 0);
     signal opc_wr_mfb_dst_rdy : std_logic;
     -- Page (within RDBUFF) reserved for the write currently in flight; becomes the WR_REQ_MFB_META
-    -- fed to the C2N controller's write-data path.
-    signal opc_wr_buff_page_addr : std_logic_vector(POINTER_WIDTH -1 downto 0);
+    -- fed to the C2N controller's write-data path. One bit wider than POINTER_WIDTH: the buffer is
+    -- flat-addressed (MEM_PARTITIONING => FALSE), so this address alone must reach the whole flat
+    -- space (RDBUFF at pages 1+).
+    signal opc_wr_buff_page_addr : std_logic_vector(POINTER_WIDTH downto 0);
 
     -- =============================================================================================
     -- Otput pipe interfaces
@@ -511,10 +515,13 @@ begin
     -- =============================================================================================
     nvme_sw_manager_i : entity work.NVME_SW_MANAGER
     generic map (
-        MI_WIDTH => MI_WIDTH,
-        DEVICE   => DEVICE,
-        MPS      => PCIE_TRANS_SIZE_MAX,
-        MRRS     => PCIE_TRANS_SIZE_MAX)
+        MI_WIDTH     => MI_WIDTH,
+        DEVICE       => DEVICE,
+        MPS          => PCIE_TRANS_SIZE_MAX,
+        MRRS         => PCIE_TRANS_SIZE_MAX,
+        -- Matches the WRBUFF drain packet size cap (2**POINTER_WIDTH, the buffer's per-channel
+        -- span), so N2C_BUFF_USR_RDS_BYTES is wide enough for n2c_buff_usr_rds_bytes.
+        PKT_SIZE_MAX => 2**POINTER_WIDTH)
     port map (
         CLK      => CLK,
         RST      => RST,
@@ -912,9 +919,10 @@ begin
             PCIE_HDR_DST_RDY    => pcie_hdr_dst_rdy,
 
             WR_REQ_MFB_DATA     => fr_lng_mfb_data,
-            -- Byte offset of the page reserved by OP_CTRL's write-side allocator for the frame
-            -- currently in flight (always 0 with the default MAX_WR_PAGES, i.e. whole-buffer
-            -- reservation).
+            -- Flat byte offset of the page reserved by OP_CTRL's write-side allocator for the
+            -- frame currently in flight (always the first data page, i.e. flat page 1, with the
+            -- default MAX_WR_PAGES, i.e. whole-data-buffer reservation; flat page 0 is reserved
+            -- for the queue).
             WR_REQ_MFB_META     => opc_wr_buff_page_addr,
             WR_REQ_MFB_SOF      => fr_lng_mfb_sof,
             WR_REQ_MFB_EOF      => ovs_mfb_eof,

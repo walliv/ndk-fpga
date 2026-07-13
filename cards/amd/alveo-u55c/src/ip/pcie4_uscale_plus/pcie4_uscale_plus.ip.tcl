@@ -154,21 +154,15 @@ if {$PARAMS(DMA_TYPE) == 5} {
         CONFIG.copy_pf0 {false} \
         CONFIG.PF1_DEVICE_ID {c020} \
         CONFIG.PF1_SUBSYSTEM_ID {c020} \
-        CONFIG.pf1_bar0_size {128} \
+        CONFIG.pf1_bar0_size {512} \
         CONFIG.pf1_bar0_64bit {false} \
         CONFIG.pf1_bar0_scale {Kilobytes} \
         CONFIG.pf1_bar1_enabled {true} \
-        CONFIG.pf1_bar1_size {128} \
+        CONFIG.pf1_bar1_size {512} \
         CONFIG.pf1_bar1_64bit {false} \
         CONFIG.pf1_bar1_scale {Kilobytes} \
-        CONFIG.pf1_bar2_enabled {true} \
-        CONFIG.pf1_bar2_size {128} \
-        CONFIG.pf1_bar2_64bit {false} \
-        CONFIG.pf1_bar2_scale {Kilobytes} \
-        CONFIG.pf1_bar3_enabled {true} \
-        CONFIG.pf1_bar3_size {128} \
-        CONFIG.pf1_bar3_64bit {false} \
-        CONFIG.pf1_bar3_scale {Kilobytes} \
+        CONFIG.pf1_bar2_enabled {false} \
+        CONFIG.pf1_bar3_enabled {false} \
         CONFIG.pf1_base_class_menu {Memory_controller} \
         CONFIG.pf1_class_code_interface {00} \
         CONFIG.pf1_sub_class_interface_menu {Other_memory_controller} \

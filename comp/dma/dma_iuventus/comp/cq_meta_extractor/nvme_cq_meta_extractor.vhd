@@ -115,6 +115,12 @@ architecture FULL of NVME_CQ_META_EXTRACTOR is
     signal pcie_hdr_dw_cnt       : slv_array_t(MFB_REGIONS - 1 downto 0)(10 downto 0);
     signal pcie_hdr_byte_cnt     : slv_array_t(MFB_REGIONS - 1 downto 0)(12 downto 0);
     signal pcie_hdr_bar_id       : slv_array_t(MFB_REGIONS - 1 downto 0)(2 downto 0);
+    -- Physical (physical BAR0/BAR1) BAR_ID translated to one of the four LOGICAL BAR_IDs (see
+    -- iuventus_bar_map_pkg.vhd): physical BAR0 carries SQ (flat page 0) and RDBUFF (flat pages
+    -- 1+); physical BAR1 carries CQ (flat page 0) and WRBUFF (flat pages 1+). Used everywhere a
+    -- BAR_ID needs to distinguish all four buffers (MVB_DATA_BAR_ID, the per-BAR PCIe request
+    -- counters and the drop/route decision below).
+    signal pcie_hdr_bar_id_log   : slv_array_t(MFB_REGIONS - 1 downto 0)(2 downto 0);
     signal pcie_hdr_req_type     : slv_array_t(MFB_REGIONS - 1 downto 0)(3 downto 0);
     signal pcie_is_read_req      : std_logic_vector(MFB_REGIONS -1 downto 0);
     signal pcie_is_write_req     : std_logic_vector(MFB_REGIONS -1 downto 0);
@@ -270,6 +276,26 @@ begin
 
         pcie_addr_masked(i) <= (pcie_hdr_addr(i)(63 downto 2) & byte_shift(i)) and pcie_addr_mask(i);
 
+        -- Translate (physical BAR_ID, flat page) -> LOGICAL BAR_ID. Page 0 (masked address bits
+        -- [POINTER_WIDTH:12] all zero) is the queue (SQ on physical BAR0, CQ on physical BAR1);
+        -- pages >= 1 are the data buffer (RDBUFF on physical BAR0, WRBUFF on physical BAR1).
+        bar_id_translate_p : process (all) is
+        begin
+            if (pcie_hdr_bar_id(i) = "000") then
+                if (unsigned(pcie_addr_masked(i)(POINTER_WIDTH downto 12)) = 0) then
+                    pcie_hdr_bar_id_log(i) <= SQ_BAR_ID;
+                else
+                    pcie_hdr_bar_id_log(i) <= RDBUFF_BAR_ID;
+                end if;
+            else
+                if (unsigned(pcie_addr_masked(i)(POINTER_WIDTH downto 12)) = 0) then
+                    pcie_hdr_bar_id_log(i) <= CQ_BAR_ID;
+                else
+                    pcie_hdr_bar_id_log(i) <= WRBUFF_BAR_ID;
+                end if;
+            end if;
+        end process;
+
         byte_en_decoder_i : entity work.PCIE_BYTE_EN_DECODER
             port map (
                 FBE_IN  => pcie_hdr_fbe(i),
@@ -307,11 +333,11 @@ begin
         -- transaction only contains the header. Also drop every transaction that heads to BAR 0
         -- since for this, only a header is needed.
         drop_enable(i)  <= '1' when pcie_is_read_req(i) = '1'
-                            or pcie_hdr_bar_id(i) = SQ_BAR_ID
-                            or pcie_hdr_bar_id(i) = RDBUFF_BAR_ID 
+                            or pcie_hdr_bar_id_log(i) = SQ_BAR_ID
+                            or pcie_hdr_bar_id_log(i) = RDBUFF_BAR_ID
                             else '0';
 
-        MVB_DATA_BAR_ID(i)   <= pcie_hdr_bar_id(i);
+        MVB_DATA_BAR_ID(i)   <= pcie_hdr_bar_id_log(i);
         MVB_DATA_ADDR(i)     <= pcie_addr_masked(i);
         MVB_DATA_CQ_HDR(i)   <= pcie_hdr_data_int(i);
         MVB_DATA_BYTE_CNT(i) <= pcie_hdr_byte_cnt(i);
@@ -381,11 +407,11 @@ begin
 
                     if (PCIE_MFB_SRC_RDY = '1' and PCIE_MFB_DST_RDY = '1') then
 
-                        v_sel0_rd := (PCIE_MFB_SOF(0) = '1' and unsigned(pcie_hdr_bar_id(0)) = bar_idx and  pcie_is_read_req(0)= '1');
-                        v_sel1_rd := (PCIE_MFB_SOF(1) = '1' and unsigned(pcie_hdr_bar_id(1)) = bar_idx and  pcie_is_read_req(1)= '1');
-                        
-                        v_sel0_wr := (PCIE_MFB_SOF(0) = '1' and unsigned(pcie_hdr_bar_id(0)) = bar_idx and  pcie_is_write_req(0)= '1');
-                        v_sel1_wr := (PCIE_MFB_SOF(1) = '1' and unsigned(pcie_hdr_bar_id(1)) = bar_idx and  pcie_is_write_req(1)= '1');
+                        v_sel0_rd := (PCIE_MFB_SOF(0) = '1' and unsigned(pcie_hdr_bar_id_log(0)) = bar_idx and  pcie_is_read_req(0)= '1');
+                        v_sel1_rd := (PCIE_MFB_SOF(1) = '1' and unsigned(pcie_hdr_bar_id_log(1)) = bar_idx and  pcie_is_read_req(1)= '1');
+
+                        v_sel0_wr := (PCIE_MFB_SOF(0) = '1' and unsigned(pcie_hdr_bar_id_log(0)) = bar_idx and  pcie_is_write_req(0)= '1');
+                        v_sel1_wr := (PCIE_MFB_SOF(1) = '1' and unsigned(pcie_hdr_bar_id_log(1)) = bar_idx and  pcie_is_write_req(1)= '1');
 
                         -- Handle Read Increments
                         if v_sel0_rd and v_sel1_rd then
@@ -421,21 +447,24 @@ begin
     PCIE_MFB_DST_RDY <= drop_rx_dst_rdy and MVB_DST_RDY;
 
     -- select only the part of the address which indexes DMA channels
+    -- NOTE: uses the LOGICAL bar_id (see pcie_hdr_bar_id_log above) so that downstream consumers
+    -- of META_BAR_ID (carried via pcie_mfb_meta_int -> USR_MFB_META) can keep telling all four
+    -- buffers apart, even though only two physical BAR_IDs arrive on the wire.
     bar_id_extract_p : process (all) is
     begin
         bar_id_int <= bar_id_stored;
 
         if (PCIE_MFB_SRC_RDY = '1') then
             if (PCIE_MFB_SOF = "11") then
-                bar_id_int(0) <= pcie_hdr_bar_id(0);
-                bar_id_int(1) <= pcie_hdr_bar_id(1);
+                bar_id_int(0) <= pcie_hdr_bar_id_log(0);
+                bar_id_int(1) <= pcie_hdr_bar_id_log(1);
 
             elsif (PCIE_MFB_SOF = "01") then
-                bar_id_int(0) <= pcie_hdr_bar_id(0);
-                bar_id_int(1) <= pcie_hdr_bar_id(0);
+                bar_id_int(0) <= pcie_hdr_bar_id_log(0);
+                bar_id_int(1) <= pcie_hdr_bar_id_log(0);
 
             elsif (PCIE_MFB_SOF = "10") then
-                bar_id_int(1) <= pcie_hdr_bar_id(1);
+                bar_id_int(1) <= pcie_hdr_bar_id_log(1);
             end if;
         end if;
     end process;
@@ -446,16 +475,16 @@ begin
         if (rising_edge(CLK)) then
             if (PCIE_MFB_SRC_RDY = '1') then
                 if (PCIE_MFB_SOF = "11") then
-                    bar_id_stored(0) <= pcie_hdr_bar_id(1);
-                    bar_id_stored(1) <= pcie_hdr_bar_id(1);
+                    bar_id_stored(0) <= pcie_hdr_bar_id_log(1);
+                    bar_id_stored(1) <= pcie_hdr_bar_id_log(1);
 
                 elsif (PCIE_MFB_SOF = "01") then
-                    bar_id_stored(0) <= pcie_hdr_bar_id(0);
-                    bar_id_stored(1) <= pcie_hdr_bar_id(0);
+                    bar_id_stored(0) <= pcie_hdr_bar_id_log(0);
+                    bar_id_stored(1) <= pcie_hdr_bar_id_log(0);
 
                 elsif (PCIE_MFB_SOF = "10") then
-                    bar_id_stored(0) <= pcie_hdr_bar_id(1);
-                    bar_id_stored(1) <= pcie_hdr_bar_id(1);
+                    bar_id_stored(0) <= pcie_hdr_bar_id_log(1);
+                    bar_id_stored(1) <= pcie_hdr_bar_id_log(1);
                 end if;
             end if;
         end if;

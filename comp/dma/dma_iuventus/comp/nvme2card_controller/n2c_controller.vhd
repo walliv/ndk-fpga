@@ -59,8 +59,10 @@ entity N2C_CONTROLLER is
         CQP_STOP_REQ_ACK  : out std_logic;
         DBL_MASK          : in std_logic_vector(15 downto 0);
 
-        -- The requested data that should be read from the write buffer
-        BUFF_RD_REQ_ADDR : in std_logic_vector(BUFF_PTR_WIDTH -1 downto 0);
+        -- The requested data that should be read from the write buffer. One bit wider than
+        -- BUFF_PTR_WIDTH: the buffer is flat-addressed (MEM_PARTITIONING => FALSE), so this
+        -- address alone must reach the whole flat space (WRBUFF at pages 1+).
+        BUFF_RD_REQ_ADDR : in std_logic_vector(BUFF_PTR_WIDTH downto 0);
         BUFF_RD_REQ_SIZE : in std_logic_vector(BUFF_PTR_WIDTH downto 0);
         BUFF_RD_REQ_LAST : in std_logic;
         BUFF_RD_REQ_EN   : in std_logic;
@@ -116,7 +118,6 @@ architecture FULL of N2C_CONTROLLER is
     -- (local variables, upref 0) and drive the whole output signal at once.
     function build_pcie_mfb_meta(
         ext_mfb_meta     : slv_array_t;
-        i_chan_sel        : std_logic_vector;
         i_meta_be_o       : natural;
         i_meta_be_w       : natural;
         i_meta_pcie_addr_o : natural;
@@ -129,7 +130,10 @@ architecture FULL of N2C_CONTROLLER is
         for i in 0 to N-1 loop
             result((i+1)*ELEM_W-1 downto i*ELEM_W) :=
                 ext_mfb_meta(i)(i_meta_be_o + i_meta_be_w - 1 downto i_meta_be_o) &
-                i_chan_sel(i) &
+                -- The buffer is flat-addressed (MEM_PARTITIONING => FALSE): the write META
+                -- channel bit is a don't-care, the address alone (CQ at flat page 0, WRBUFF at
+                -- flat pages 1+) locates the datum.
+                '0' &
                 ext_mfb_meta(i)(i_meta_pcie_addr_o + i_meta_pcie_addr_w - 1 downto i_meta_pcie_addr_o + 2) &
                 '0';
         end loop;
@@ -138,7 +142,9 @@ architecture FULL of N2C_CONTROLLER is
 
     constant USR_MFB_LENGTH : natural := USR_MFB_REGIONS * USR_MFB_REGION_SIZE * USR_MFB_BLOCK_SIZE * USR_MFB_ITEM_WIDTH;
 
-    -- Select between Completion Queue (set to 1) or Write Buffer (set to 0)
+    -- Stats-only classification (speed meter): distinguishes Completion Queue (set to 1) traffic
+    -- from Write Buffer (set to 0) traffic. Independent of the buffer's own (now don't-care, see
+    -- build_pcie_mfb_meta) write-meta channel bit.
     signal chan_sel : std_logic_vector(EXT_MFB_REGIONS -1 downto 0);
     -- nvc workaround: flat std_logic_vector avoids slv_array_t element access bug in nvc 1.21.0
     signal pcie_mfb_meta_parsed : std_logic_vector(EXT_MFB_REGIONS*(META_BE_W+META_PCIE_ADDR_W) -1 downto 0);
@@ -148,7 +154,7 @@ architecture FULL of N2C_CONTROLLER is
     -- =============================================================================================
     signal cqp_buff_chan_b     : std_logic_vector(0 downto 0);
     signal cqp_buff_data_b     : std_logic_vector(USR_MFB_LENGTH -1 downto 0);
-    signal cqp_buff_addr_b     : std_logic_vector(BUFF_PTR_WIDTH -1 downto 0);
+    signal cqp_buff_addr_b     : std_logic_vector(BUFF_PTR_WIDTH downto 0);
     signal cqp_buff_en_b       : std_logic;
     signal cqp_buff_data_vld_b : std_logic;
 
@@ -157,7 +163,7 @@ architecture FULL of N2C_CONTROLLER is
     -- =============================================================================================
     signal rdr_buff_chan_a     : std_logic_vector(0 downto 0);
     signal rdr_buff_data_a     : std_logic_vector(USR_MFB_LENGTH -1 downto 0);
-    signal rdr_buff_addr_a     : std_logic_vector(BUFF_PTR_WIDTH -1 downto 0);
+    signal rdr_buff_addr_a     : std_logic_vector(BUFF_PTR_WIDTH downto 0);
     signal rdr_buff_en_a       : std_logic;
     signal rdr_buff_data_vld_a : std_logic;
 
@@ -223,11 +229,11 @@ begin
     -- Parsing of the metadata signal from the metadata extractor since it has a different layout
     -- than the input signal to the PCIE_TRANS_BUFFER
     meta_ext_mfb_meta_g : for rgn_idx in (EXT_MFB_REGIONS -1) downto 0 generate
-        chan_sel(rgn_idx) <= WRBUFF_CHAN when EXT_MFB_META(rgn_idx)(META_BAR_ID) = WRBUFF_BAR_ID else CQ_BUFF_CHAN;
+        chan_sel(rgn_idx) <= '0' when EXT_MFB_META(rgn_idx)(META_BAR_ID) = WRBUFF_BAR_ID else '1';
     end generate;
 
     pcie_mfb_meta_parsed <= build_pcie_mfb_meta(
-        EXT_MFB_META, chan_sel,
+        EXT_MFB_META,
         META_BE_O, META_BE_W, META_PCIE_ADDR_O, META_PCIE_ADDR_W);
 
     cq_wr_buffer_i : entity work.TX_DMA_PCIE_TRANS_BUFFER
@@ -241,6 +247,8 @@ begin
             MFB_ITEM_WIDTH  => EXT_MFB_ITEM_WIDTH,
 
             POINTER_WIDTH   => BUFF_PTR_WIDTH,
+            -- Flat addressing: the CQ lives at page 0, WRBUFF at pages 1+, of one flat space.
+            MEM_PARTITIONING => FALSE,
 
             SPLIT_READ_PORTS       => TRUE,
             READ_BARREL_SHIFTER_EN => (FALSE, TRUE))

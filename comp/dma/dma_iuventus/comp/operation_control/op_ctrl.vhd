@@ -16,14 +16,20 @@ use work.nvme_meta_pack.all;
 
 entity OP_CTRL is
     generic (
+        -- The size of a pointer to one channel of the (flat-addressed, MEM_PARTITIONING =>
+        -- FALSE) RDBUFF/WRBUFF transaction buffer; the buffer's actual flat span is
+        -- 2**(BUFF_PTR_WIDTH+1) bytes (see FLAT_PTR_WIDTH/BUFF_PAGES below).
         BUFF_PTR_WIDTH : positive := 17;
         -- Amount of tags/Command Identifiers available for outstanding NVMe commands
         QUEUE_DEPTH    : positive := 16;
         -- Number of pages a WRITE command reserves in the RDBUFF at frame start (its actual
-        -- size is only known at EOF, once the frame length has been measured). The default
-        -- reserves the whole buffer, so k is always 0 and writes stay one-at-a-time -- this
-        -- matches the historical (pre-allocator) behavior. READs, whose size is known at
-        -- admission, always allocate their exact page count and can be multiple-outstanding.
+        -- size is only known at EOF, once the frame length has been measured). 32 pages covers
+        -- the largest write a single NVMe command can carry (NVME_WR_REQ_FRAME_LNG derives from
+        -- an 8-bit LBA count, i.e. <=256 LBAs = 32 pages), and keeping the reservation this small
+        -- (rather than the whole DATA_PAGES=127-page buffer) bounds the page allocator's
+        -- feasibility-window depth, which is on this design's critical timing path. READs, whose
+        -- size is known at admission, always allocate their exact page count and can be
+        -- multiple-outstanding.
         MAX_WR_PAGES   : positive := 32;
         DEVICE         : string  := "ULTRASCALE"
     );
@@ -71,7 +77,9 @@ entity OP_CTRL is
         -- =========================================================================================
         -- Read interface to write buffer when NVMe read command is finished
         -- =========================================================================================
-        WRBUFF_RD_REQ_ADDR : out std_logic_vector(BUFF_PTR_WIDTH -1 downto 0);
+        -- One bit wider than BUFF_PTR_WIDTH: the buffer is flat-addressed (MEM_PARTITIONING =>
+        -- FALSE), so this address alone must reach the whole flat space (WRBUFF at pages 1+).
+        WRBUFF_RD_REQ_ADDR : out std_logic_vector(BUFF_PTR_WIDTH downto 0);
         WRBUFF_RD_REQ_SIZE : out std_logic_vector(BUFF_PTR_WIDTH downto 0);
         WRBUFF_RD_REQ_LAST : out std_logic;
         WRBUFF_RD_REQ_EN   : out std_logic;
@@ -120,10 +128,13 @@ entity OP_CTRL is
 
         -- =========================================================================================
         -- Page (within RDBUFF) reserved for the write currently in flight, held constant for the
-        -- whole frame; multiply by 4096 to get the byte offset. With the default MAX_WR_PAGES this
-        -- is always 0.
+        -- whole frame; multiply by 4096 to get the byte offset. wr_alloc's first-fit allocator
+        -- picks this page dynamically (never the queue's reserved page 0), so with more than one
+        -- write's MAX_WR_PAGES reservation outstanding at once it need not be FIRST_DATA_PAGE. One
+        -- bit wider than BUFF_PTR_WIDTH: the buffer is flat-addressed (MEM_PARTITIONING => FALSE),
+        -- so this address alone must reach the whole flat space.
         -- =========================================================================================
-        WR_BUFF_PAGE_ADDR : out std_logic_vector(BUFF_PTR_WIDTH -1 downto 0)
+        WR_BUFF_PAGE_ADDR : out std_logic_vector(BUFF_PTR_WIDTH downto 0)
     );
 end entity;
 
@@ -135,15 +146,25 @@ architecture FULL of OP_CTRL is
     -- =============================================================================================
     -- Buffer/page geometry
     --
-    -- Both RDBUFF and WRBUFF are 2**BUFF_PTR_WIDTH bytes large, split into 4096B pages.
+    -- The buffer is flat-addressed (MEM_PARTITIONING => FALSE): the queue (SQ/CQ) and the data
+    -- buffer (RDBUFF/WRBUFF) share ONE flat 2**(BUFF_PTR_WIDTH+1)-byte space (BUFF_PTR_WIDTH is
+    -- the per-channel POINTER_WIDTH of the buffer; +1 folds the 2 channels into one flat space),
+    -- split into 4096B pages. Page 0 is reserved for the queue; data pages are
+    -- FIRST_DATA_PAGE..BUFF_PAGES-1.
     -- =============================================================================================
-    constant BUFF_PAGES    : positive := 2**(BUFF_PTR_WIDTH -12);
-    constant PAGE_IDX_W    : natural  := log2(BUFF_PAGES);
+    constant FLAT_PTR_WIDTH  : positive := BUFF_PTR_WIDTH + 1;
+    constant BUFF_PAGES      : positive := 2**(FLAT_PTR_WIDTH -12);
+    constant PAGE_IDX_W      : natural  := log2(BUFF_PAGES);
     -- Width of a page-count value (0 to BUFF_PAGES, inclusive)
-    constant NPAGES_W      : natural  := PAGE_IDX_W + 1;
+    constant NPAGES_W        : natural  := PAGE_IDX_W + 1;
     -- Bits of byte-address within one page (log2(4096) = 12, always, by construction above)
-    constant PAGE_OFFSET_W : natural  := BUFF_PTR_WIDTH - PAGE_IDX_W;
-    constant CTX_IDX_W     : natural  := log2(QUEUE_DEPTH);
+    constant PAGE_OFFSET_W   : natural  := FLAT_PTR_WIDTH - PAGE_IDX_W;
+    constant CTX_IDX_W       : natural  := log2(QUEUE_DEPTH);
+    -- The queue (SQ/CQ) lives at flat page 0; data pages (allocated to READ/WRITE commands) start
+    -- at page FIRST_DATA_PAGE.
+    constant FIRST_DATA_PAGE : natural  := 1;
+    -- Number of data pages actually available to the allocators (excludes the reserved queue page)
+    constant DATA_PAGES      : natural  := BUFF_PAGES - FIRST_DATA_PAGE;
 
     -- =============================================================================================
     -- Per-CID context, written when a command is dispatched (DISP_CMD_ID_VLD) and consumed when it
@@ -215,13 +236,18 @@ architecture FULL of OP_CTRL is
 
     -- =============================================================================================
     -- Page allocators: rd_alloc hands out WRBUFF pages to READ commands (exact size, so reads can
-    -- be multiple-outstanding); wr_alloc hands out RDBUFF pages to WRITE commands (always
-    -- MAX_WR_PAGES, so k is constant and writes stay serialized by construction).
+    -- be multiple-outstanding); wr_alloc hands out RDBUFF pages to WRITE commands (always a fixed
+    -- MAX_WR_PAGES run, but WRITEs can still be multiple-outstanding -- see the FSM comment near
+    -- op_state_reg_p -- so k varies across concurrently-reserved writes).
     -- =============================================================================================
     signal rd_alloc_req_npages : std_logic_vector(NPAGES_W -1 downto 0);
     signal rd_alloc_req_vld    : std_logic;
     signal rd_alloc_grant      : std_logic;
     signal rd_alloc_page       : std_logic_vector(PAGE_IDX_W -1 downto 0);
+    -- '1' once rd_alloc_grant/rd_alloc_page (pipelined) have settled for the request currently
+    -- held on rd_alloc_req_npages; gates C2N_TRIGG_DISP/the commit below (see IUVENTUS_PAGE_
+    -- ALLOCATOR's ALLOC_DONE port).
+    signal rd_alloc_done       : std_logic;
     -- Final FREE_* driven into rd_alloc_i, merged (below, near its instantiation) from the two
     -- independent sources that can free a READ's pages -- see cqe_rd_free_* and drain_rd_free_*.
     signal rd_free_page        : std_logic_vector(PAGE_IDX_W -1 downto 0);
@@ -245,6 +271,10 @@ architecture FULL of OP_CTRL is
     signal wr_alloc_req_vld    : std_logic;
     signal wr_alloc_grant      : std_logic;
     signal wr_alloc_page       : std_logic_vector(PAGE_IDX_W -1 downto 0);
+    -- '1' once wr_alloc_grant/wr_alloc_page (pipelined) have settled; since wr_alloc_req_npages
+    -- is constant (always MAX_WR_PAGES), this is high in steady state and only drops for a few
+    -- cycles right after an occupancy change -- see IUVENTUS_PAGE_ALLOCATOR's ALLOC_DONE port.
+    signal wr_alloc_done       : std_logic;
     signal wr_free_page        : std_logic_vector(PAGE_IDX_W -1 downto 0);
     signal wr_free_npages      : std_logic_vector(NPAGES_W -1 downto 0);
     signal wr_free_vld         : std_logic;
@@ -272,15 +302,17 @@ architecture FULL of OP_CTRL is
     signal wrbuff_drain_state_pst : wrbuff_drain_state_t := S_DRAIN_REQ;
     signal wrbuff_drain_state_nst : wrbuff_drain_state_t;
 
-    signal wrbuff_rd_req_addr_piped : std_logic_vector(BUFF_PTR_WIDTH -1 downto 0);
+    -- One bit wider than BUFF_PTR_WIDTH: the buffer is flat-addressed (MEM_PARTITIONING =>
+    -- FALSE), so this address alone must reach the whole flat space (WRBUFF at pages 1+).
+    signal wrbuff_rd_req_addr_piped : std_logic_vector(BUFF_PTR_WIDTH downto 0);
     signal wrbuff_rd_req_size_piped : std_logic_vector(BUFF_PTR_WIDTH downto 0);
     signal wrbuff_rd_req_last_piped : std_logic;
     signal wrbuff_rd_req_en_piped   : std_logic;
     signal wrbuff_rd_req_ack_piped  : std_logic;
-    signal pipe_out_data            : std_logic_vector(2*BUFF_PTR_WIDTH+2 -1 downto 0);
+    signal pipe_out_data            : std_logic_vector(2*BUFF_PTR_WIDTH+3 -1 downto 0);
 begin
-    assert (MAX_WR_PAGES <= BUFF_PAGES)
-        report "OP_CTRL: MAX_WR_PAGES cannot exceed the number of pages in the buffer"
+    assert (MAX_WR_PAGES <= DATA_PAGES)
+        report "OP_CTRL: MAX_WR_PAGES cannot exceed the number of data pages in the buffer (page 0 is reserved for the queue)"
         severity FAILURE;
 
     -- =============================================================================================
@@ -308,8 +340,10 @@ begin
                     CMD_DISP_RST  <= '1';
 
                 elsif (STOP_REQ_VLD = '1'
-                       and rd_pages_free = std_logic_vector(to_unsigned(BUFF_PAGES, NPAGES_W))
-                       and wr_pages_free = std_logic_vector(to_unsigned(BUFF_PAGES, NPAGES_W))) then
+                       -- The reserved queue page (page 0) is permanently "occupied" in both
+                       -- allocators, so "no command outstanding" is DATA_PAGES free, not BUFF_PAGES.
+                       and rd_pages_free = std_logic_vector(to_unsigned(DATA_PAGES, NPAGES_W))
+                       and wr_pages_free = std_logic_vector(to_unsigned(DATA_PAGES, NPAGES_W))) then
                     comp_enabled  <= '0';
                     STOP_REQ_ACK  <= '1';
                 end if;
@@ -322,8 +356,10 @@ begin
     --
     -- Issue and completion are decoupled: a READ is admitted, allocated a page and dispatched, and
     -- the FSM returns straight to S_IDLE without waiting for its CQE, so multiple READs can be
-    -- outstanding at once. WRITEs still reserve MAX_WR_PAGES (the whole buffer by default) at SOF,
-    -- so they remain one-at-a-time by construction.
+    -- outstanding at once. WRITEs work the same way: a write's MAX_WR_PAGES reservation is made at
+    -- SOF admission and the FSM returns to S_IDLE once its SQE is dispatched, well before its CQE
+    -- arrives, so -- as long as wr_alloc still has MAX_WR_PAGES free -- more than one WRITE can be
+    -- outstanding at once too (each holding a different k, freed independently at its own CQE).
     -- ===============================================================================================
     op_state_reg_p : process (CLK)
     begin
@@ -479,11 +515,12 @@ begin
                         NVME_RD_REQ_RDY <= '1';
                         -- Only accept a new write frame if its whole reservation fits; the read
                         -- side is gated later (in S_RD_REQ_PREPARE) since its size (and hence page
-                        -- count) is not known until S_OP_CHECK/lba_num_reg are settled.
-                        WR_MFB_DST_RDY  <= wr_alloc_grant;
+                        -- count) is not known until S_OP_CHECK/lba_num_reg are settled. wr_alloc_done
+                        -- additionally gates this on the (pipelined) grant having actually settled.
+                        WR_MFB_DST_RDY  <= wr_alloc_grant and wr_alloc_done;
 
                         -- Process write request with higher priority than read request
-                        if (NVME_WR_REQ_START = '1' and wr_alloc_grant = '1'
+                        if (NVME_WR_REQ_START = '1' and wr_alloc_grant = '1' and wr_alloc_done = '1'
                             and (NVME_RD_REQ_VLD = '0' or (NVME_RD_REQ_VLD = '1' and op_type_reg = RD_CMD_OPCODE))) then
                             start_lba_ptr_next <= NVME_WR_REQ_LBA_PTR;
                             op_type_next       <= WR_CMD_OPCODE;
@@ -551,11 +588,12 @@ begin
                         -- abort returns straight to S_IDLE without ever reaching S_WR_REQ_PREPARE,
                         -- no CID/ctx_reg entry is assigned and no SQE is dispatched, so no CQE will
                         -- ever arrive to free these pages via the completion process below. Without
-                        -- this explicit free, the reservation is permanently lost: with the default
-                        -- MAX_WR_PAGES = BUFF_PAGES, wr_pages_free sticks at 0 forever, wr_alloc_grant
-                        -- never asserts again, and WR_MFB_DST_RDY (gated on wr_alloc_grant in S_IDLE)
-                        -- stays low forever -- a permanent write-side wedge after exactly one
-                        -- out-of-range write.
+                        -- this explicit free, the reservation is permanently lost: each OOR write
+                        -- leaks another MAX_WR_PAGES pages, and once enough of them accumulate (as
+                        -- little as one, with the historical MAX_WR_PAGES=DATA_PAGES whole-buffer
+                        -- reservation) wr_alloc_grant never asserts again and WR_MFB_DST_RDY (gated
+                        -- on wr_alloc_grant in S_IDLE) stays low forever -- a permanent write-side
+                        -- wedge.
                         wr_free_page   <= k_wr_reg;
                         wr_free_npages <= std_logic_vector(to_unsigned(MAX_WR_PAGES, NPAGES_W));
                         wr_free_vld    <= '1';
@@ -616,8 +654,9 @@ begin
                 WR_MFB_DST_RDY <= '0';
 
                 rd_alloc_req_npages <= std_logic_vector(npages_v);
-                -- Only actually trigger the dispatch once the allocator can grant the needed pages
-                C2N_TRIGG_DISP <= rd_alloc_grant;
+                -- Only actually trigger the dispatch once the allocator can grant the needed
+                -- pages *and* that (pipelined) grant has settled for this request (rd_alloc_done).
+                C2N_TRIGG_DISP <= rd_alloc_grant and rd_alloc_done;
 
                 C2N_PRP_ENTRY_1 <= page_addr(WRBUFF_BADDR, rd_alloc_page);
 
@@ -633,7 +672,7 @@ begin
                     C2N_PRP_ENTRY_2 <= prpl_entry_addr(WRBUFF_PRP_LIST_PTR, rd_alloc_page);
                 end if;
 
-                if (rd_alloc_grant = '1' and C2N_RDY_FOR_DISP = '1') then
+                if (rd_alloc_grant = '1' and rd_alloc_done = '1' and C2N_RDY_FOR_DISP = '1') then
                     op_state_nst <= S_IDLE;
 
                     rd_alloc_req_vld <= '1';
@@ -684,7 +723,10 @@ begin
 
     rd_alloc_i : entity work.IUVENTUS_PAGE_ALLOCATOR
         generic map (
-            PAGES => BUFF_PAGES)
+            PAGES           => BUFF_PAGES,
+            -- WRBUFF's flat page 0 is reserved for the CQ.
+            RESERVED_PAGES  => FIRST_DATA_PAGE,
+            MAX_ALLOC_PAGES => MAX_WR_PAGES)
         port map (
             CLK => CLK,
             RST => RST,
@@ -693,6 +735,7 @@ begin
             ALLOC_REQ_VLD    => rd_alloc_req_vld,
             ALLOC_GRANT      => rd_alloc_grant,
             ALLOC_PAGE       => rd_alloc_page,
+            ALLOC_DONE       => rd_alloc_done,
 
             FREE_PAGE   => rd_free_page,
             FREE_NPAGES => rd_free_npages,
@@ -702,7 +745,10 @@ begin
 
     wr_alloc_i : entity work.IUVENTUS_PAGE_ALLOCATOR
         generic map (
-            PAGES => BUFF_PAGES)
+            PAGES           => BUFF_PAGES,
+            -- RDBUFF's flat page 0 is reserved for the SQ.
+            RESERVED_PAGES  => FIRST_DATA_PAGE,
+            MAX_ALLOC_PAGES => MAX_WR_PAGES)
         port map (
             CLK => CLK,
             RST => RST,
@@ -711,6 +757,7 @@ begin
             ALLOC_REQ_VLD    => wr_alloc_req_vld,
             ALLOC_GRANT      => wr_alloc_grant,
             ALLOC_PAGE       => wr_alloc_page,
+            ALLOC_DONE       => wr_alloc_done,
 
             FREE_PAGE   => wr_free_page,
             FREE_NPAGES => wr_free_npages,
@@ -723,11 +770,12 @@ begin
     -- above, so a slow/backpressured drain never blocks new completions from being processed.
     -- =============================================================================================
     -- Depth must cover the worst case of reads that are completed (CQE arrived, CID already
-    -- recycled) but not yet drained -- each still holds >=1 WRBUFF page, so at most BUFF_PAGES
-    -- such reads can coexist. Sizing this to QUEUE_DEPTH (16) instead of BUFF_PAGES (32) let small
-    -- 1-page reads overflow it under load: a dropped entry leaks its pages, rd_alloc eventually
-    -- can never grant, and the issue FSM parks in S_RD_REQ_PREPARE forever (the wrap_collision
-    -- stall). BUFF_PAGES makes overflow impossible by construction.
+    -- recycled) but not yet drained -- each still holds >=1 WRBUFF data page, so at most
+    -- DATA_PAGES such reads can coexist (BUFF_PAGES, used here, is a safe -- if by-one loose --
+    -- upper bound). Sizing this to QUEUE_DEPTH (16) instead of BUFF_PAGES let small 1-page reads
+    -- overflow it under load: a dropped entry leaks its pages, rd_alloc eventually can never
+    -- grant, and the issue FSM parks in S_RD_REQ_PREPARE forever (the wrap_collision stall).
+    -- BUFF_PAGES makes overflow impossible by construction.
     rd_cpl_fifo_i : entity work.FIFOX
         generic map (
             DATA_WIDTH => RD_CPL_FIFO_DW,
@@ -786,10 +834,18 @@ begin
         case wrbuff_drain_state_pst is
             when S_DRAIN_REQ =>
                 if (rd_cpl_fifo_empty = '0') then
+                    -- One bit wider than BUFF_PTR_WIDTH (i.e. FLAT_PTR_WIDTH bits): the buffer is
+                    -- flat-addressed (MEM_PARTITIONING => FALSE), so this address alone must reach
+                    -- the whole flat space (WRBUFF at pages 1+).
                     wrbuff_rd_req_addr_piped <= std_logic_vector(
-                        unsigned(WRBUFF_BADDR(BUFF_PTR_WIDTH -1 downto 0)) +
-                        shift_left(resize(unsigned(rd_cpl_fifo_do(RD_CPL_FIFO_DW -1 downto 8)), BUFF_PTR_WIDTH), PAGE_OFFSET_W));
-                    wrbuff_rd_req_size_piped <= std_logic_vector(unsigned('0' & rd_cpl_fifo_do(7 downto 0)) + 1) & "000000000"; -- multiply by 512
+                        unsigned(WRBUFF_BADDR(FLAT_PTR_WIDTH -1 downto 0)) +
+                        shift_left(resize(unsigned(rd_cpl_fifo_do(RD_CPL_FIFO_DW -1 downto 8)), FLAT_PTR_WIDTH), PAGE_OFFSET_W));
+                    -- Zero-extend to (BUFF_PTR_WIDTH+1) bits total (BUFF_PTR_WIDTH-8 bits here,
+                    -- plus the 9-bit "*512" zero pad below); the represented range (up to 256
+                    -- LBAs * 512B = 2**17 bytes) is unaffected, only the container width follows
+                    -- BUFF_PTR_WIDTH.
+                    wrbuff_rd_req_size_piped <= std_logic_vector(
+                        resize(unsigned('0' & rd_cpl_fifo_do(7 downto 0)) + 1, BUFF_PTR_WIDTH-8)) & "000000000"; -- multiply by 512
                     wrbuff_rd_req_en_piped   <= '1';
 
                     if (wrbuff_rd_req_ack_piped = '1') then

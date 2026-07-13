@@ -66,7 +66,10 @@ entity PCIE_READ_RESPONDER is
         -- =========================================================================================
         DATA_BUFF_RD_CHAN     : out std_logic;
         DATA_BUFF_RD_DATA     : in  std_logic_vector(MFB_REGIONS*MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH-1 downto 0);
-        DATA_BUFF_RD_ADDR     : out std_logic_vector(BUFF_POINTER_WIDTH -1 downto 0);
+        -- One bit wider than BUFF_POINTER_WIDTH: the buffer is flat-addressed (MEM_PARTITIONING
+        -- => FALSE), so this address alone must reach the whole flat space (SQ at page 0,
+        -- RDBUFF at pages 1+).
+        DATA_BUFF_RD_ADDR     : out std_logic_vector(BUFF_POINTER_WIDTH downto 0);
         DATA_BUFF_RD_EN       : out std_logic;
         -- Multiple region support
         DATA_BUFF_RD_DATA_VLD : in  std_logic;
@@ -327,7 +330,7 @@ begin
 
     -- This machine expects data next clock
     pkt_dispatch_fsm_output_logic_p : process (all) is
-        variable dma_hdr_frame_ptr_v    : unsigned(BUFF_POINTER_WIDTH -1 downto 0);
+        variable dma_hdr_frame_ptr_v    : unsigned(BUFF_POINTER_WIDTH downto 0);
         variable dma_hdr_frame_length_v : unsigned(CQ_HDR_BYTE_LNG'range);
         -- True when this read completion needs to be split at a 128B RCB boundary (mirrors the
         -- split decision taken in cc_hdr_gen_fsm_nst_logic_p).
@@ -347,11 +350,9 @@ begin
         disp_fsm_mfb_eof_pos <= (others => '0');
         disp_fsm_mfb_src_rdy <= '0';
 
-        if (RDBUFF_BAR_ID = cq_hdr_bar_id) then
-            DATA_BUFF_RD_CHAN <= RDBUFF_CHAN;
-        else
-            DATA_BUFF_RD_CHAN <= SQ_BUFF_CHAN;
-        end if;
+        -- The buffer is flat-addressed (MEM_PARTITIONING => FALSE): the channel bit is a
+        -- don't-care, the masked address alone locates the datum (SQ page 0 vs RDBUFF pages 1+).
+        DATA_BUFF_RD_CHAN <= '0';
 
         DATA_BUFF_RD_ADDR <= std_logic_vector(addr_cntr_pst);
         DATA_BUFF_RD_EN   <= '0';
@@ -359,7 +360,7 @@ begin
         RDBUFF_DISP_RDS_INCR <= '0';
         data_read_done   <= '0';
 
-        dma_hdr_frame_ptr_v    := unsigned(CQ_HDR_ADDR(BUFF_POINTER_WIDTH -1 downto 2)) & "00";
+        dma_hdr_frame_ptr_v    := unsigned(CQ_HDR_ADDR(BUFF_POINTER_WIDTH downto 2)) & "00";
         -- The length of a Read response with a padding added to the beginning of the first
         -- transaction in order to be DW-aligned
         dma_hdr_frame_length_v := unsigned(CQ_HDR_BYTE_LNG) + unsigned(CQ_HDR_ADDR(1 downto 0));
@@ -470,7 +471,11 @@ begin
         end case;
     end process;
 
-    RDBUFF_DISP_RDS_CHAN      <= RDBUFF_CHAN when RDBUFF_BAR_ID = cq_hdr_bar_id else SQ_BUFF_CHAN;
+    -- Stats-only classification bit (independent of the buffer's own, now don't-care, channel
+    -- port): '0' => RDBUFF read dispatched, '1' => SQ read dispatched. With the 2-BAR flat layout
+    -- the SQ and RDBUFF share one BAR_ID, so they are told apart by the (flat) address instead: the
+    -- SQ lives in page 0 (address < 4096), the RDBUFF in pages 1..127 (address >= 4096).
+    RDBUFF_DISP_RDS_CHAN      <= '1' when unsigned(cq_hdr_addr(BUFF_POINTER_WIDTH downto 12)) = 0 else '0';
     RDBUFF_DISP_RDS_BYTES     <= CQ_HDR_BYTE_LNG;
 
     -- This process delays the set of all output MFB signals because the data come from the data

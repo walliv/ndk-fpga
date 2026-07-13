@@ -286,7 +286,9 @@ begin
 
     sq_cmd_mfb_meta_arr_g: for rgn_idx in (MFB_REGIONS -1) downto 0 generate
         sq_cmd_mfb_meta_arr(rgn_idx)(META_PCIE_ADDR)   <= std_logic_vector(sq_addr_w_offset);
-        sq_cmd_mfb_meta_arr(rgn_idx)(META_CHAN_NUM_O)  <= SQ_BUFF_CHAN;
+        -- The buffer is flat-addressed (MEM_PARTITIONING => FALSE): the channel bit is a
+        -- don't-care, the address alone (SQ at flat page 0) locates the datum.
+        sq_cmd_mfb_meta_arr(rgn_idx)(META_CHAN_NUM_O)  <= '0';
         sq_cmd_mfb_meta_arr(rgn_idx)(META_BE)          <= MFB_BE_VLD and SQ_CMD_MFB_SRC_RDY;
     end generate;
 

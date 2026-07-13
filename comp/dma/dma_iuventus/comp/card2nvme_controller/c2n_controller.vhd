@@ -55,7 +55,10 @@ entity C2N_CONTROLLER is
         -- Write interface with data for NVMe Write commands
         -- =========================================================================================
         WR_REQ_MFB_DATA    : in  std_logic_vector(USR_MFB_REGIONS*USR_MFB_REGION_SIZE*USR_MFB_BLOCK_SIZE*USR_MFB_ITEM_WIDTH-1 downto 0);
-        WR_REQ_MFB_META    : in  std_logic_vector(USR_MFB_REGIONS*BUFF_PTR_WIDTH -1 downto 0);
+        -- One bit wider than BUFF_PTR_WIDTH: carries the RDBUFF page's *flat* byte address (the
+        -- buffer is flat-addressed, MEM_PARTITIONING => FALSE; RDBUFF pages are 1..BUFF_PAGES-1
+        -- of the flat space), which needs one more bit than a single channel's BUFF_PTR_WIDTH.
+        WR_REQ_MFB_META    : in  std_logic_vector(USR_MFB_REGIONS*(BUFF_PTR_WIDTH+1) -1 downto 0);
         WR_REQ_MFB_SOF     : in  std_logic_vector(USR_MFB_REGIONS-1 downto 0);
         WR_REQ_MFB_EOF     : in  std_logic_vector(USR_MFB_REGIONS-1 downto 0);
         WR_REQ_MFB_SOF_POS : in  std_logic_vector(USR_MFB_REGIONS*maximum(1, log2(USR_MFB_REGION_SIZE))-1 downto 0);
@@ -125,6 +128,10 @@ entity C2N_CONTROLLER is
 end entity;
 
 architecture FULL of C2N_CONTROLLER is
+    -- Width of the RDBUFF/SQ "buffer pointer" field carried through the internal aux/cmdisp/merged
+    -- metadata (one bit wider than BUFF_PTR_WIDTH -- see WR_REQ_MFB_META).
+    constant META_PTR_WIDTH : natural := BUFF_PTR_WIDTH + 1;
+
     package iuventus_mfb_meta_pkg_i is new work.iuventus_mfb_meta_pkg
     generic map (
         MFB_REGION_SIZE => USR_MFB_REGION_SIZE,
@@ -174,7 +181,10 @@ architecture FULL of C2N_CONTROLLER is
         for i in 0 to n_regions-1 loop
             result((i+1)*ELEM_W-1 downto i*ELEM_W) :=
                 i_mfb_item_vld &
-                RDBUFF_CHAN &
+                -- The buffer is flat-addressed (MEM_PARTITIONING => FALSE): the write META
+                -- channel bit is a don't-care, the address alone (RDBUFF at flat pages 1+)
+                -- locates the datum.
+                '0' &
                 i_aux_mfb_meta((i+1)*buff_ptr_w - 1 downto i*buff_ptr_w);
         end loop;
         return result;
@@ -199,7 +209,7 @@ architecture FULL of C2N_CONTROLLER is
     signal aux_mfb_data     : std_logic_vector(WR_REQ_MFB_DATA'range);
     signal aux_mfb_meta     : std_logic_vector(WR_REQ_MFB_META'range);
     -- nvc workaround: flat std_logic_vector avoids slv_array_t element access bug in nvc 1.21.0
-    signal aux_mfb_meta_parsed : std_logic_vector(USR_MFB_REGIONS*(META_BE_W + 1 + BUFF_PTR_WIDTH) -1 downto 0);
+    signal aux_mfb_meta_parsed : std_logic_vector(USR_MFB_REGIONS*(META_BE_W + 1 + META_PTR_WIDTH) -1 downto 0);
     signal aux_mfb_sof     : std_logic_vector(WR_REQ_MFB_SOF'range);
     signal aux_mfb_eof     : std_logic_vector(WR_REQ_MFB_EOF'range);
     signal aux_mfb_sof_pos : std_logic_vector(WR_REQ_MFB_SOF_POS'range);
@@ -209,7 +219,7 @@ architecture FULL of C2N_CONTROLLER is
     signal mfb_item_vld    : std_logic_vector(USR_MFB_REGIONS*META_BE_W -1 downto 0);
 
     signal cmdisp_mfb_data     : std_logic_vector(WR_REQ_MFB_DATA'range);
-    signal cmdisp_mfb_meta     : std_logic_vector(USR_MFB_REGIONS*(META_BE_W + 1 + BUFF_PTR_WIDTH)-1 downto 0);
+    signal cmdisp_mfb_meta     : std_logic_vector(USR_MFB_REGIONS*(META_BE_W + 1 + META_PTR_WIDTH)-1 downto 0);
     signal cmdisp_mfb_sof      : std_logic_vector(WR_REQ_MFB_SOF'range);
     signal cmdisp_mfb_eof      : std_logic_vector(WR_REQ_MFB_EOF'range);
     signal cmdisp_mfb_sof_pos  : std_logic_vector(WR_REQ_MFB_SOF_POS'range);
@@ -220,14 +230,17 @@ architecture FULL of C2N_CONTROLLER is
     signal mrg_mfb_data     : std_logic_vector(WR_REQ_MFB_DATA'range);
     -- nvc workaround: use entity-generic expressions instead of package constants in signal
     -- widths to avoid corrupt descriptors when the generic package uses non-literal generics
-    signal mrg_mfb_meta        : std_logic_vector((USR_MFB_REGION_SIZE*USR_MFB_BLOCK_SIZE*USR_MFB_ITEM_WIDTH)/8 + 1 + BUFF_PTR_WIDTH - 1 downto 0);
+    signal mrg_mfb_meta        : std_logic_vector((USR_MFB_REGION_SIZE*USR_MFB_BLOCK_SIZE*USR_MFB_ITEM_WIDTH)/8 + 1 + META_PTR_WIDTH - 1 downto 0);
     signal mrg_mfb_meta_parsed : std_logic_vector((USR_MFB_REGION_SIZE*USR_MFB_BLOCK_SIZE*USR_MFB_ITEM_WIDTH)/8 + 63 downto 0);
     signal mrg_mfb_sof      : std_logic_vector(WR_REQ_MFB_SOF'range);
     signal mrg_mfb_src_rdy  : std_logic;
     signal mrg_mfb_dst_rdy  : std_logic;
 
     signal buff_chan      : std_logic;
-    signal buff_addr      : std_logic_vector(BUFF_PTR_WIDTH -1 downto 0);
+    -- One bit wider than BUFF_PTR_WIDTH: the buffer is flat-addressed (MEM_PARTITIONING =>
+    -- FALSE), so this address alone must reach the whole flat space (SQ at page 0, RDBUFF at
+    -- pages 1+).
+    signal buff_addr      : std_logic_vector(BUFF_PTR_WIDTH downto 0);
     signal buff_en        : std_logic;
     signal buff_data      : std_logic_vector(PCIE_CC_MFB_DATA'range);
     signal buff_data_vld  : std_logic;
@@ -269,7 +282,7 @@ begin
             REGION_SIZE   => USR_MFB_REGION_SIZE,
             BLOCK_SIZE    => USR_MFB_BLOCK_SIZE,
             ITEM_WIDTH    => USR_MFB_ITEM_WIDTH,
-            META_WIDTH    => BUFF_PTR_WIDTH,
+            META_WIDTH    => META_PTR_WIDTH,
             REGION_AUX_EN => false,
             BLOCK_AUX_EN  => false,
             ITEM_AUX_EN   => true)
@@ -303,7 +316,7 @@ begin
     -- Parsing of the metadata: each region element gets byte_enable bits, channel flag, and buffer pointer
     aux_mfb_meta_parsed <= build_aux_mfb_meta(
         aux_mfb_meta, mfb_item_vld,
-        USR_MFB_REGIONS, BUFF_PTR_WIDTH, META_BE_W);
+        USR_MFB_REGIONS, META_PTR_WIDTH, META_BE_W);
 
     nvme_cmd_dispatcher_i : entity work.NVME_CMD_DISPATCHER
         generic map (
@@ -313,7 +326,9 @@ begin
             MFB_BLOCK_SIZE  => USR_MFB_BLOCK_SIZE,
             MFB_ITEM_WIDTH  => USR_MFB_ITEM_WIDTH,
             DEVICE          => DEVICE,
-            BUFF_PTR_WIDTH  => BUFF_PTR_WIDTH,
+            -- Matches the merged-meta pointer field width (META_PTR_WIDTH), not the buffer's own
+            -- BUFF_PTR_WIDTH -- see WR_REQ_MFB_META.
+            BUFF_PTR_WIDTH  => META_PTR_WIDTH,
             QUEUE_DEPTH     => QUEUE_DEPTH)
         port map (
             CLK                => CLK,
@@ -364,7 +379,7 @@ begin
             REGION_SIZE => USR_MFB_REGION_SIZE,
             BLOCK_SIZE  => USR_MFB_BLOCK_SIZE,
             ITEM_WIDTH  => USR_MFB_ITEM_WIDTH,
-            META_WIDTH  => META_BE_W + 1 + BUFF_PTR_WIDTH,
+            META_WIDTH  => META_BE_W + 1 + META_PTR_WIDTH,
             MASKING_EN  => false,
             CNT_MAX     => 2)
         port map (
@@ -403,15 +418,15 @@ begin
     -- package-constant slice sensitivity computation that crashes nvc 1.21.0
     mrg_mfb_meta_parsed <= build_mrg_mfb_meta(
         mrg_mfb_meta,
-        -- be_hi = C2N_META_BE_O + META_BE_W - 1 = (BUFF_PTR_WIDTH+1) + META_BE_W - 1
-        BUFF_PTR_WIDTH + (USR_MFB_REGION_SIZE*USR_MFB_BLOCK_SIZE*USR_MFB_ITEM_WIDTH)/8,
-        -- be_lo = C2N_META_BE_O = BUFF_PTR_WIDTH + 1
-        BUFF_PTR_WIDTH + 1,
-        -- chan_bit = C2N_META_CHAN_IDX_O = BUFF_PTR_WIDTH
-        BUFF_PTR_WIDTH,
-        -- ptr_hi = C2N_META_BUFF_PTR_O + C2N_META_BUFF_PTR_W - 1 = BUFF_PTR_WIDTH - 1
-        BUFF_PTR_WIDTH - 1,
-        -- ptr_lo = C2N_META_BUFF_PTR_O = 2
+        -- be_hi = META_PTR_WIDTH + 1 (chan) + META_BE_W - 1, offset by the merged-meta layout
+        META_PTR_WIDTH + (USR_MFB_REGION_SIZE*USR_MFB_BLOCK_SIZE*USR_MFB_ITEM_WIDTH)/8,
+        -- be_lo = META_PTR_WIDTH + 1
+        META_PTR_WIDTH + 1,
+        -- chan_bit = META_PTR_WIDTH
+        META_PTR_WIDTH,
+        -- ptr_hi = META_PTR_WIDTH - 1 (top bit of the META_PTR_WIDTH-bit pointer field)
+        META_PTR_WIDTH - 1,
+        -- ptr_lo = 2 (the pointer's own low 2 bits are always 0 -- 4096-byte page granularity)
         2
     );
     mrg_mfb_dst_rdy <= '1';
@@ -427,6 +442,8 @@ begin
             MFB_ITEM_WIDTH  => 32,
 
             POINTER_WIDTH   => BUFF_PTR_WIDTH,
+            -- Flat addressing: the SQ lives at page 0, RDBUFF at pages 1+, of one flat space.
+            MEM_PARTITIONING => FALSE,
 
             SPLIT_READ_PORTS       => FALSE,
             READ_BARREL_SHIFTER_EN => (FALSE, TRUE))
