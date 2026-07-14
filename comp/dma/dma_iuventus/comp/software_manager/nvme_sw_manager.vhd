@@ -881,6 +881,61 @@ architecture FULL of NVME_SW_MANAGER is
     -- One bit per doorbell (indices 0..NUM_QUEUES-1 = CQHDBL[q], NUM_QUEUES..2*NUM_QUEUES-1 =
     -- SQTDBL[q]) -- see DBL_ENABLED's port comment.
     signal dbl_enabled_reg : std_logic_vector(2*NUM_QUEUES -1 downto 0);
+
+    -- =============================================================================================
+    -- Per-queue LUTRAM DI/WE/ADDRA/ADDRB/DOB signals: every NP_LUTRAM port below is associated as
+    -- a WHOLE array signal (never an indexed or sliced formal element -- e.g. never "DOB(1) =>" or
+    -- "DOB(1)(15 downto 0) =>" directly in a port map). Vivado XST rejects mixing a sliced formal
+    -- element with a full one on the same unconstrained-element array port (nvc accepts it, XST
+    -- does not); building the full array here and slicing/assigning element-by-element in ordinary
+    -- concurrent signal assignments around the instance -- exactly like
+    -- tx_dma_sw_manager.vhd's reg_di/reg_we/reg_addra/reg_addrb/reg_dob -- avoids the whole
+    -- class of issue.
+    -- =============================================================================================
+    signal dbl_mask_di    : slv_array_t(0 downto 0)(MI_WIDTH -1 downto 0);
+    signal dbl_mask_we    : std_logic_vector(0 downto 0);
+    signal dbl_mask_addra : slv_array_t(0 downto 0)(QID_W -1 downto 0);
+    signal dbl_mask_addrb : slv_array_t(3 downto 0)(QID_W -1 downto 0);
+    signal dbl_mask_dob   : slv_array_t(3 downto 0)(MI_WIDTH -1 downto 0);
+
+    signal lba_space_size_l_di    : slv_array_t(0 downto 0)(MI_WIDTH -1 downto 0);
+    signal lba_space_size_l_we    : std_logic_vector(0 downto 0);
+    signal lba_space_size_l_addra : slv_array_t(0 downto 0)(QID_W -1 downto 0);
+    signal lba_space_size_l_addrb : slv_array_t(2 downto 0)(QID_W -1 downto 0);
+    signal lba_space_size_l_dob   : slv_array_t(2 downto 0)(MI_WIDTH -1 downto 0);
+
+    signal lba_space_size_h_di    : slv_array_t(0 downto 0)(MI_WIDTH -1 downto 0);
+    signal lba_space_size_h_we    : std_logic_vector(0 downto 0);
+    signal lba_space_size_h_addra : slv_array_t(0 downto 0)(QID_W -1 downto 0);
+    signal lba_space_size_h_addrb : slv_array_t(2 downto 0)(QID_W -1 downto 0);
+    signal lba_space_size_h_dob   : slv_array_t(2 downto 0)(MI_WIDTH -1 downto 0);
+
+    signal namespace_id_di    : slv_array_t(0 downto 0)(MI_WIDTH -1 downto 0);
+    signal namespace_id_we    : std_logic_vector(0 downto 0);
+    signal namespace_id_addra : slv_array_t(0 downto 0)(QID_W -1 downto 0);
+    signal namespace_id_addrb : slv_array_t(1 downto 0)(QID_W -1 downto 0);
+    signal namespace_id_dob   : slv_array_t(1 downto 0)(MI_WIDTH -1 downto 0);
+
+    signal lba_num_mask_di    : slv_array_t(0 downto 0)(MI_WIDTH -1 downto 0);
+    signal lba_num_mask_we    : std_logic_vector(0 downto 0);
+    signal lba_num_mask_addra : slv_array_t(0 downto 0)(QID_W -1 downto 0);
+    signal lba_num_mask_addrb : slv_array_t(2 downto 0)(QID_W -1 downto 0);
+    signal lba_num_mask_dob   : slv_array_t(2 downto 0)(MI_WIDTH -1 downto 0);
+
+    -- SQTDBL_BADDR_L/H, CQHDBL_BADDR_L/H DI/WE/ADDRA (ADDRB/DOB are already whole-port, declared
+    -- locally inside their own block statements further down).
+    signal sqtdbl_baddr_l_di    : slv_array_t(0 downto 0)(MI_WIDTH -1 downto 0);
+    signal sqtdbl_baddr_l_we    : std_logic_vector(0 downto 0);
+    signal sqtdbl_baddr_l_addra : slv_array_t(0 downto 0)(QID_W -1 downto 0);
+    signal sqtdbl_baddr_h_di    : slv_array_t(0 downto 0)(MI_WIDTH -1 downto 0);
+    signal sqtdbl_baddr_h_we    : std_logic_vector(0 downto 0);
+    signal sqtdbl_baddr_h_addra : slv_array_t(0 downto 0)(QID_W -1 downto 0);
+    signal cqhdbl_baddr_l_di    : slv_array_t(0 downto 0)(MI_WIDTH -1 downto 0);
+    signal cqhdbl_baddr_l_we    : std_logic_vector(0 downto 0);
+    signal cqhdbl_baddr_l_addra : slv_array_t(0 downto 0)(QID_W -1 downto 0);
+    signal cqhdbl_baddr_h_di    : slv_array_t(0 downto 0)(MI_WIDTH -1 downto 0);
+    signal cqhdbl_baddr_h_we    : std_logic_vector(0 downto 0);
+    signal cqhdbl_baddr_h_addra : slv_array_t(0 downto 0)(QID_W -1 downto 0);
 begin
     assert (MPS <= 4096)
         report "NVME_CPL_SW_MANAGER: The set size of MPS exceeded the maximum defined by the PCIe Specification (up to 4096 B, current is " &
@@ -1101,6 +1156,14 @@ begin
     -- ---- DBL_MASK ------------------------------------------------------------------------------
     -- WRITE_PORTS=1 (MI). READ_PORTS=4: 0=MI, 1=NVME_CMD_DISPATCHER (via SQTDBL_QID, the dispatch
     -- qid), 2=CQE_PROCESSOR (via DBL_MASK_RD_QID, resp_qidx), 3=sq_write_blocking (fixed qid=0).
+    dbl_mask_di(0)    <= mi_split_dwr(0);
+    dbl_mask_we(0)    <= pq_we(PQ_DBL_MASK);
+    dbl_mask_addra(0) <= pq_qid;
+    dbl_mask_addrb(0) <= pq_qid;
+    dbl_mask_addrb(1) <= SQTDBL_QID;
+    dbl_mask_addrb(2) <= DBL_MASK_RD_QID;
+    dbl_mask_addrb(3) <= sq_write_blocking_qid0;
+
     pq_dbl_mask_i : entity work.NP_LUTRAM
         generic map (
             DATA_WIDTH => MI_WIDTH,
@@ -1110,19 +1173,18 @@ begin
             DEVICE => DEVICE
         )
         port map (
-            WCLK => CLK,
-            DI(0)    => mi_split_dwr(0),
-            WE(0)    => pq_we(PQ_DBL_MASK),
-            ADDRA(0) => pq_qid,
-            ADDRB(0) => pq_qid,
-            ADDRB(1) => SQTDBL_QID,
-            ADDRB(2) => DBL_MASK_RD_QID,
-            ADDRB(3) => sq_write_blocking_qid0,
-            DOB(0)   => pq_mi_dob(PQ_DBL_MASK),
-            DOB(1)(15 downto 0) => DBL_MASK_C2N,
-            DOB(2)(15 downto 0) => DBL_MASK_N2C,
-            DOB(3)   => dbl_mask_q0_dob
+            WCLK  => CLK,
+            DI    => dbl_mask_di,
+            WE    => dbl_mask_we,
+            ADDRA => dbl_mask_addra,
+            ADDRB => dbl_mask_addrb,
+            DOB   => dbl_mask_dob
         );
+
+    pq_mi_dob(PQ_DBL_MASK) <= dbl_mask_dob(0);
+    DBL_MASK_C2N           <= dbl_mask_dob(1)(15 downto 0);
+    DBL_MASK_N2C           <= dbl_mask_dob(2)(15 downto 0);
+    dbl_mask_q0_dob        <= dbl_mask_dob(3);
 
     -- ---- SQTDBL_BADDR_L/H, CQHDBL_BADDR_L/H -----------------------------------------------------
     -- WRITE_PORTS=1 (MI). READ_PORTS = 1 (MI) + MFB_REGIONS (DBL_UPDATER's dispatch, one lookup
@@ -1139,6 +1201,10 @@ begin
             SQTDBL_BADDR_RD_DATA(rgn)(31 downto 0) <= dob(1+rgn);
         end generate;
 
+        sqtdbl_baddr_l_di(0)    <= mi_split_dwr(0);
+        sqtdbl_baddr_l_we(0)    <= pq_we(PQ_SQTDBL_BADDR_L);
+        sqtdbl_baddr_l_addra(0) <= pq_qid;
+
         pq_sqtdbl_baddr_l_i : entity work.NP_LUTRAM
             generic map (
                 DATA_WIDTH => MI_WIDTH,
@@ -1148,12 +1214,12 @@ begin
                 DEVICE => DEVICE
             )
             port map (
-                WCLK => CLK,
-                DI(0)    => mi_split_dwr(0),
-                WE(0)    => pq_we(PQ_SQTDBL_BADDR_L),
-                ADDRA(0) => pq_qid,
-                ADDRB    => addrb,
-                DOB      => dob
+                WCLK  => CLK,
+                DI    => sqtdbl_baddr_l_di,
+                WE    => sqtdbl_baddr_l_we,
+                ADDRA => sqtdbl_baddr_l_addra,
+                ADDRB => addrb,
+                DOB   => dob
             );
         pq_mi_dob(PQ_SQTDBL_BADDR_L) <= dob(0);
     end block sqtdbl_baddr_l_g;
@@ -1170,6 +1236,10 @@ begin
             SQTDBL_BADDR_RD_DATA(rgn)(63 downto 32) <= dob(1+rgn);
         end generate;
 
+        sqtdbl_baddr_h_di(0)    <= mi_split_dwr(0);
+        sqtdbl_baddr_h_we(0)    <= pq_we(PQ_SQTDBL_BADDR_H);
+        sqtdbl_baddr_h_addra(0) <= pq_qid;
+
         pq_sqtdbl_baddr_h_i : entity work.NP_LUTRAM
             generic map (
                 DATA_WIDTH => MI_WIDTH,
@@ -1179,12 +1249,12 @@ begin
                 DEVICE => DEVICE
             )
             port map (
-                WCLK => CLK,
-                DI(0)    => mi_split_dwr(0),
-                WE(0)    => pq_we(PQ_SQTDBL_BADDR_H),
-                ADDRA(0) => pq_qid,
-                ADDRB    => addrb,
-                DOB      => dob
+                WCLK  => CLK,
+                DI    => sqtdbl_baddr_h_di,
+                WE    => sqtdbl_baddr_h_we,
+                ADDRA => sqtdbl_baddr_h_addra,
+                ADDRB => addrb,
+                DOB   => dob
             );
         pq_mi_dob(PQ_SQTDBL_BADDR_H) <= dob(0);
     end block sqtdbl_baddr_h_g;
@@ -1201,6 +1271,10 @@ begin
             CQHDBL_BADDR_RD_DATA(rgn)(31 downto 0) <= dob(1+rgn);
         end generate;
 
+        cqhdbl_baddr_l_di(0)    <= mi_split_dwr(0);
+        cqhdbl_baddr_l_we(0)    <= pq_we(PQ_CQHDBL_BADDR_L);
+        cqhdbl_baddr_l_addra(0) <= pq_qid;
+
         pq_cqhdbl_baddr_l_i : entity work.NP_LUTRAM
             generic map (
                 DATA_WIDTH => MI_WIDTH,
@@ -1210,12 +1284,12 @@ begin
                 DEVICE => DEVICE
             )
             port map (
-                WCLK => CLK,
-                DI(0)    => mi_split_dwr(0),
-                WE(0)    => pq_we(PQ_CQHDBL_BADDR_L),
-                ADDRA(0) => pq_qid,
-                ADDRB    => addrb,
-                DOB      => dob
+                WCLK  => CLK,
+                DI    => cqhdbl_baddr_l_di,
+                WE    => cqhdbl_baddr_l_we,
+                ADDRA => cqhdbl_baddr_l_addra,
+                ADDRB => addrb,
+                DOB   => dob
             );
         pq_mi_dob(PQ_CQHDBL_BADDR_L) <= dob(0);
     end block cqhdbl_baddr_l_g;
@@ -1232,6 +1306,10 @@ begin
             CQHDBL_BADDR_RD_DATA(rgn)(63 downto 32) <= dob(1+rgn);
         end generate;
 
+        cqhdbl_baddr_h_di(0)    <= mi_split_dwr(0);
+        cqhdbl_baddr_h_we(0)    <= pq_we(PQ_CQHDBL_BADDR_H);
+        cqhdbl_baddr_h_addra(0) <= pq_qid;
+
         pq_cqhdbl_baddr_h_i : entity work.NP_LUTRAM
             generic map (
                 DATA_WIDTH => MI_WIDTH,
@@ -1241,12 +1319,12 @@ begin
                 DEVICE => DEVICE
             )
             port map (
-                WCLK => CLK,
-                DI(0)    => mi_split_dwr(0),
-                WE(0)    => pq_we(PQ_CQHDBL_BADDR_H),
-                ADDRA(0) => pq_qid,
-                ADDRB    => addrb,
-                DOB      => dob
+                WCLK  => CLK,
+                DI    => cqhdbl_baddr_h_di,
+                WE    => cqhdbl_baddr_h_we,
+                ADDRA => cqhdbl_baddr_h_addra,
+                ADDRB => addrb,
+                DOB   => dob
             );
         pq_mi_dob(PQ_CQHDBL_BADDR_H) <= dob(0);
     end block cqhdbl_baddr_h_g;
@@ -1256,6 +1334,13 @@ begin
     -- own qid), 2=NVME_CMD_DISPATCHER (via SQTDBL_QID, the dispatch qid -- NVME_CMD_DISPATCHER
     -- ALSO caps a command's LBA_NUM against LBA_SPACE_SIZE at dispatch time, independently of
     -- OP_CTRL's own admission-time OOR check).
+    lba_space_size_l_di(0)    <= mi_split_dwr(0);
+    lba_space_size_l_we(0)    <= pq_we(PQ_LBA_SPACE_SIZE_L);
+    lba_space_size_l_addra(0) <= pq_qid;
+    lba_space_size_l_addrb(0) <= pq_qid;
+    lba_space_size_l_addrb(1) <= LBA_CHECK_QID;
+    lba_space_size_l_addrb(2) <= SQTDBL_QID;
+
     pq_lba_space_size_l_i : entity work.NP_LUTRAM
         generic map (
             DATA_WIDTH => MI_WIDTH,
@@ -1265,17 +1350,24 @@ begin
             DEVICE => DEVICE
         )
         port map (
-            WCLK => CLK,
-            DI(0)    => mi_split_dwr(0),
-            WE(0)    => pq_we(PQ_LBA_SPACE_SIZE_L),
-            ADDRA(0) => pq_qid,
-            ADDRB(0) => pq_qid,
-            ADDRB(1) => LBA_CHECK_QID,
-            ADDRB(2) => SQTDBL_QID,
-            DOB(0)   => pq_mi_dob(PQ_LBA_SPACE_SIZE_L),
-            DOB(1)   => LBA_SPACE_SIZE_OPC(31 downto 0),
-            DOB(2)   => LBA_SPACE_SIZE_C2N(31 downto 0)
+            WCLK  => CLK,
+            DI    => lba_space_size_l_di,
+            WE    => lba_space_size_l_we,
+            ADDRA => lba_space_size_l_addra,
+            ADDRB => lba_space_size_l_addrb,
+            DOB   => lba_space_size_l_dob
         );
+
+    pq_mi_dob(PQ_LBA_SPACE_SIZE_L)  <= lba_space_size_l_dob(0);
+    LBA_SPACE_SIZE_OPC(31 downto 0) <= lba_space_size_l_dob(1);
+    LBA_SPACE_SIZE_C2N(31 downto 0) <= lba_space_size_l_dob(2);
+
+    lba_space_size_h_di(0)    <= mi_split_dwr(0);
+    lba_space_size_h_we(0)    <= pq_we(PQ_LBA_SPACE_SIZE_H);
+    lba_space_size_h_addra(0) <= pq_qid;
+    lba_space_size_h_addrb(0) <= pq_qid;
+    lba_space_size_h_addrb(1) <= LBA_CHECK_QID;
+    lba_space_size_h_addrb(2) <= SQTDBL_QID;
 
     pq_lba_space_size_h_i : entity work.NP_LUTRAM
         generic map (
@@ -1286,21 +1378,27 @@ begin
             DEVICE => DEVICE
         )
         port map (
-            WCLK => CLK,
-            DI(0)    => mi_split_dwr(0),
-            WE(0)    => pq_we(PQ_LBA_SPACE_SIZE_H),
-            ADDRA(0) => pq_qid,
-            ADDRB(0) => pq_qid,
-            ADDRB(1) => LBA_CHECK_QID,
-            ADDRB(2) => SQTDBL_QID,
-            DOB(0)   => pq_mi_dob(PQ_LBA_SPACE_SIZE_H),
-            DOB(1)   => LBA_SPACE_SIZE_OPC(63 downto 32),
-            DOB(2)   => LBA_SPACE_SIZE_C2N(63 downto 32)
+            WCLK  => CLK,
+            DI    => lba_space_size_h_di,
+            WE    => lba_space_size_h_we,
+            ADDRA => lba_space_size_h_addra,
+            ADDRB => lba_space_size_h_addrb,
+            DOB   => lba_space_size_h_dob
         );
+
+    pq_mi_dob(PQ_LBA_SPACE_SIZE_H)   <= lba_space_size_h_dob(0);
+    LBA_SPACE_SIZE_OPC(63 downto 32) <= lba_space_size_h_dob(1);
+    LBA_SPACE_SIZE_C2N(63 downto 32) <= lba_space_size_h_dob(2);
 
     -- ---- NAMESPACE_ID ---------------------------------------------------------------------------
     -- WRITE_PORTS=1 (MI). READ_PORTS=2: 0=MI, 1=NVME_CMD_DISPATCHER (via SQTDBL_QID). Previously
     -- hardcoded to x"00000001" -- now a real writable register; software must program it.
+    namespace_id_di(0)    <= mi_split_dwr(0);
+    namespace_id_we(0)    <= pq_we(PQ_NAMESPACE_ID);
+    namespace_id_addra(0) <= pq_qid;
+    namespace_id_addrb(0) <= pq_qid;
+    namespace_id_addrb(1) <= SQTDBL_QID;
+
     pq_namespace_id_i : entity work.NP_LUTRAM
         generic map (
             DATA_WIDTH => MI_WIDTH,
@@ -1310,19 +1408,27 @@ begin
             DEVICE => DEVICE
         )
         port map (
-            WCLK => CLK,
-            DI(0)    => mi_split_dwr(0),
-            WE(0)    => pq_we(PQ_NAMESPACE_ID),
-            ADDRA(0) => pq_qid,
-            ADDRB(0) => pq_qid,
-            ADDRB(1) => SQTDBL_QID,
-            DOB(0)   => pq_mi_dob(PQ_NAMESPACE_ID),
-            DOB(1)   => NAMESPACE_ID_C2N
+            WCLK  => CLK,
+            DI    => namespace_id_di,
+            WE    => namespace_id_we,
+            ADDRA => namespace_id_addra,
+            ADDRB => namespace_id_addrb,
+            DOB   => namespace_id_dob
         );
+
+    pq_mi_dob(PQ_NAMESPACE_ID) <= namespace_id_dob(0);
+    NAMESPACE_ID_C2N           <= namespace_id_dob(1);
 
     -- ---- LBA_NUM_MASK -----------------------------------------------------------------------------
     -- WRITE_PORTS=1 (MI). READ_PORTS=3: 0=MI, 1=OP_CTRL (via LBA_CHECK_QID), 2=NVME_CMD_DISPATCHER
     -- (via SQTDBL_QID) -- same reasoning as LBA_SPACE_SIZE above.
+    lba_num_mask_di(0)    <= mi_split_dwr(0);
+    lba_num_mask_we(0)    <= pq_we(PQ_LBA_NUM_MASK);
+    lba_num_mask_addra(0) <= pq_qid;
+    lba_num_mask_addrb(0) <= pq_qid;
+    lba_num_mask_addrb(1) <= LBA_CHECK_QID;
+    lba_num_mask_addrb(2) <= SQTDBL_QID;
+
     pq_lba_num_mask_i : entity work.NP_LUTRAM
         generic map (
             DATA_WIDTH => MI_WIDTH,
@@ -1332,17 +1438,17 @@ begin
             DEVICE => DEVICE
         )
         port map (
-            WCLK => CLK,
-            DI(0)    => mi_split_dwr(0),
-            WE(0)    => pq_we(PQ_LBA_NUM_MASK),
-            ADDRA(0) => pq_qid,
-            ADDRB(0) => pq_qid,
-            ADDRB(1) => LBA_CHECK_QID,
-            ADDRB(2) => SQTDBL_QID,
-            DOB(0)   => pq_mi_dob(PQ_LBA_NUM_MASK),
-            DOB(1)(15 downto 0) => LBA_NUM_MASK_OPC,
-            DOB(2)(15 downto 0) => LBA_NUM_MASK_C2N
+            WCLK  => CLK,
+            DI    => lba_num_mask_di,
+            WE    => lba_num_mask_we,
+            ADDRA => lba_num_mask_addra,
+            ADDRB => lba_num_mask_addrb,
+            DOB   => lba_num_mask_dob
         );
+
+    pq_mi_dob(PQ_LBA_NUM_MASK) <= lba_num_mask_dob(0);
+    LBA_NUM_MASK_OPC           <= lba_num_mask_dob(1)(15 downto 0);
+    LBA_NUM_MASK_C2N           <= lba_num_mask_dob(2)(15 downto 0);
 
     -- =============================================================================================
     -- Per-queue base-address "enabled" sticky flags -- see DBL_ENABLED's port comment. Single
