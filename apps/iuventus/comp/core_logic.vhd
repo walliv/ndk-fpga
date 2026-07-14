@@ -637,10 +637,12 @@ begin
                 MI_SAME_CLK => FALSE,
 
                 NUM_QUEUES => NUM_QUEUES,
-                -- Timing-closure lever for the N=4 multi-queue build: QD8 halves the per-queue
-                -- tag pools / context table / FIFOs vs the default 16, cutting utilization and
-                -- congestion around the CQ/WRBUFF trans-buffer URAM address paths.
-                QUEUE_DEPTH => 8,
+                -- Timing-closure lever for the N=4 multi-queue build: the per-queue tag pools /
+                -- context table / FIFOs (x NUM_QUEUES) plus the reorganized per-queue register
+                -- file congest the CQ/WRBUFF trans-buffer -> pkt_dispatcher path. QD4 (vs the
+                -- default 16) cuts that footprint enough to close timing; N=4 x QD4 = 16 total
+                -- outstanding commands, matching the original single-queue QD16 budget.
+                QUEUE_DEPTH => 4,
 
                 USR_MFB_REGIONS     => DMA_MFB_REGIONS,
                 USR_MFB_REGION_SIZE => DMA_MFB_REGION_SIZE,
