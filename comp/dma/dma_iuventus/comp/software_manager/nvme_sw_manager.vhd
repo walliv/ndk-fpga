@@ -270,34 +270,30 @@ architecture FULL of NVME_SW_MANAGER is
     constant R_CQ_PCIE_WR_BYTES_CNTR_H      : natural := 50;
     constant R_CQHDBL_REG_UPDS_CNTR_L       : natural := 51;
     constant R_CQHDBL_REG_UPDS_CNTR_H       : natural := 52;
-    constant R_CQHDBL_RPT_UPDS_CNTR_L       : natural := 53;
-    constant R_CQHDBL_RPT_UPDS_CNTR_H       : natural := 54;
-    constant R_SQTDBL_REG_UPDS_CNTR_L       : natural := 55;
-    constant R_SQTDBL_REG_UPDS_CNTR_H       : natural := 56;
-    constant R_SQTDBL_RPT_UPDS_CNTR_L       : natural := 57;
-    constant R_SQTDBL_RPT_UPDS_CNTR_H       : natural := 58;
-    constant R_NVME_RD_BYTES_CNTR_L         : natural := 59;
-    constant R_NVME_RD_BYTES_CNTR_H         : natural := 60;
-    constant R_NVME_WR_BYTES_CNTR_L         : natural := 61;
-    constant R_NVME_WR_BYTES_CNTR_H         : natural := 62;
-    constant R_WRBUFF_USR_RDS_CNTR_L        : natural := 63;
-    constant R_WRBUFF_USR_RDS_CNTR_H        : natural := 64;
-    constant R_WRBUFF_USR_RD_BYTES_CNTR_L   : natural := 65;
-    constant R_WRBUFF_USR_RD_BYTES_CNTR_H   : natural := 66;
-    constant R_RDBUFF_DISP_RDS_CNTR_L       : natural := 67;
-    constant R_RDBUFF_DISP_RDS_CNTR_H       : natural := 68;
-    constant R_RDBUFF_DISP_RD_BYTES_CNTR_L  : natural := 69;
-    constant R_RDBUFF_DISP_RD_BYTES_CNTR_H  : natural := 70;
-    constant R_SQ_DISP_RDS_CNTR_L           : natural := 71;
-    constant R_SQ_DISP_RDS_CNTR_H           : natural := 72;
-    constant R_SQ_DISP_RD_BYTES_CNTR_L      : natural := 73;
-    constant R_SQ_DISP_RD_BYTES_CNTR_H      : natural := 74;
-    constant R_NVME_FLUSH_CMD_DISP_CNTR_L   : natural := 75;
-    constant R_NVME_FLUSH_CMD_DISP_CNTR_H   : natural := 76;
+    constant R_SQTDBL_REG_UPDS_CNTR_L       : natural := 53;
+    constant R_SQTDBL_REG_UPDS_CNTR_H       : natural := 54;
+    constant R_NVME_RD_BYTES_CNTR_L         : natural := 55;
+    constant R_NVME_RD_BYTES_CNTR_H         : natural := 56;
+    constant R_NVME_WR_BYTES_CNTR_L         : natural := 57;
+    constant R_NVME_WR_BYTES_CNTR_H         : natural := 58;
+    constant R_WRBUFF_USR_RDS_CNTR_L        : natural := 59;
+    constant R_WRBUFF_USR_RDS_CNTR_H        : natural := 60;
+    constant R_WRBUFF_USR_RD_BYTES_CNTR_L   : natural := 61;
+    constant R_WRBUFF_USR_RD_BYTES_CNTR_H   : natural := 62;
+    constant R_RDBUFF_DISP_RDS_CNTR_L       : natural := 63;
+    constant R_RDBUFF_DISP_RDS_CNTR_H       : natural := 64;
+    constant R_RDBUFF_DISP_RD_BYTES_CNTR_L  : natural := 65;
+    constant R_RDBUFF_DISP_RD_BYTES_CNTR_H  : natural := 66;
+    constant R_SQ_DISP_RDS_CNTR_L           : natural := 67;
+    constant R_SQ_DISP_RDS_CNTR_H           : natural := 68;
+    constant R_SQ_DISP_RD_BYTES_CNTR_L      : natural := 69;
+    constant R_SQ_DISP_RD_BYTES_CNTR_H      : natural := 70;
+    constant R_NVME_FLUSH_CMD_DISP_CNTR_L   : natural := 71;
+    constant R_NVME_FLUSH_CMD_DISP_CNTR_H   : natural := 72;
 
     -- Number of registers in the COMMON block above; also the total register count (REGS), since
     -- the PER-QUEUE block is no longer part of regs_arr/R_ADDRS -- see PQ_* below instead.
-    constant COMMON_REGS : natural := 77;
+    constant COMMON_REGS : natural := 73;
     constant REGS        : natural := COMMON_REGS;
 
     constant R_ADDRS : n_array_t(0 to REGS-1) := (
@@ -354,12 +350,8 @@ architecture FULL of NVME_SW_MANAGER is
         R_CQ_PCIE_WR_BYTES_CNTR_H       => 16#0C8#,
         R_CQHDBL_REG_UPDS_CNTR_L        => 16#0CC#,
         R_CQHDBL_REG_UPDS_CNTR_H        => 16#0D0#,
-        R_CQHDBL_RPT_UPDS_CNTR_L        => 16#0D4#,
-        R_CQHDBL_RPT_UPDS_CNTR_H        => 16#0D8#,
         R_SQTDBL_REG_UPDS_CNTR_L        => 16#0DC#,
         R_SQTDBL_REG_UPDS_CNTR_H        => 16#0E0#,
-        R_SQTDBL_RPT_UPDS_CNTR_L        => 16#0E4#,
-        R_SQTDBL_RPT_UPDS_CNTR_H        => 16#0E8#,
         R_NVME_RD_BYTES_CNTR_L          => 16#0EC#,
         R_NVME_RD_BYTES_CNTR_H          => 16#0F0#,
         R_NVME_WR_BYTES_CNTR_L          => 16#0F4#,
@@ -434,12 +426,8 @@ architecture FULL of NVME_SW_MANAGER is
         R_CQ_PCIE_WR_BYTES_CNTR_H       => FALSE,
         R_CQHDBL_REG_UPDS_CNTR_L        => FALSE,
         R_CQHDBL_REG_UPDS_CNTR_H        => FALSE,
-        R_CQHDBL_RPT_UPDS_CNTR_L        => FALSE,
-        R_CQHDBL_RPT_UPDS_CNTR_H        => FALSE,
         R_SQTDBL_REG_UPDS_CNTR_L        => FALSE,
         R_SQTDBL_REG_UPDS_CNTR_H        => FALSE,
-        R_SQTDBL_RPT_UPDS_CNTR_L        => FALSE,
-        R_SQTDBL_RPT_UPDS_CNTR_H        => FALSE,
         R_NVME_RD_BYTES_CNTR_L          => FALSE,
         R_NVME_RD_BYTES_CNTR_H          => FALSE,
         R_NVME_WR_BYTES_CNTR_L          => FALSE,
@@ -514,12 +502,8 @@ architecture FULL of NVME_SW_MANAGER is
         R_CQ_PCIE_WR_BYTES_CNTR_H       => TRUE,
         R_CQHDBL_REG_UPDS_CNTR_L        => TRUE,
         R_CQHDBL_REG_UPDS_CNTR_H        => TRUE,
-        R_CQHDBL_RPT_UPDS_CNTR_L        => TRUE,
-        R_CQHDBL_RPT_UPDS_CNTR_H        => TRUE,
         R_SQTDBL_REG_UPDS_CNTR_L        => TRUE,
         R_SQTDBL_REG_UPDS_CNTR_H        => TRUE,
-        R_SQTDBL_RPT_UPDS_CNTR_L        => TRUE,
-        R_SQTDBL_RPT_UPDS_CNTR_H        => TRUE,
         R_NVME_RD_BYTES_CNTR_L          => TRUE,
         R_NVME_RD_BYTES_CNTR_H          => TRUE,
         R_NVME_WR_BYTES_CNTR_L          => TRUE,
@@ -594,12 +578,8 @@ architecture FULL of NVME_SW_MANAGER is
         R_CQ_PCIE_WR_BYTES_CNTR_H       => FALSE,
         R_CQHDBL_REG_UPDS_CNTR_L        => TRUE,
         R_CQHDBL_REG_UPDS_CNTR_H        => FALSE,
-        R_CQHDBL_RPT_UPDS_CNTR_L        => TRUE,
-        R_CQHDBL_RPT_UPDS_CNTR_H        => FALSE,
         R_SQTDBL_REG_UPDS_CNTR_L        => TRUE,
         R_SQTDBL_REG_UPDS_CNTR_H        => FALSE,
-        R_SQTDBL_RPT_UPDS_CNTR_L        => TRUE,
-        R_SQTDBL_RPT_UPDS_CNTR_H        => FALSE,
         R_NVME_RD_BYTES_CNTR_L          => TRUE,
         R_NVME_RD_BYTES_CNTR_H          => FALSE,
         R_NVME_WR_BYTES_CNTR_L          => TRUE,
@@ -674,12 +654,8 @@ architecture FULL of NVME_SW_MANAGER is
         R_CQ_PCIE_WR_BYTES_CNTR_H       => 32,
         R_CQHDBL_REG_UPDS_CNTR_L        => 32,
         R_CQHDBL_REG_UPDS_CNTR_H        => 32,
-        R_CQHDBL_RPT_UPDS_CNTR_L        => 32,
-        R_CQHDBL_RPT_UPDS_CNTR_H        => 32,
         R_SQTDBL_REG_UPDS_CNTR_L        => 32,
         R_SQTDBL_REG_UPDS_CNTR_H        => 32,
-        R_SQTDBL_RPT_UPDS_CNTR_L        => 32,
-        R_SQTDBL_RPT_UPDS_CNTR_H        => 32,
         R_NVME_RD_BYTES_CNTR_L          => 32,
         R_NVME_RD_BYTES_CNTR_H          => 32,
         R_NVME_WR_BYTES_CNTR_L          => 32,
@@ -1510,14 +1486,8 @@ begin
     cntr_incrs_sizes(R_CQ_PCIE_WR_BYTES_CNTR_L)         <= std_logic_vector(resize(unsigned(PCIE_WR_REQ_BYTES(CQ_BAR_ID_INT)), CNTR_WIDTH));
     cntr_incrs(R_CQHDBL_REG_UPDS_CNTR_L)                <= CQHDBL_REG_UPD_DISP;
     cntr_incrs_sizes(R_CQHDBL_REG_UPDS_CNTR_L)          <= std_logic_vector(to_unsigned(1, CNTR_WIDTH));
-    -- Reserved counter (doorbell repeat-update removed); kept at 0 to preserve the register map.
-    cntr_incrs(R_CQHDBL_RPT_UPDS_CNTR_L)                <= '0';
-    cntr_incrs_sizes(R_CQHDBL_RPT_UPDS_CNTR_L)          <= std_logic_vector(to_unsigned(1, CNTR_WIDTH));
     cntr_incrs(R_SQTDBL_REG_UPDS_CNTR_L)                <= SQTDBL_REG_UPD_DISP;
     cntr_incrs_sizes(R_SQTDBL_REG_UPDS_CNTR_L)          <= std_logic_vector(to_unsigned(1, CNTR_WIDTH));
-    -- Reserved counter (doorbell repeat-update removed); kept at 0 to preserve the register map.
-    cntr_incrs(R_SQTDBL_RPT_UPDS_CNTR_L)                <= '0';
-    cntr_incrs_sizes(R_SQTDBL_RPT_UPDS_CNTR_L)          <= std_logic_vector(to_unsigned(1, CNTR_WIDTH));
     cntr_incrs(R_NVME_RD_BYTES_CNTR_L)                  <= SQES_DISP_INCR when SQES_DISP_TYPE = RD_CMD_OPCODE else '0';
     cntr_incrs_sizes(R_NVME_RD_BYTES_CNTR_L)            <= std_logic_vector(resize(unsigned(SQES_DISP_BYTES), CNTR_WIDTH));
     cntr_incrs(R_NVME_WR_BYTES_CNTR_L)                  <= SQES_DISP_INCR when SQES_DISP_TYPE = WR_CMD_OPCODE else '0';
@@ -1565,9 +1535,7 @@ begin
     (sample_regs_ins(R_CQ_PCIE_WRS_CNTR_H),sample_regs_ins(R_CQ_PCIE_WRS_CNTR_L))                       <= cntr_outs(R_CQ_PCIE_WRS_CNTR_L);
     (sample_regs_ins(R_CQ_PCIE_WR_BYTES_CNTR_H),sample_regs_ins(R_CQ_PCIE_WR_BYTES_CNTR_L))             <= cntr_outs(R_CQ_PCIE_WR_BYTES_CNTR_L);
     (sample_regs_ins(R_CQHDBL_REG_UPDS_CNTR_H),sample_regs_ins(R_CQHDBL_REG_UPDS_CNTR_L))               <= cntr_outs(R_CQHDBL_REG_UPDS_CNTR_L);
-    (sample_regs_ins(R_CQHDBL_RPT_UPDS_CNTR_H),sample_regs_ins(R_CQHDBL_RPT_UPDS_CNTR_L))               <= cntr_outs(R_CQHDBL_RPT_UPDS_CNTR_L);
     (sample_regs_ins(R_SQTDBL_REG_UPDS_CNTR_H),sample_regs_ins(R_SQTDBL_REG_UPDS_CNTR_L))               <= cntr_outs(R_SQTDBL_REG_UPDS_CNTR_L);
-    (sample_regs_ins(R_SQTDBL_RPT_UPDS_CNTR_H),sample_regs_ins(R_SQTDBL_RPT_UPDS_CNTR_L))               <= cntr_outs(R_SQTDBL_RPT_UPDS_CNTR_L);
     (sample_regs_ins(R_NVME_RD_BYTES_CNTR_H),sample_regs_ins(R_NVME_RD_BYTES_CNTR_L))                   <= cntr_outs(R_NVME_RD_BYTES_CNTR_L);
     (sample_regs_ins(R_NVME_WR_BYTES_CNTR_H),sample_regs_ins(R_NVME_WR_BYTES_CNTR_L))                   <= cntr_outs(R_NVME_WR_BYTES_CNTR_L);
     (sample_regs_ins(R_WRBUFF_USR_RDS_CNTR_H),sample_regs_ins(R_WRBUFF_USR_RDS_CNTR_L))                 <= cntr_outs(R_WRBUFF_USR_RDS_CNTR_L);

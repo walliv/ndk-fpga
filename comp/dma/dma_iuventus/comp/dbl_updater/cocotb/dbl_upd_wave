@@ -52,12 +52,6 @@
                     selected: false,
                 ),
                 (
-                    item_ref: (25),
-                    level: 0,
-                    unfolded: true,
-                    selected: false,
-                ),
-                (
                     item_ref: (4),
                     level: 0,
                     unfolded: true,
@@ -142,12 +136,6 @@
                     selected: false,
                 ),
                 (
-                    item_ref: (26),
-                    level: 0,
-                    unfolded: true,
-                    selected: false,
-                ),
-                (
                     item_ref: (32),
                     level: 0,
                     unfolded: true,
@@ -185,24 +173,6 @@
                 ),
                 (
                     item_ref: (9),
-                    level: 0,
-                    unfolded: true,
-                    selected: false,
-                ),
-                (
-                    item_ref: (22),
-                    level: 0,
-                    unfolded: true,
-                    selected: false,
-                ),
-                (
-                    item_ref: (23),
-                    level: 0,
-                    unfolded: true,
-                    selected: false,
-                ),
-                (
-                    item_ref: (24),
                     level: 0,
                     unfolded: true,
                     selected: false,
@@ -334,26 +304,6 @@
                 field_formats: [],
                 height_scaling_factor: None,
             )),
-            (25): Variable((
-                variable_ref: (
-                    path: (
-                        strs: [
-                            "dbl_updater",
-                        ],
-                        id: Wellen((2)),
-                    ),
-                    name: "repeat_update_en",
-                    id: Wellen((3)),
-                ),
-                color: None,
-                background_color: None,
-                display_name: "repeat_update_en",
-                display_name_type: Unique,
-                manual_name: None,
-                format: None,
-                field_formats: [],
-                height_scaling_factor: None,
-            )),
             (10): Variable((
                 variable_ref: (
                     path: (
@@ -368,46 +318,6 @@
                 color: None,
                 background_color: None,
                 display_name: "last_updated_value_reg [15:0]",
-                display_name_type: Unique,
-                manual_name: None,
-                format: None,
-                field_formats: [],
-                height_scaling_factor: None,
-            )),
-            (26): Variable((
-                variable_ref: (
-                    path: (
-                        strs: [
-                            "dbl_updater",
-                        ],
-                        id: Wellen((2)),
-                    ),
-                    name: "rpt_upd_dispatched",
-                    id: Wellen((8)),
-                ),
-                color: None,
-                background_color: None,
-                display_name: "rpt_upd_dispatched",
-                display_name_type: Unique,
-                manual_name: None,
-                format: None,
-                field_formats: [],
-                height_scaling_factor: None,
-            )),
-            (23): Variable((
-                variable_ref: (
-                    path: (
-                        strs: [
-                            "dbl_updater",
-                        ],
-                        id: Wellen((2)),
-                    ),
-                    name: "repeat_cntr_en",
-                    id: Wellen((29)),
-                ),
-                color: None,
-                background_color: None,
-                display_name: "repeat_cntr_en",
                 display_name_type: Unique,
                 manual_name: None,
                 format: None,
@@ -689,26 +599,6 @@
                 field_formats: [],
                 height_scaling_factor: None,
             )),
-            (24): Variable((
-                variable_ref: (
-                    path: (
-                        strs: [
-                            "dbl_updater",
-                        ],
-                        id: Wellen((2)),
-                    ),
-                    name: "repeat_cntr_ovf",
-                    id: Wellen((28)),
-                ),
-                color: None,
-                background_color: None,
-                display_name: "repeat_cntr_ovf",
-                display_name_type: Unique,
-                manual_name: None,
-                format: None,
-                field_formats: [],
-                height_scaling_factor: None,
-            )),
             (30): Divider((
                 color: None,
                 background_color: None,
@@ -728,26 +618,6 @@
                 color: None,
                 background_color: None,
                 display_name: "pcie_rq_mfb_dst_rdy",
-                display_name_type: Unique,
-                manual_name: None,
-                format: None,
-                field_formats: [],
-                height_scaling_factor: None,
-            )),
-            (22): Variable((
-                variable_ref: (
-                    path: (
-                        strs: [
-                            "dbl_updater",
-                        ],
-                        id: Wellen((2)),
-                    ),
-                    name: "repeat_cntr",
-                    id: Wellen((27)),
-                ),
-                color: None,
-                background_color: None,
-                display_name: "repeat_cntr [63:0]",
                 display_name_type: Unique,
                 manual_name: None,
                 format: None,

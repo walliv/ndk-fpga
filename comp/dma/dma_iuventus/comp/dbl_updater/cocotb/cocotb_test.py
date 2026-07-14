@@ -88,7 +88,6 @@ class Testbench():
         self.m_model_dbl_value = 0
         self.m_model_upds_sent = 0
         self.m_dut_reg_upds = 0
-        self.m_dut_rpt_upds = 0
 
         if debug:
             self.m_mfb_monitor.log.setLevel(logging.DEBUG)
@@ -133,14 +132,10 @@ class Testbench():
             if bool(self.m_dut.REG_UPD_DISPATCHED.value):
                 self.m_dut_reg_upds += 1
 
-            if bool(self.m_dut.RPT_UPD_DISPATCHED.value):
-                self.m_dut_rpt_upds += 1
-
     async def reset_general(self):
         self.m_model_dbl_value = 0
         self.m_model_upds_sent = 0
         self.m_dut_reg_upds = 0
-        self.m_dut_rpt_upds = 0
         self.m_dbl_driver.reset()
 
         self.m_dut.RST.value = 1
@@ -188,7 +183,7 @@ async def test_base(dut, transaction_count: int = 1000):
     cocotb.log.info(f"All transactions dispatched {tb.m_model_upds_sent=}")
 
     # last_num = 0
-    while len(tb.m_dbl_driver._sendQ) != 0 or tb.m_model_upds_sent != tb.m_dut_reg_upds + tb.m_dut_rpt_upds:
+    while len(tb.m_dbl_driver._sendQ) != 0 or tb.m_model_upds_sent != tb.m_dut_reg_upds:
         await RisingEdge(dut.CLK)
         # cocotb.log.info(f"{len(tb.m_dbl_driver._sendQ)=}")
         # cocotb.log.info(f"{tb.m_mfb_monitor.frame_cnt=}/{tb.m_model_upds_sent=}")
@@ -197,7 +192,7 @@ async def test_base(dut, transaction_count: int = 1000):
     assert tb.m_mfb_monitor.frame_cnt == tb.m_model_upds_sent
     assert tb.m_model_dbl_value == int(dut.cqhdbl_reg.value)
     assert len(tb.m_dbl_driver._sendQ) == 0
-    assert tb.m_model_upds_sent == tb.m_dut_reg_upds + tb.m_dut_rpt_upds
+    assert tb.m_model_upds_sent == tb.m_dut_reg_upds
 
     await ClockCycles(dut.CLK, 300)
 
@@ -206,10 +201,4 @@ async def test_base(dut, transaction_count: int = 1000):
 
 @cocotb.test()
 async def tst_regular(dut, transaction_count: int = 1000):
-    dut.REPEAT_UPDATE_EN.value = 0
-    await test_base(dut, transaction_count)
-
-@cocotb.test()
-async def tst_repeated(dut, transaction_count: int = 1000):
-    dut.REPEAT_UPDATE_EN.value = 1
     await test_base(dut, transaction_count)

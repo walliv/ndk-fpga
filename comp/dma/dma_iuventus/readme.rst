@@ -120,9 +120,10 @@ value already written is exactly NVMe's *"Invalid Doorbell Write Value"* conditi
 spec — "the value written is the same as the previously written doorbell value"), which a compliant SSD
 may reject. The Samsung 990 PRO did exactly that — it raised the corresponding asynchronous-event error
 and refused to peer-fetch the Submission Queue, wedging P2P. With the repeat path gone, only compliant
-on-change doorbell writes remain. ``R_CONTROL`` bit 4 (formerly ``RPT_PTR_UPDATE``) and the
-``R_*DBL_RPT_UPDS_CNTR`` registers are now **reserved** (the bit is a no-op and the counters read 0);
-their register indices are retained so the MI address map is unchanged.
+on-change doorbell writes remain. ``R_CONTROL`` bit 4 (formerly ``RPT_PTR_UPDATE``) is now **reserved**
+(the bit is a no-op); the vestigial ``R_*DBL_RPT_UPDS_CNTR`` counter registers, which never counted
+anything (the repeat datapath they observed was already gone), have been removed outright, and every
+other register's MI address is unchanged.
 
 Verification and test results
 -----------------------------
