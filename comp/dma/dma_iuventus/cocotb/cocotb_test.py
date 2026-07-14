@@ -32,8 +32,11 @@ from cocotbext.ofm.mfb.transaction import MfbTransactionWithMeta, MfbTransaction
 
 from cocotbext.ofm.ver.generators import random_integers, random_packets
 
+from dataclasses import dataclass
+
 from misc_const import BUFF_SIZE_PAGES, SECT_SIZE, STORAGE_CAP_LBAS, PAGE_SIZE, BUFF_SIZE, \
-    BUFF_SIZE_LBAS, IuventusBuffers, QUEUE_DEPTH, DATA_PAGES, FIRST_DATA_PAGE, MAX_CMD_LBAS
+    BUFF_SIZE_LBAS, IuventusBuffers, QUEUE_DEPTH, DATA_PAGES, FIRST_DATA_PAGE, MAX_CMD_LBAS, \
+    NUM_QUEUES, EXTRA_Q_BASE_ADDR, EXTRA_Q_STRIDE, SQE_LBA_PTR_W, FLUSH_DELAY_CNTR_WIDTH
 from iuventus_model import IuventusModel
 from nvme_ctrl_model import NVMEControllerModel
 from read_req_driver import ReadReqDriver
@@ -49,11 +52,26 @@ root_logger.addHandler(file_handler)
 # unless explicit routine has been created for that.
 iuventus_model_buffers = None
 
+
+@dataclass
+class QueueCtx:
+    """One SQ[q]/CQ[q] queue's model pair, sharing the Testbench's single set of physical buses
+    (PCIE_CQ_MFB driver, PCIE_CC_MFB/PCIE_RQ_MFB monitors, WR_MFB driver, MI driver, OP_STAT
+    monitor) and the shared RDBUFF/WRBUFF data pool with every other queue -- see
+    Testbench.add_queue."""
+    qid: int
+    qsize: int
+    iuventus_model: IuventusModel
+    nvme_ctrl_model: NVMEControllerModel
+    sqtdbl_baddr: int
+    cqhdbl_baddr: int
+
+
 class Testbench:
     def __init__(self, dut, qid : int, mptr : int, qsize :int, sq_baddr : int, cq_baddr : int,
                  sqtdbl_baddr : int, cqhdbl_baddr : int, rdbuff_prpl_baddr : int, rdbuff_prpl_data : List[int],
                  wrbuff_prpl_baddr : int, wrbuff_prpl_data : List[int], iuventus_model_buffers : IuventusBuffers, debug=False,
-                 strict_rq=True):
+                 strict_rq=True, tag_range=range(256), rd_mfb_reorder_depth=0):
         self.dut = dut
         # strict_rq=False skips the in-order PCIE_RQ scoreboard interface. The RQ scoreboard / reference
         # model are validated at qsize=16; at smaller queues with heavy out-of-order completion they
@@ -105,10 +123,21 @@ class Testbench:
             # Lets nvme_ctrl_model tell the model where to place a WRITE's payload once it
             # discovers the real wr_alloc page k from the actual dispatched SQE's PRP1 (see
             # IuventusModel.place_wr_payload / _proc_sq_entries's WRITE branch).
-            wr_placement_callback=self.iuventus_model.place_wr_payload)
+            wr_placement_callback=self.iuventus_model.place_wr_payload,
+            tag_range=tag_range,
+            # Lets nvme_ctrl_model tell the model about an autonomous FLUSH keepalive SQE the
+            # moment it recognizes one (see IuventusModel.observe_flush_dispatch /
+            # _proc_sq_entries's FLUSH branch).
+            flush_observed_callback=self.iuventus_model.observe_flush_dispatch)
 
         self.qsize = qsize
         self.cq_baddr = cq_baddr
+        # Queue 0 (this Testbench's own models); add_queue() appends queues 1..NUM_QUEUES-1 for
+        # multi-queue tests. Single-queue tests never call add_queue, so self.queues stays a
+        # 1-element list referencing exactly self.iuventus_model/self.nvme_ctrl_model, unchanged.
+        self.queues: List[QueueCtx] = [QueueCtx(
+            qid=qid, qsize=qsize, iuventus_model=self.iuventus_model,
+            nvme_ctrl_model=self.nvme_ctrl_model, sqtdbl_baddr=sqtdbl_baddr, cqhdbl_baddr=cqhdbl_baddr)]
 
         self.m_scoreboard = Scoreboard(dut)
         # Custom compare_fn: the SQE's PRP1/PRP2 fields on SQ-read CC responses are unpredictable
@@ -130,7 +159,14 @@ class Testbench:
         # page `k` from the real SQE it read (nvme_ctrl_model._proc_sq_entries) and builds the
         # expected read data from the actual storage, whereas iuventus_model can no longer predict
         # `k` (see the RD_MFB removal in IuventusModel.proc_cqes).
-        self.m_scoreboard.add_interface(self.m_rd_mfb_monitor, self.nvme_ctrl_model.rd_mfb_exp_out, strict_type=True)
+        # rd_mfb_reorder_depth defaults to 0 (strict, front-of-queue-only match), matching the
+        # original single-queue behavior exactly. Multi-queue callers (see prepare_multi) pass a
+        # nonzero window: rd_mfb_exp_out is appended to eagerly, per queue, at each queue's OWN
+        # _proc_sq_entries dispatch time (independent asyncio coroutines racing across queues), but
+        # the DUT's actual RD_MFB drain order follows the single physical cqe_processor round-robin
+        # arbiter's real completion-recognition order across all queues -- the two need not agree
+        # even though each queue's OWN reads are still emitted in that queue's own dispatch order.
+        self.m_scoreboard.add_interface(self.m_rd_mfb_monitor, self.nvme_ctrl_model.rd_mfb_exp_out, strict_type=True, reorder_depth=rd_mfb_reorder_depth)
         # RQ reorder window: default 1 (strict, as the validated tests expect). The phase-wrap stress
         # test uses a small queue with heavy out-of-order completion, which legitimately reorders the
         # RQ doorbell/SQE writes well beyond depth 1; it sets RQ_REORDER_DEPTH so the ordering check
@@ -172,6 +208,53 @@ class Testbench:
             self.nvme_ctrl_model.log.setLevel(logging.WARNING)
             self.op_stat_mon.log.setLevel(logging.WARNING)
             self.log.setLevel(logging.WARNING)
+
+    def add_queue(self, qid, mptr, qsize, sq_baddr, cq_baddr, sqtdbl_baddr, cqhdbl_baddr,
+                  rdbuff_prpl_baddr, rdbuff_prpl_data, wrbuff_prpl_baddr, wrbuff_prpl_data,
+                  buffs : IuventusBuffers, tag_range):
+        """
+        Add queue `qid` (1..NUM_QUEUES-1) to this Testbench: a new IuventusModel/NVMEControllerModel
+        pair with its own SQ[qid]/CQ[qid] (sq_baddr/cq_baddr/sqtdbl_baddr/cqhdbl_baddr) and tag
+        pool (tag_range, which MUST be disjoint from every other queue's -- see
+        NVMEControllerModel's tag_range parameter), but sharing this Testbench's single physical
+        buses (PCIE_CQ_MFB driver, PCIE_CC_MFB/PCIE_RQ_MFB monitors) and RDBUFF/WRBUFF data pool
+        (`buffs` must share its rd_buff/wr_buff with queue 0's buffer, e.g. via
+        IuventusBuffers(qsize, shared_pool=iuventus_model_buffers)).
+
+        The new queue's expected-output lists are the SAME list objects as queue 0's (see
+        IuventusModel/NVMEControllerModel's m_cc_exp_out/m_op_stat_exp_out/m_pcie_rq_exp_out/
+        rd_mfb_exp_out parameters), so the scoreboard's single add_interface() call (already set
+        up in __init__ against queue 0's lists) covers every queue added here too.
+        """
+        iuventus_model = IuventusModel(
+            qsize=qsize, mptr=mptr, sq_baddr=sq_baddr, cq_baddr=cq_baddr,
+            sqtdbl_baddr=sqtdbl_baddr, cqhdbl_baddr=cqhdbl_baddr,
+            rdbuff_prpl_baddr=rdbuff_prpl_baddr, rdbuff_prpl_data=rdbuff_prpl_data,
+            wrbuff_prpl_baddr=wrbuff_prpl_baddr, wrbuff_prpl_data=wrbuff_prpl_data,
+            clock=self.dut.CLK, qid=qid, buffs=buffs,
+            m_cc_exp_out=self.iuventus_model.m_cc_exp_out,
+            m_op_stat_exp_out=self.iuventus_model.m_op_stat_exp_out,
+            m_pcie_rq_exp_out=self.iuventus_model.m_pcie_rq_exp_out)
+        nvme_ctrl_model = NVMEControllerModel(
+            sq_id=qid, mptr=mptr, qsize=qsize, sq_baddr=sq_baddr, cq_baddr=cq_baddr,
+            sqtdbl_baddr=sqtdbl_baddr, cqhdbl_baddr=cqhdbl_baddr,
+            cq_drv=self.m_cq_mfb_driver, cc_mon=self.m_cc_mfb_monitor,
+            rq_mon=self.m_rq_mfb_monitor, rdbuff_prpl_baddr=rdbuff_prpl_baddr,
+            rdbuff_prpl_data=rdbuff_prpl_data, wrbuff_prpl_baddr=wrbuff_prpl_baddr,
+            wrbuff_prpl_data=wrbuff_prpl_data,
+            cq_drv_callback=iuventus_model.proc_pcie_cq_reqs,
+            wr_placement_callback=iuventus_model.place_wr_payload,
+            tag_range=tag_range,
+            rd_mfb_exp_out=self.nvme_ctrl_model.rd_mfb_exp_out,
+            flush_observed_callback=iuventus_model.observe_flush_dispatch)
+
+        iuventus_model.log.setLevel(self.iuventus_model.log.level)
+        nvme_ctrl_model.log.setLevel(self.nvme_ctrl_model.log.level)
+
+        self.queues.append(QueueCtx(
+            qid=qid, qsize=qsize, iuventus_model=iuventus_model, nvme_ctrl_model=nvme_ctrl_model,
+            sqtdbl_baddr=sqtdbl_baddr, cqhdbl_baddr=cqhdbl_baddr))
+        return iuventus_model, nvme_ctrl_model
 
     def _cc_compare(self, transaction):
         """Custom scoreboard comparator for the PCIE_CC_MFB (SQ-read/RDBUFF-read completion)
@@ -223,8 +306,9 @@ class Testbench:
         self.m_rq_mfb_bpsr.start(random_tuple_iterator(100,500,1,5))
 
     async def reset(self):
-        self.nvme_ctrl_model.reset()
-        self.iuventus_model.reset()
+        for q in self.queues:
+            q.nvme_ctrl_model.reset()
+            q.iuventus_model.reset()
         self.m_wr_mfb_driver.clear()
         self.m_cq_mfb_driver.clear()
         self.m_mi_driver.clear()
@@ -246,36 +330,38 @@ class Testbench:
         from misc_const import CQE_SIZE, IuventusBarSelection, PcieReqType
         from cocotbext.ofm.pcie import CQMfbMeta, CQHeader
 
-        for idx in range(self.qsize):
-            phys_addr = self.cq_baddr + (idx * CQE_SIZE)
+        for q in self.queues:
+            for idx in range(q.qsize):
+                phys_addr = q.nvme_ctrl_model._cq_baddr + (idx * CQE_SIZE)
 
-            cq_hdr = CQHeader()
-            cq_hdr.bar_apper = 26
-            cq_hdr.tgt_func = 1
-            cq_hdr.bar_id = IuventusBarSelection.CQ_BAR
-            cq_hdr.addr = phys_addr >> 2
-            cq_hdr.dword_count = CQE_SIZE // 4
-            cq_hdr.req_type = PcieReqType.MWR
+                cq_hdr = CQHeader()
+                cq_hdr.bar_apper = 26
+                cq_hdr.tgt_func = 1
+                cq_hdr.bar_id = IuventusBarSelection.CQ_BAR
+                cq_hdr.addr = phys_addr >> 2
+                cq_hdr.dword_count = CQE_SIZE // 4
+                cq_hdr.req_type = PcieReqType.MWR
 
-            cq_mfb_meta = CQMfbMeta()
-            cq_mfb_meta.firstBe = 0xF
-            cq_mfb_meta.lastBe = 0xF
+                cq_mfb_meta = CQMfbMeta()
+                cq_mfb_meta.firstBe = 0xF
+                cq_mfb_meta.lastBe = 0xF
 
-            cq_trans = MfbTransactionWithMeta(
-                data=cq_hdr.serialize().to_bytes(len(CQHeader()) // 8, 'little') + (b'\x00' * CQE_SIZE),
-                meta=cq_mfb_meta.serialize()
-            )
+                cq_trans = MfbTransactionWithMeta(
+                    data=cq_hdr.serialize().to_bytes(len(CQHeader()) // 8, 'little') + (b'\x00' * CQE_SIZE),
+                    meta=cq_mfb_meta.serialize()
+                )
 
-            self.m_cq_mfb_driver.append(cq_trans)
-            self.iuventus_model.proc_pcie_cq_reqs(cq_trans)
+                self.m_cq_mfb_driver.append(cq_trans)
+                q.iuventus_model.proc_pcie_cq_reqs(cq_trans)
 
-        self.log.info(f"Sent {self.qsize} transactions to nullify the completion queue")
+            self.log.info(f"Sent {q.qsize} transactions to nullify queue {q.qid}'s completion queue")
         await ClockCycles(self.dut.CLK, 100)
-        self.log.info(f"Waited for 100 cycles after nullifying the completion queue")
+        self.log.info(f"Waited for 100 cycles after nullifying the completion queue(s)")
 
     async def enable_dut(self):
-        self.iuventus_model.enabled = True
-        self.nvme_ctrl_model.nullify_doorbell()
+        for q in self.queues:
+            q.iuventus_model.enabled = True
+            q.nvme_ctrl_model.nullify_doorbell()
         ctrl_reg = int.from_bytes(await self.m_mi_driver.read(IuventusMiRegMap.CONTROL, 1))
         ctrl_reg |= (1 << CtrlRegBits.ENABLE)
         await self.m_mi_driver.write(IuventusMiRegMap.CONTROL, ctrl_reg.to_bytes(1, 'little'))
@@ -289,7 +375,8 @@ class Testbench:
         assert False, "DUT enable timeout: STATUS register did not indicate running state"
 
     async def disable_dut(self):
-        self.iuventus_model.enabled = False
+        for q in self.queues:
+            q.iuventus_model.enabled = False
         ctrl_reg = int.from_bytes(await self.m_mi_driver.read(IuventusMiRegMap.CONTROL, 1))
         ctrl_reg &= ~(1 << CtrlRegBits.ENABLE)
         await self.m_mi_driver.write(IuventusMiRegMap.CONTROL, ctrl_reg.to_bytes(1, 'little'))
@@ -303,19 +390,26 @@ class Testbench:
 
         assert False, "DUT disable timeout: STATUS register did not indicate stopped state"
 
-    def nvme_rd(self, lba_ptr, lba_num):
-        self.rd_req_driver.append((lba_num, lba_ptr), self.iuventus_model.create_nvme_rd_cmd)
+    def nvme_rd(self, lba_ptr, lba_num, qid=0):
+        """Submit a READ request targeting queue `qid` (drives NVME_RD_REQ_QID; default 0 for
+        single-queue tests, unchanged)."""
+        q = self.queues[qid]
+        self.rd_req_driver.append((lba_num, lba_ptr, qid), q.iuventus_model.create_nvme_rd_cmd)
         self.tb_rd_reqs += 1
         # Only count non-OOR requests to match iuventus_model.c_sqe_rd_cmd_size semantics.
         # OOR reads are caught by the model and never dispatched as SQEs.
         if lba_ptr + lba_num <= STORAGE_CAP_LBAS:
             self.tb_rd_req_bytes += lba_num * SECT_SIZE
 
-    def nvme_wr(self, lba_ptr, data):
-        tr = MfbTransactionWithMeta(data=data, meta=lba_ptr)
+    def nvme_wr(self, lba_ptr, data, qid=0):
+        """Submit a WRITE request targeting queue `qid` (drives the QID bits appended above
+        SQE_LBA_PTR_W in WR_MFB_META; default 0 for single-queue tests, unchanged)."""
+        q = self.queues[qid]
+        meta = lba_ptr | (qid << SQE_LBA_PTR_W)
+        tr = MfbTransactionWithMeta(data=data, meta=meta)
         if self.log.isEnabledFor(logging.DEBUG):
-            self.log.debug(f"Appending NVMe write command: LBA_PTR=0x{lba_ptr:016X}, SIZE={len(data)} bytes")
-        self.m_wr_mfb_driver.append(tr, self.iuventus_model.create_nvme_wr_cmd)
+            self.log.debug(f"Appending NVMe write command: LBA_PTR=0x{lba_ptr:016X}, QID={qid}, SIZE={len(data)} bytes")
+        self.m_wr_mfb_driver.append(tr, q.iuventus_model.create_nvme_wr_cmd)
         self.tb_wr_reqs += 1
         # Only count non-OOR requests to match iuventus_model.c_sqe_wr_cmd_size semantics.
         # OOR writes are caught by the model and never dispatched as SQEs.
@@ -674,6 +768,129 @@ class Testbench:
         if last_test:
             raise self.m_scoreboard.result
 
+    async def post_test_checks_multi(self, req_count, max_stall_cycles=None):
+        """Multi-queue equivalent of post_test_checks: waits for all `req_count` completions
+        (across every queue -- OP_STAT is one physical bus shared by all N queues, so
+        op_stat_mon.ops_processed already counts the aggregate) and the RQ doorbell FIFO to
+        drain, then checks EACH queue in self.queues converged (SQTDBL==SQHDBL, CQTDBL==CQHDBL,
+        no outstanding requests -- via that queue's own nvme_ctrl_model/iuventus_model.post_check),
+        and finally raises the scoreboard result (the CC/RD/OP_STAT interfaces use expected-output
+        lists shared across all queues -- see add_queue -- so this one result covers every queue's
+        traffic).
+
+        Unlike post_test_checks, this does NOT call check_doorbels()/check_dut_cntrs(): those
+        compare against the DUT's single legacy SQTDBL/CQHDBL status registers and the global
+        (cross-queue-aggregate) MI counters, which only ever reflect "whichever queue last acted"
+        -- not a meaningful per-queue check for N>1 (see nvme_sw_manager.vhd's Stage B doc: those
+        status registers are intentionally not per-queue).
+        """
+        self.log.setLevel(logging.INFO)
+        last_num = 0
+        stall_cycles = 0
+        last_ops = -1
+        while (self.op_stat_mon.ops_processed < req_count):
+            if (self.op_stat_mon.ops_processed // 100 > last_num):
+                last_num = self.op_stat_mon.ops_processed // 100
+                cocotb.log.info(f"Completed {self.op_stat_mon.ops_processed} requests...")
+
+            if max_stall_cycles is not None:
+                if self.op_stat_mon.ops_processed == last_ops:
+                    stall_cycles += 100
+                else:
+                    stall_cycles = 0
+                    last_ops = self.op_stat_mon.ops_processed
+                if stall_cycles >= max_stall_cycles:
+                    cocotb.log.warning(
+                        f"STALL DETECTED after {stall_cycles} cycles: "
+                        f"ops_processed={self.op_stat_mon.ops_processed}/{req_count}"
+                    )
+                    assert False, (
+                        f"DUT stalled: ops_processed={self.op_stat_mon.ops_processed} "
+                        f"after {stall_cycles} cycles of no progress (expected {req_count})"
+                    )
+
+            await ClockCycles(self.dut.CLK, 100)
+        await ClockCycles(self.dut.CLK, 100)
+
+        # Wait for every queue's SQTDBL/CQHDBL to converge (each queue's own doorbell state).
+        for _ in range(100):
+            if all(
+                q.nvme_ctrl_model._sqtdbl == q.nvme_ctrl_model._sqhdbl
+                and q.nvme_ctrl_model._cqtdbl == q.nvme_ctrl_model._cqhdbl
+                and q.iuventus_model.sqhdbl == q.iuventus_model.sqtdbl
+                for q in self.queues
+            ):
+                break
+            await ClockCycles(self.dut.CLK, 100)
+        else:
+            cocotb.log.warning("Timed out waiting for all queues' SQTDBL/CQHDBL to converge...")
+
+        # Drain the doorbell FIFO -- see post_test_checks for the rationale (identical here: it's
+        # a single, queue-agnostic hardware FIFO in dbl_updater.vhd).
+        self.m_rq_mfb_bpsr.stop()
+        self.dut.PCIE_RQ_MFB_DST_RDY.value = 1
+
+        drain_timeout = 50_000
+        drain_cycles = 0
+        src_rdy_idle_count = 0
+        src_rdy_idle_threshold = 10
+        while drain_cycles < drain_timeout:
+            await RisingEdge(self.dut.CLK)
+            drain_cycles += 1
+            if not bool(self.dut.PCIE_RQ_MFB_SRC_RDY.value):
+                src_rdy_idle_count += 1
+            else:
+                src_rdy_idle_count = 0
+            if src_rdy_idle_count >= src_rdy_idle_threshold:
+                break
+        else:
+            assert False, (
+                f"Doorbell FIFO did not drain within {drain_timeout} cycles — "
+                "this indicates a genuine RTL hang in dbl_updater, not an in-flight artifact"
+            )
+
+        cocotb.log.info(f"Doorbell FIFO drained after {drain_cycles} cycles.")
+
+        # Drain any still-in-flight RD_MFB (read-data) transactions before disabling: op_stat/
+        # doorbell convergence only proves every queue's CQE was processed, not that the LAST
+        # command's read-data has finished streaming over RD_MFB (that stream can legitimately
+        # trail CQE dispatch by a few cycles under the random RD_MFB_DST_RDY backpressure
+        # -- see m_rd_mfb_bpsr). Stop that backpressure and hold DST_RDY=1 so the data can flush,
+        # then wait until every queue's own predicted RD_MFB queue (nvme_ctrl_model.rd_mfb_exp_out,
+        # shared across queues added via add_queue -- see Testbench.add_queue) is fully drained.
+        self.m_rd_mfb_bpsr.stop()
+        self.dut.RD_MFB_DST_RDY.value = 1
+
+        rd_mfb_drain_timeout = 50_000
+        rd_mfb_drain_cycles = 0
+        while rd_mfb_drain_cycles < rd_mfb_drain_timeout:
+            if all(len(q.nvme_ctrl_model.rd_mfb_exp_out) == 0 for q in self.queues):
+                break
+            await ClockCycles(self.dut.CLK, 100)
+            rd_mfb_drain_cycles += 100
+        else:
+            cocotb.log.warning(
+                "Timed out waiting for RD_MFB to drain: "
+                f"{[len(q.nvme_ctrl_model.rd_mfb_exp_out) for q in self.queues]} transactions "
+                "still expected per queue."
+            )
+
+        cocotb.log.info(f"RD_MFB drained after {rd_mfb_drain_cycles} cycles.")
+
+        await self.disable_dut()
+
+        for q in self.queues:
+            q.nvme_ctrl_model.post_check()
+            q.iuventus_model.post_check()
+            assert q.nvme_ctrl_model.c_sqes_proc == q.iuventus_model.c_sqes_disp, (
+                f"queue {q.qid}: SQE mismatch NVME={q.nvme_ctrl_model.c_sqes_proc} "
+                f"Iuventus={q.iuventus_model.c_sqes_disp}")
+            assert q.nvme_ctrl_model.c_cqes_disp == q.iuventus_model.c_cqes_proc, (
+                f"queue {q.qid}: CQE mismatch NVME={q.nvme_ctrl_model.c_cqes_disp} "
+                f"Iuventus={q.iuventus_model.c_cqes_proc}")
+
+        raise self.m_scoreboard.result
+
 async def prepare(dut, qsize=16, strict_rq=True):
     CLK_PERIOD = 4
     MI_CLK_PERIOD = 10
@@ -744,6 +961,123 @@ async def prepare(dut, qsize=16, strict_rq=True):
     await tb_instance.nullify_cpl_queue()
     await tb_instance.enable_dut()
     return tb_instance
+
+
+async def prepare_multi(dut, num_queues=None, qsize=16, strict_rq=False):
+    """Multi-queue variant of prepare(): builds a Testbench with `num_queues` (default:
+    misc_const.NUM_QUEUES, i.e. whatever the elaborated RTL generic is) SQ[q]/CQ[q] queues
+    sharing one RDBUFF/WRBUFF data pool, MI-programs each queue's doorbell base addresses per the
+    contract (queue 0 = legacy SQTDBL_BADDR/CQHDBL_BADDR registers; queues 1..N-1 =
+    EXTRA_Q_BASE_ADDR block -- see misc_const.py), and enables the DUT.
+
+    Each queue's model pair uses qid=q (0-based) both as the NVMe protocol-level sq_id (a
+    model-internal cross-check between IuventusModel/NVMEControllerModel; the RTL does not
+    validate it) and as the RTL routing QID (NVME_RD_REQ_QID / the WR_MFB_META QID bits).
+    """
+    N = num_queues if num_queues is not None else NUM_QUEUES
+    assert N >= 1
+
+    CLK_PERIOD = 4
+    MI_CLK_PERIOD = 10
+
+    cocotb.log.info(f"Random seed set to {cocotb.RANDOM_SEED}, NUM_QUEUES={N}")
+    dbg_set = os.getenv("DEBUG_ENABLE", "false") == "true"
+
+    Clock(dut.CLK, CLK_PERIOD, unit='ns').start()
+    Clock(dut.MI_CLK, MI_CLK_PERIOD, unit='ns').start()
+
+    # One shared RDBUFF/WRBUFF data pool; each queue gets its own IuventusBuffers instance (own
+    # SQ[q]/CQ[q] ring) aliasing that same pool -- see IuventusBuffers' shared_pool parameter.
+    # (Deliberately NOT the module-global `iuventus_model_buffers`, which the single-queue suite
+    # reuses across tests for a different reason -- see that variable's own comment.)
+    shared_pool = IuventusBuffers(qsize)
+    per_queue_buffs = [IuventusBuffers(qsize, shared_pool=shared_pool) for _ in range(N)]
+
+    mptr = random.randint(0, 2**64-1)
+    # Per-queue SQ[q]/CQ[q]: flat page q of a shared BAR0-like/BAR1-like region (mirrors
+    # dma_iuventus.vhd's NUM_QUEUES contract: SQ[q] at q*4096, CQ[q] at q*4096).
+    sq_region_base = random.randint(0, 2**64-1) & ~(BUFF_SIZE-1)
+    cq_region_base = random.randint(0, 2**64-1) & ~(BUFF_SIZE-1)
+    rdbuff_prpl_baddr = random.randint(0, 2**64-1) & ~0xFFF
+    wrbuff_prpl_baddr = random.randint(0, 2**64-1) & ~0xFFF
+    rdbuff_baddr = random.randint(0, 2**64-1) & ~(BUFF_SIZE-1)
+    wrbuff_baddr = random.randint(0, 2**64-1) & ~(BUFF_SIZE-1)
+    rdbuff_prpl_data = [rdbuff_baddr + (i*PAGE_SIZE) for i in range(BUFF_SIZE_PAGES)]
+    wrbuff_prpl_data = [wrbuff_baddr + (i*PAGE_SIZE) for i in range(BUFF_SIZE_PAGES)]
+    lba_num_mask = 511
+
+    sq_baddrs = [sq_region_base + q * PAGE_SIZE for q in range(N)]
+    cq_baddrs = [cq_region_base + q * PAGE_SIZE for q in range(N)]
+    sqtdbl_baddrs = [random.randint(0, 2**64-1) & ~0x3F for _ in range(N)]
+    cqhdbl_baddrs = [random.randint(0, 2**64-1) & ~0x3F for _ in range(N)]
+    # Disjoint 8-bit PCIe requester-tag ranges, one contiguous block per queue (see
+    # NVMEControllerModel's tag_range parameter).
+    tags_per_q = 256 // N
+    tag_ranges = [range(q * tags_per_q, (q + 1) * tags_per_q) for q in range(N)]
+
+    cocotb.log.info(f"Multi-queue test parameters (N={N}):\n"
+                    f"  MPTR=0x{mptr:016X}\n"
+                    f"  QSIZE={qsize}\n"
+                    f"  SQ_BADDRS={[f'0x{a:016X}' for a in sq_baddrs]}\n"
+                    f"  CQ_BADDRS={[f'0x{a:016X}' for a in cq_baddrs]}\n"
+                    f"  SQTDBL_BADDRS={[f'0x{a:016X}' for a in sqtdbl_baddrs]}\n"
+                    f"  CQHDBL_BADDRS={[f'0x{a:016X}' for a in cqhdbl_baddrs]}\n"
+                    f"  RDBUFF_PRPL_BADDR=0x{rdbuff_prpl_baddr:016X}\n"
+                    f"  WRBUFF_PRPL_BADDR=0x{wrbuff_prpl_baddr:016X}\n")
+
+    tb_instance = Testbench(
+        dut=dut, qid=0, mptr=mptr, qsize=qsize, sq_baddr=sq_baddrs[0], cq_baddr=cq_baddrs[0],
+        sqtdbl_baddr=sqtdbl_baddrs[0], cqhdbl_baddr=cqhdbl_baddrs[0],
+        rdbuff_prpl_baddr=rdbuff_prpl_baddr, rdbuff_prpl_data=rdbuff_prpl_data,
+        wrbuff_prpl_baddr=wrbuff_prpl_baddr, wrbuff_prpl_data=wrbuff_prpl_data,
+        iuventus_model_buffers=per_queue_buffs[0], debug=dbg_set, strict_rq=strict_rq,
+        tag_range=tag_ranges[0],
+        # RD_MFB is a strict (front-of-queue-only) scoreboard by default (see Testbench's
+        # rd_mfb_reorder_depth), which is only valid for a single producer's own dispatch order.
+        # With N queues each independently (and eagerly, at their own SQE-processing time)
+        # appending to the ONE shared rd_mfb_exp_out list, the real DUT's RD_MFB drain -- which
+        # follows cqe_processor's single physical round-robin arbiter across all queues, not the
+        # appends' racing order -- can legitimately reorder across queues. QUEUE_DEPTH*N bounds how
+        # many commands can be concurrently outstanding across all queues, so it bounds how far
+        # apart in the expected list a real match can legitimately be.
+        rd_mfb_reorder_depth=QUEUE_DEPTH * N)
+
+    for q in range(1, N):
+        tb_instance.add_queue(
+            qid=q, mptr=mptr, qsize=qsize, sq_baddr=sq_baddrs[q], cq_baddr=cq_baddrs[q],
+            sqtdbl_baddr=sqtdbl_baddrs[q], cqhdbl_baddr=cqhdbl_baddrs[q],
+            rdbuff_prpl_baddr=rdbuff_prpl_baddr, rdbuff_prpl_data=rdbuff_prpl_data,
+            wrbuff_prpl_baddr=wrbuff_prpl_baddr, wrbuff_prpl_data=wrbuff_prpl_data,
+            buffs=per_queue_buffs[q], tag_range=tag_ranges[q])
+
+    await tb_instance.reset()
+    await tb_instance.m_mi_driver.write(IuventusMiRegMap.DBL_MASK, int(qsize-1).to_bytes(2, 'little'))
+    await tb_instance.m_mi_driver.write(IuventusMiRegMap.RDBUFF_BADDR_L, rdbuff_prpl_data[0].to_bytes(8, 'little'))
+    await tb_instance.m_mi_driver.write(IuventusMiRegMap.RDBUFF_PRP_LIST_PTR_L, rdbuff_prpl_baddr.to_bytes(8, 'little'))
+    await tb_instance.m_mi_driver.write(IuventusMiRegMap.WRBUFF_BADDR_L, wrbuff_prpl_data[0].to_bytes(8, 'little'))
+    await tb_instance.m_mi_driver.write(IuventusMiRegMap.WRBUFF_PRP_LIST_PTR_L, wrbuff_prpl_baddr.to_bytes(8, 'little'))
+    await tb_instance.m_mi_driver.write(IuventusMiRegMap.META_PTR_L, mptr.to_bytes(8, 'little'))
+    await tb_instance.m_mi_driver.write(IuventusMiRegMap.LBA_SPACE_SIZE_L, STORAGE_CAP_LBAS.to_bytes(8, 'little'))
+    await tb_instance.m_mi_driver.write(IuventusMiRegMap.LBA_NUM_MASK, lba_num_mask.to_bytes(2, 'little'))
+
+    # Queue 0's doorbell base addresses: the legacy registers, unchanged offsets.
+    await tb_instance.m_mi_driver.write(IuventusMiRegMap.SQTDBL_BADDR_L, sqtdbl_baddrs[0].to_bytes(8, 'little'))
+    await tb_instance.m_mi_driver.write(IuventusMiRegMap.CQHDBL_BADDR_L, cqhdbl_baddrs[0].to_bytes(8, 'little'))
+
+    # Queues 1..N-1: EXTRA_Q_BASE_ADDR block, one EXTRA_Q_STRIDE-sized (16 B) slot per queue.
+    for q in range(1, N):
+        base = EXTRA_Q_BASE_ADDR + (q - 1) * EXTRA_Q_STRIDE
+        await tb_instance.m_mi_driver.write(base + 0x0, (sqtdbl_baddrs[q] & 0xFFFFFFFF).to_bytes(4, 'little'))
+        await tb_instance.m_mi_driver.write(base + 0x4, (sqtdbl_baddrs[q] >> 32).to_bytes(4, 'little'))
+        await tb_instance.m_mi_driver.write(base + 0x8, (cqhdbl_baddrs[q] & 0xFFFFFFFF).to_bytes(4, 'little'))
+        await tb_instance.m_mi_driver.write(base + 0xC, (cqhdbl_baddrs[q] >> 32).to_bytes(4, 'little'))
+
+    tb_instance.bpsr_start()
+
+    await tb_instance.nullify_cpl_queue()
+    await tb_instance.enable_dut()
+    return tb_instance
+
 
 # Largest LBA count a single command may request: NVME_RD_REQ_LBA_NUM / the SQE's num_lba field
 # are 8-bit hardware caps independent of buffer size (see MAX_CMD_LBAS) -- min() with
@@ -947,3 +1281,206 @@ async def run_queue_data_isolation_test(dut, req_count: int = 80, size_reduce_fa
         "QUEUE/DATA ISOLATION: SQ/CQ intact after full-range data traffic "
         f"(max WRBUFF page={tb.nvme_ctrl_model.max_wrbuff_page_used}, "
         f"max RDBUFF page={tb.nvme_ctrl_model.max_rdbuff_page_used}, page 0 never touched).")
+
+
+# =====================================================================================================
+# Multi-queue tests (NUM_QUEUES > 1) -- validate the bifurcated multi-queue RTL (Stage B/C).
+#
+# NUM_QUEUES here is read from the environment (misc_const.NUM_QUEUES), matching whatever value
+# the elaborated RTL generic was built with (see ../Makefile's NUM_QUEUES variable, forwarded to
+# both `nvc -e -g NUM_QUEUES=...` and this cocotb process's environment). Run at NUM_QUEUES=2 and
+# NUM_QUEUES=4 to validate real multi-queue operation; at the default NUM_QUEUES=1 these tests
+# still run (as a degenerate single-queue case) but exercise nothing new.
+# =====================================================================================================
+
+def req_gen_multi(tb, req_count, num_queues, size_reduce_factor=1, rd_en=True, wr_en=True):
+    """Like req_gen, but round-robins requests across all `num_queues` queues, driving
+    NVME_RD_REQ_QID (reads) / the WR_MFB_META QID bits (writes) -- see Testbench.nvme_rd/nvme_wr.
+    """
+    random.seed(cocotb.RANDOM_SEED)
+    for i in range(req_count):
+        qid = i % num_queues
+        lba_ptr = random.randint(0, STORAGE_CAP_LBAS-1)
+
+        if (random.choice([True, False]) and rd_en) or not wr_en:
+            lba_num = random.randint(1, MAX_REQ_LBAS // size_reduce_factor)
+            tb.nvme_rd(lba_ptr, lba_num, qid=qid)
+        elif wr_en:
+            lba_num = random.randint(1, MAX_REQ_LBAS // size_reduce_factor)
+            data = bytearray(random.randbytes(lba_num * SECT_SIZE))
+            tb.nvme_wr(lba_ptr, data, qid=qid)
+
+
+@cocotb.test()
+async def run_multi_queue_rw_test(dut, req_count: int = 80, size_reduce_factor: int = 8):
+    """Concurrent read+write traffic spread round-robin across all NUM_QUEUES queues. Verifies
+    per-queue completions and data integrity via the shared CC/RD/OP_STAT scoreboards (fed by
+    every queue's model predictions, merged in real dispatch order -- see Testbench.add_queue)
+    plus each queue's own model post_check (SQTDBL/CQHDBL convergence, no leaked requests). At
+    NUM_QUEUES=1 this degenerates to a single-queue mixed read+write test.
+    """
+    tb = await prepare_multi(dut)
+    req_gen_multi(tb, req_count, NUM_QUEUES, size_reduce_factor=size_reduce_factor)
+    await tb.post_test_checks_multi(req_count, max_stall_cycles=20000)
+
+
+@cocotb.test()
+async def run_multi_queue_phase_wrap_test(dut, req_count: int = 200, qsize: int = 4, size_reduce_factor: int = 40):
+    """Each queue's CQ phase tag wraps independently every `qsize` completions (cqe_processor's
+    round-robin arbiter tracks a separate cqhdbl_pst/observed_phase_value_reg per queue -- see
+    cqe_processor.vhd). Spreading req_count requests round-robin across NUM_QUEUES queues wraps
+    every queue's CQ phase several times; a per-queue phase-wrap bug (e.g. one queue's phase
+    toggle being triggered by -- or clobbering -- another queue's wrap) would stall that queue's
+    completions, caught by max_stall_cycles.
+    """
+    tb = await prepare_multi(dut, qsize=qsize)
+    cocotb.log.info(f"MULTI-QUEUE PHASE-WRAP: NUM_QUEUES={NUM_QUEUES} qsize={qsize} "
+                    f"req_count={req_count} (~{req_count // (qsize * NUM_QUEUES)} wraps/queue) "
+                    f"seed={cocotb.RANDOM_SEED}")
+    req_gen_multi(tb, req_count, NUM_QUEUES, size_reduce_factor=size_reduce_factor)
+    await tb.post_test_checks_multi(req_count, max_stall_cycles=20000)
+
+
+@cocotb.test()
+async def run_multi_queue_isolation_test(dut, req_count: int = 150, size_reduce_factor: int = 8):
+    """Cross-queue isolation: heavy traffic skewed toward queue 0 (the "victim") concurrently with
+    traffic on every other queue (the "aggressors") must never disturb queue 0's SQ/CQ (flat page
+    0) or any other queue's/command's data pages.
+
+    Each queue's IuventusModel/NVMEControllerModel instance only recognizes PCIe peer accesses
+    that fall within ITS OWN configured SQ[q]/CQ[q]/RDBUFF/WRBUFF address ranges (see
+    IuventusModel.proc_pcie_cq_reqs's "Invalid MRD/MWR address requested" assert) and every
+    RDBUFF/WRBUFF access additionally asserts it never lands below FIRST_DATA_PAGE=NUM_QUEUES (see
+    NVMEControllerModel._dispatch_wr_req/_dispatch_rd_req) -- a misrouted access (e.g. the RTL
+    sending queue A's SQE fetch to queue B's page, or a data command aliasing onto a queue page)
+    fails one of those asserts immediately rather than silently aliasing.
+    """
+    tb = await prepare_multi(dut)
+    random.seed(cocotb.RANDOM_SEED)
+    for i in range(req_count):
+        # Queue 0 (the victim) gets ~half the traffic; the rest round-robins the remaining queues
+        # (the aggressors). Meaningful only at NUM_QUEUES>1 -- at NUM_QUEUES=1 everything targets
+        # the only queue there is.
+        if NUM_QUEUES < 2 or i % 2 == 0:
+            qid = 0
+        else:
+            qid = 1 + (i % (NUM_QUEUES - 1))
+
+        lba_ptr = random.randint(0, STORAGE_CAP_LBAS-1)
+        if random.choice([True, False]):
+            lba_num = random.randint(1, MAX_REQ_LBAS // size_reduce_factor)
+            tb.nvme_rd(lba_ptr, lba_num, qid=qid)
+        else:
+            lba_num = random.randint(1, MAX_REQ_LBAS // size_reduce_factor)
+            data = bytearray(random.randbytes(lba_num * SECT_SIZE))
+            tb.nvme_wr(lba_ptr, data, qid=qid)
+
+    await tb.post_test_checks_multi(req_count, max_stall_cycles=20000)
+
+    if NUM_QUEUES > 1:
+        cocotb.log.info(
+            "MULTI-QUEUE ISOLATION: heavy cross-queue traffic (victim=queue 0) completed without "
+            "any queue's peer accesses landing outside its own SQ/CQ/data-pool ranges.")
+
+
+@cocotb.test()
+async def run_multi_queue_capacity_test(dut, req_count: int = 60):
+    """All NUM_QUEUES queues contend for the ONE shared RDBUFF/WRBUFF data pool (flat pages
+    NUM_QUEUES..127). Proves disjoint page allocation across queues (every queue's own
+    NVMEControllerModel independently asserts its own peer accesses never land below
+    FIRST_DATA_PAGE=NUM_QUEUES, i.e. never on ANY queue's reserved page -- a collision between two
+    queues' commands sharing the same data page would still pass that per-queue assert, but WOULD
+    corrupt data and fail the CC/RD scoreboards) and that the pool's capacity is genuinely shared
+    (the combined high-water mark across all queues reaches deep into the pool, generalizing the
+    single-queue run_capacity_test's claim to N queues contending for it at once).
+    """
+    OLD_BUFF_SIZE_PAGES = 32  # the pre-flat-addressing (partitioned, 128 KiB per channel) page count
+    tb = await prepare_multi(dut)
+    req_gen_multi(tb, req_count, NUM_QUEUES, size_reduce_factor=1, wr_en=False)
+    await tb.post_test_checks_multi(req_count, max_stall_cycles=20000)
+
+    max_page = max(q.nvme_ctrl_model.max_wrbuff_page_used for q in tb.queues)
+    cocotb.log.info(
+        f"MULTI-QUEUE CAPACITY: max WRBUFF page reached across all {NUM_QUEUES} queue(s) = "
+        f"{max_page} (DATA_PAGES={DATA_PAGES}, pre-flat-addressing cap={OLD_BUFF_SIZE_PAGES})")
+    assert max_page >= OLD_BUFF_SIZE_PAGES, (
+        "Multi-queue capacity test did not reach beyond the pre-flat-addressing page cap "
+        f"({OLD_BUFF_SIZE_PAGES}): max page used across all queues = {max_page}. "
+        "Increase req_count."
+    )
+
+
+@cocotb.test()
+async def run_multi_queue_flush_test(dut, size_reduce_factor: int = 8):
+    """Proves op_ctrl.vhd's per-queue FLUSH keepalive (armed independently by each queue's own
+    successful WRITE completion, tracked in flush_delay_cnt_reg/_active_reg/_dispatch_reg -- one
+    element per queue) actually reaches the RIGHT queue: after one WRITE completes on EACH queue,
+    every queue's own timer should independently expire and dispatch exactly one FLUSH on ITS OWN
+    SQ[q]/CQ[q] -- no more, no less, and none of it leaking into another queue's count.
+
+    FLUSH produces no OP_STAT (op_ctrl.vhd's ctx_in_op_type=FLUSH_CMD_OPCODE never matches
+    RD_CMD_OPCODE/WR_CMD_OPCODE at completion time), so it is invisible on that interface; instead
+    this checks each queue's own nvme_ctrl_model.c_sqes_proc / iuventus_model.c_sqes_disp
+    delta -- both counters increment once per SQE dispatched regardless of opcode -- across the
+    keepalive window, and finally reuses post_test_checks_multi's own
+    c_sqes_proc==c_sqes_disp / c_cqes_disp==c_cqes_proc invariants (see there) as an additional,
+    independent confirmation that every queue's model pair agrees nothing was lost or misrouted.
+
+    Requires FLUSH_DELAY_CNTR_WIDTH overridden small (see ../Makefile): the real 28-bit production
+    default (2**28 cycles) is unreachable in a functional sim, so this returns immediately
+    (harmless quick pass, not a hang) unless it was overridden.
+    """
+    if FLUSH_DELAY_CNTR_WIDTH > 16:
+        cocotb.log.warning(
+            f"FLUSH_DELAY_CNTR_WIDTH={FLUSH_DELAY_CNTR_WIDTH} is too wide to reach a keepalive "
+            "expiry in a reasonable sim time -- skipping (see Makefile's "
+            "FLUSH_DELAY_CNTR_WIDTH override; e.g. `make sim-parallel FLUSH_DELAY_CNTR_WIDTH=6`).")
+        return
+
+    tb = await prepare_multi(dut)
+
+    # One WRITE per queue, arming each queue's own keepalive timer at its own completion time.
+    random.seed(cocotb.RANDOM_SEED)
+    for qid in range(NUM_QUEUES):
+        lba_ptr = random.randint(0, STORAGE_CAP_LBAS - 1)
+        lba_num = random.randint(1, MAX_REQ_LBAS // size_reduce_factor)
+        data = bytearray(random.randbytes(lba_num * SECT_SIZE))
+        tb.nvme_wr(lba_ptr, data, qid=qid)
+
+    # Wait for all NUM_QUEUES priming WRITEs to complete (their own OP_STATs).
+    for _ in range(2000):
+        if tb.op_stat_mon.ops_processed >= NUM_QUEUES:
+            break
+        await ClockCycles(dut.CLK, 10)
+    else:
+        assert False, "Timed out waiting for the priming WRITEs to complete"
+
+    # Wait for every queue's own keepalive to expire and its FLUSH to be dispatched+completed.
+    # Generous margin: queues arm at slightly different times (their priming WRITEs don't
+    # necessarily complete simultaneously -- some queues may already be well into, or even past,
+    # their own keepalive window by the time the last one's priming WRITE completes above), and
+    # admission of each FLUSH competes with S_IDLE's normal read/write admission priority and with
+    # every other queue's own FLUSH (see op_ctrl.vhd's priority-picked flush_qid_v).
+    flush_wait_cycles = (2 ** FLUSH_DELAY_CNTR_WIDTH) * 4 + 2000
+    await ClockCycles(dut.CLK, flush_wait_cycles)
+
+    # Absolute counts, not a before/after delta: each queue processes EXACTLY 2 SQEs in this
+    # whole test (its priming WRITE, then its own FLUSH) if -- and only if -- the keepalive
+    # reached the right queue exactly once. A before/after delta would be sensitive to exactly
+    # when the snapshot was taken relative to each queue's own (independently-timed) window,
+    # which the wait above deliberately does not try to align across queues.
+    for qid, q in enumerate(tb.queues):
+        assert q.nvme_ctrl_model.c_sqes_proc == 2, (
+            f"queue {qid}: expected exactly 2 dispatched SQEs (its priming WRITE + its own "
+            f"FLUSH) by now, got {q.nvme_ctrl_model.c_sqes_proc} (nvme_ctrl_model.c_sqes_proc) "
+            "-- either the FLUSH never reached this queue or another queue's leaked into it")
+        assert q.iuventus_model.c_sqes_disp == 2, (
+            f"queue {qid}: expected exactly 2 SQEs IuventusModel observed (its priming WRITE + "
+            f"its own FLUSH) by now, got {q.iuventus_model.c_sqes_disp} "
+            "(iuventus_model.c_sqes_disp)")
+
+    await tb.post_test_checks_multi(NUM_QUEUES, max_stall_cycles=20000)
+
+    cocotb.log.info(
+        f"MULTI-QUEUE FLUSH: all {NUM_QUEUES} queue(s) independently armed, dispatched and "
+        "completed exactly one FLUSH keepalive each on their own SQ[q]/CQ[q].")

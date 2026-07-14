@@ -23,9 +23,16 @@ class NVMEControllerModel:
     def __init__(self, sq_id : int, mptr : int, qsize : int, sq_baddr : int, cq_baddr : int, sqtdbl_baddr : int,
                  cqhdbl_baddr : int, cq_drv : MFBDriver, cc_mon : MFBMonitor, rq_mon : MFBMonitor,
                  rdbuff_prpl_baddr : int, rdbuff_prpl_data : List[int], wrbuff_prpl_baddr : int, wrbuff_prpl_data : List[int],
-                 cq_drv_callback, wr_placement_callback):
+                 cq_drv_callback, wr_placement_callback, tag_range=range(256), rd_mfb_exp_out=None,
+                 flush_observed_callback=None):
         self._cq_drv = cq_drv
         self.cq_drv_callback = cq_drv_callback
+        # Called (cmd_id) the moment a real FLUSH command SQE is recognized in _proc_sq_entries
+        # (op_ctrl.vhd's autonomous per-queue keepalive -- see FLUSH_DELAY_CNTR_WIDTH -- dispatches
+        # these on its own, never via create_nvme_rd_cmd/create_nvme_wr_cmd), so IuventusModel can
+        # keep its own tag-pool/CC-response predictions in sync -- see
+        # IuventusModel.observe_flush_dispatch. Defaults to a no-op for callers that don't care.
+        self.flush_observed_callback = flush_observed_callback if flush_observed_callback is not None else (lambda cmd_id: None)
         # Called (cmd_id, k) for every WRITE command with the real wr_alloc page k (derived below
         # from the actual dispatched SQE's PRP1), so the model can place that command's
         # already-received payload into RDBUFF at the same page the RTL actually used -- see
@@ -76,11 +83,21 @@ class NVMEControllerModel:
 
         self._no_out_reqs_ev = Event()
         self._no_tags_ev = Event()
-        self._available_tags = set(range(256))
+        # PCIe requester-tag pool for reads THIS queue's controller issues (SQ fetches / RDBUFF
+        # reads). Multiple per-queue NVMEControllerModel instances share one physical PCIe CC
+        # monitor (see _process_rd_compls), so each queue must be given a DISJOINT tag_range --
+        # otherwise two queues' outstanding requests could collide on the same tag value and a
+        # completion could be routed to the wrong queue's model. Defaults to the full 8-bit tag
+        # space, matching the original single-queue behavior at NUM_QUEUES=1.
+        self._tag_range = tag_range
+        self._available_tags = set(tag_range)
         self._outstanding_reqs = deque()
         self._oust_lba_ptr = 0
         self.log = logging.getLogger("cocotb.%s" % (type(self).__qualname__))
-        self.rd_mfb_exp_out = []
+        # Shared across all per-queue NVMEControllerModel instances when given (the RD_MFB monitor
+        # is a single physical bus for all queues); defaults to a private list, matching the
+        # original single-queue behavior at NUM_QUEUES=1.
+        self.rd_mfb_exp_out = rd_mfb_exp_out if rd_mfb_exp_out is not None else []
 
         self.c_sqes_proc = 0
         self.c_cqes_disp = 0
@@ -128,7 +145,7 @@ class NVMEControllerModel:
         self._cqtdbl = 0
         self._cqhdbl = 0
         self._compl_buffer.clear()
-        self._available_tags = set(range(256))
+        self._available_tags = set(self._tag_range)
         self._outstanding_reqs.clear()
         self._no_tags_ev.clear()
         self._no_out_reqs_ev.clear()
@@ -215,6 +232,16 @@ class NVMEControllerModel:
         hdr_deser = CCHeader.deserialize(hdr)
 
         tag = hdr_deser.tag
+
+        # Multiple per-queue NVMEControllerModel instances register this callback on the SAME
+        # physical PCIE_CC_MFB monitor (one bus, N queues); tag_range partitions the 8-bit tag
+        # space disjointly across queues, so a tag outside this instance's own range belongs to
+        # another queue's model -- ignore it here rather than asserting. At NUM_QUEUES=1
+        # (tag_range=range(256), the default) every tag is this instance's own, so this is a
+        # no-op and behavior is unchanged.
+        if tag not in self._tag_range:
+            return
+
         byte_trans_len = hdr_deser.dword_count * 4
 
         # Ensure tag is present among outstanding requests
@@ -278,10 +305,18 @@ class NVMEControllerModel:
         meta = RQMfbMeta.deserialize(trans.meta)
         hdr_deser = RQHeader.deserialize(hdr)
 
+        # Multiple per-queue NVMEControllerModel instances register this callback on the SAME
+        # physical PCIE_RQ_MFB monitor (one bus, N queues, each with its own SQTDBL/CQHDBL
+        # doorbell base address programmed via the MI map -- see EXTRA_Q_BASE_ADDR in
+        # misc_const.py). A doorbell write whose address matches neither of THIS instance's own
+        # two addresses belongs to another queue -- ignore it here rather than asserting. At
+        # NUM_QUEUES=1 there is only one queue's addresses to match, so this is unchanged.
+        if hdr_deser.addr != (self._sqtdbl_baddr >> 2) and hdr_deser.addr != (self._cqhdbl_baddr >> 2):
+            return
+
         assert meta.firstBe == 0xF, "Invalid FBE for DBL pointer update command"
         assert meta.lastBe == 0, "Invalid LBE for DBL pointer update command"
         assert hdr_deser.req_type == 0b0001, "Invalid request type for DBL pointer update command"
-        assert hdr_deser.addr == (self._sqtdbl_baddr >> 2) or hdr_deser.addr == (self._cqhdbl_baddr >> 2), "Invalid address for DBL pointer update command"
         assert hdr_deser.dword_count == 1, "Invalid address for DBL pointer update command"
 
         # Update internal pointer values
@@ -618,10 +653,14 @@ class NVMEControllerModel:
             byte_offset = start_lba * SECT_SIZE
             byte_count = num_lba * SECT_SIZE
 
-            assert byte_count <= BUFF_SIZE, f"SQE cmd_id={sqe.cmd_id}: requested {byte_count} bytes exceeds buffer size"
-            assert (start_lba + num_lba) <= self._total_lbas, f"Command exceeds storage capacity: start LBA {start_lba}, num LBA {num_lba}, total LBAs {self._total_lbas}"
-            assert sqe.prp1 != 0, f"PRP1 0x{sqe.prp1:x} cannot be zero"
-            assert sqe.prp1 % MPS == 0, f"PRP1 0x{sqe.prp1:x} is not 4KiB aligned"
+            # FLUSH carries no data/PRP payload -- op_ctrl.vhd's S_FLUSH_REQ_PREPARE zeroes
+            # PRP1/PRP2/START_LBA_PTR/LBA_NUM for it, so none of the READ/WRITE payload-size or
+            # PRP validity checks below apply.
+            if sqe.opcode != SQEOpCodes.FLUSH:
+                assert byte_count <= BUFF_SIZE, f"SQE cmd_id={sqe.cmd_id}: requested {byte_count} bytes exceeds buffer size"
+                assert (start_lba + num_lba) <= self._total_lbas, f"Command exceeds storage capacity: start LBA {start_lba}, num LBA {num_lba}, total LBAs {self._total_lbas}"
+                assert sqe.prp1 != 0, f"PRP1 0x{sqe.prp1:x} cannot be zero"
+                assert sqe.prp1 % MPS == 0, f"PRP1 0x{sqe.prp1:x} is not 4KiB aligned"
 
             if sqe.opcode == SQEOpCodes.READ:
                 # This adds expected data that were read to the RD MFB monitor callback that is
@@ -799,6 +838,20 @@ class NVMEControllerModel:
                 # For write commands we need to wait until data are going to be written to the storage
                 await self._no_out_reqs_ev.wait()
                 self._no_out_reqs_ev.clear()
+
+            elif sqe.opcode == SQEOpCodes.FLUSH:
+                # op_ctrl.vhd's per-queue keepalive (FLUSH_DELAY_CNTR_WIDTH) dispatches these
+                # autonomously -- never through create_nvme_rd_cmd/create_nvme_wr_cmd -- so this
+                # model has no advance visibility into cmd_id/dispatch timing. It consumed a real
+                # tag from this queue's shared tag pool though, exactly like a READ/WRITE would,
+                # so tell IuventusModel (whose own tag_fifo/CC-response predictions would
+                # otherwise silently desync from the RTL's real, shared pool) before this
+                # command's completion (below) reaches it. No RDBUFF/WRBUFF dispatch, no
+                # additional wait: FLUSH carries no data.
+                if self.log.isEnabledFor(logging.INFO):
+                    self.log.info(f"[qid={self._sq_id}] Processing FLUSH SQE: cmd_id={sqe.cmd_id}")
+                self.flush_observed_callback(sqe.cmd_id)
+
             else:
                 assert False, f"Unsupported SQE opcode: {sqe.opcode}"
 

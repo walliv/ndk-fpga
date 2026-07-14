@@ -4,10 +4,27 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import os
 from enum import IntEnum
+
+# Number of independent SQ/CQ queues (one per SSD), must match the RTL's NUM_QUEUES generic for
+# the elaborated design (see ../Makefile's NUM_QUEUES variable / NVC_ELAB_ARGS="-g NUM_QUEUES=...").
+# Read from the environment so `make sim-parallel NUM_QUEUES=4` elaborates and runs consistently.
+NUM_QUEUES = int(os.environ.get("NUM_QUEUES", "1"))
+
+# Width of OP_CTRL's per-queue FLUSH keepalive delay counter, must match the RTL's
+# FLUSH_DELAY_CNTR_WIDTH generic for the elaborated design (see ../Makefile's
+# FLUSH_DELAY_CNTR_WIDTH variable / NVC_ELAB_ARGS="-g FLUSH_DELAY_CNTR_WIDTH=..."). Defaults to
+# 28, the real production value -- far too slow (2**28 cycles) for a FLUSH test to reach; a
+# flush-specific test overrides this via the Makefile to a small value.
+FLUSH_DELAY_CNTR_WIDTH = int(os.environ.get("FLUSH_DELAY_CNTR_WIDTH", "28"))
 
 SQE_SIZE = 64
 CQE_SIZE = 16
+# Width of the LBA-pointer field carried in WR_MFB_META (nvme_meta_pack.vhd's SQE_LBA_PTR_W).
+# The Queue Identifier a write request targets is appended above these bits -- see
+# EXTRA_Q_BASE_ADDR below / dma_iuventus.vhd's WR_MFB_META port comment.
+SQE_LBA_PTR_W = 64
 MPS = 512
 MRRS = 4096
 PAGE_SIZE = 4096
@@ -30,16 +47,28 @@ BUFF_SIZE_PAGES = BUFF_SIZE // PAGE_SIZE
 MAX_CMD_LBAS = 256
 
 # Number of NVMe Command Identifiers / outstanding commands, matching the RTL QUEUE_DEPTH
-# generic (op_ctrl / tag manager). Also the number of buffer slots the model tracks.
-QUEUE_DEPTH = 16
+# generic (op_ctrl / tag manager). Also the number of buffer slots the model tracks. Read from
+# the environment so `make sim-parallel QUEUE_DEPTH=8` keeps RTL and model in agreement (used to
+# validate the timing-tuned QD8 multi-queue build).
+QUEUE_DEPTH = int(os.environ.get("QUEUE_DEPTH", "16"))
 # Bytes of Read/Write buffer per allocatable command region is decided dynamically by the RTL
 # page allocator; SLOT/PAGE granularity is PAGE_SIZE.
 
-# Page 0 of the flat RDBUFF/WRBUFF space is reserved for the queue (SQ/CQ); data pages start at
-# FIRST_DATA_PAGE, matching op_ctrl's IUVENTUS_PAGE_ALLOCATOR RESERVED_PAGES generic.
-FIRST_DATA_PAGE = 1
-# Number of data pages actually available to the allocators (excludes the reserved queue page).
+# Flat pages 0..NUM_QUEUES-1 hold the N queues' SQ[q]/CQ[q] (SQ[q]/CQ[q] at page q); data pages
+# start at FIRST_DATA_PAGE, matching op_ctrl's IUVENTUS_PAGE_ALLOCATOR RESERVED_PAGES generic
+# (=NUM_QUEUES). At NUM_QUEUES=1 this is page 1, identical to the original single-queue layout.
+FIRST_DATA_PAGE = NUM_QUEUES
+# Number of data pages actually available to the allocators (excludes the reserved queue pages),
+# shared by all queues.
 DATA_PAGES = BUFF_SIZE_PAGES - FIRST_DATA_PAGE
+
+# Per-queue doorbell base-address MI register block (nvme_sw_manager.vhd contract): queue 0 uses
+# the legacy SQTDBL_BADDR_L/H (0x018/0x01C) and CQHDBL_BADDR_L/H (0x020/0x024) registers; queues
+# 1..NUM_QUEUES-1 use this block instead, one EXTRA_Q_STRIDE-sized (16 B) slot per queue:
+#   EXTRA_Q_BASE_ADDR + (q-1)*EXTRA_Q_STRIDE + 0x0/0x4  = SQTDBL_BADDR_L/H(q)
+#   EXTRA_Q_BASE_ADDR + (q-1)*EXTRA_Q_STRIDE + 0x8/0xC  = CQHDBL_BADDR_L/H(q)
+EXTRA_Q_BASE_ADDR = 0x180
+EXTRA_Q_STRIDE = 0x10
 
 # Number of pages a WRITE command reserves in RDBUFF, matching op_ctrl's MAX_WR_PAGES generic
 # (32: the largest single-command write, since NVME_WR_REQ_FRAME_LNG derives from an 8-bit LBA
@@ -67,18 +96,34 @@ WC_WEAK_ORDER = True
 CQE_PHASE_TAG_BYTE = 14
 
 class IuventusBuffers:
-    def __init__(self, qsize):
+    """
+    SQ/CQ are per-queue (each queue owns a disjoint region of the flat buffer, page q); RDBUFF/
+    WRBUFF are the shared data pool (pages NUM_QUEUES..127, contended by all queues). Pass
+    `shared_pool` (another IuventusBuffers instance) to alias this instance's rd_buff/wr_buff onto
+    that instance's arrays, giving N per-queue instances (their own sq/cq) a common data pool. At
+    NUM_QUEUES=1 (shared_pool=None, the default) this is exactly the original single-queue layout.
+    """
+
+    def __init__(self, qsize, shared_pool=None):
         self.qsize = qsize
         self.sq = bytearray(qsize * SQE_SIZE)
         self.cq = bytearray(qsize * CQE_SIZE)
-        self.rd_buff = bytearray(BUFF_SIZE)
-        self.wr_buff = bytearray(BUFF_SIZE)
+        self._shared_pool = shared_pool
+        if shared_pool is not None:
+            self.rd_buff = shared_pool.rd_buff
+            self.wr_buff = shared_pool.wr_buff
+        else:
+            self.rd_buff = bytearray(BUFF_SIZE)
+            self.wr_buff = bytearray(BUFF_SIZE)
 
     def reset(self):
         self.sq = bytearray(self.qsize * SQE_SIZE)
         self.cq = bytearray(self.qsize * CQE_SIZE)
-        self.rd_buff = bytearray(BUFF_SIZE)
-        self.wr_buff = bytearray(BUFF_SIZE)
+        # In-place clear (not rebind): if this instance's rd_buff/wr_buff are aliased by other
+        # per-queue IuventusBuffers instances (shared_pool=), rebinding here would leave those
+        # aliases stale (still pointing at the old, pre-reset array).
+        self.rd_buff[:] = bytes(BUFF_SIZE)
+        self.wr_buff[:] = bytes(BUFF_SIZE)
 
 class PageAllocator:
     """
