@@ -638,11 +638,11 @@ begin
 
                 NUM_QUEUES => NUM_QUEUES,
                 -- Timing-closure lever for the N=4 multi-queue build: the per-queue tag pools /
-                -- context table / FIFOs (x NUM_QUEUES) plus the reorganized per-queue register
-                -- file congest the CQ/WRBUFF trans-buffer -> pkt_dispatcher path. QD4 (vs the
-                -- default 16) cuts that footprint enough to close timing; N=4 x QD4 = 16 total
-                -- outstanding commands, matching the original single-queue QD16 budget.
-                QUEUE_DEPTH => 4,
+                -- context table / FIFOs (x NUM_QUEUES) congest the CQ/WRBUFF trans-buffer ->
+                -- pkt_dispatcher path. Moving the per-queue register file into NP_LUTRAM freed
+                -- ~1152 flops at N=4, so QUEUE_DEPTH is raised from 4 to 8 (N=4 x QD8 = 32 total
+                -- outstanding commands); rebuild confirms the LUTRAM area drop closes timing at QD8.
+                QUEUE_DEPTH => 8,
 
                 USR_MFB_REGIONS     => DMA_MFB_REGIONS,
                 USR_MFB_REGION_SIZE => DMA_MFB_REGION_SIZE,
