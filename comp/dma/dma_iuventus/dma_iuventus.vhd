@@ -39,7 +39,18 @@ entity DMA_IUVENTUS is
         -- The allowed is only "ULTRASCALE"
         DEVICE          : string   := "ULTRASCALE";
         -- Amount of tags/Command Identifiers available for outstanding NVMe commands
-        QUEUE_DEPTH     : natural  := 16
+        QUEUE_DEPTH     : natural  := 16;
+        -- Number of independent SQ/CQ queues (one per SSD): pages 0..NUM_QUEUES-1 hold SQ[q]/CQ[q],
+        -- pages NUM_QUEUES..127 are the shared data pool. A single round-robin CQE arbiter and a
+        -- single SQ dispatch pipe serve all N queues (see cqe_processor.vhd/nvme_cmd_dispatcher.vhd).
+        -- At NUM_QUEUES=1 (the default) this design is bit-identical to the original single-queue
+        -- implementation.
+        NUM_QUEUES      : natural  := 1;
+        -- Width of each queue's own one-shot FLUSH keepalive delay counter (see OP_CTRL). 28 bits
+        -- is the real production value; only a testbench should ever override this (to a much
+        -- smaller value, so the FLUSH path is reachable in a reasonable simulation time) -- never
+        -- change the default itself.
+        FLUSH_DELAY_CNTR_WIDTH : positive := 28
         );
 
     port (
@@ -65,6 +76,10 @@ entity DMA_IUVENTUS is
         NVME_RD_REQ_LBA_NUM : in  std_logic_vector(7 downto 0);
         -- This is a LBA address (not a byte address) to the NVMe
         NVME_RD_REQ_LBA_PTR : in  std_logic_vector(SQE_LBA_PTR_W -1 downto 0);
+        -- Queue Identifier this read request targets. Left "open"/undriven by a single-queue
+        -- caller defaults to "0" (see the := (others => '0') default below), so existing
+        -- NUM_QUEUES=1 callers are unaffected.
+        NVME_RD_REQ_QID     : in  std_logic_vector(maximum(1, log2(NUM_QUEUES)) -1 downto 0) := (others => '0');
         NVME_RD_REQ_VLD     : in  std_logic;
         NVME_RD_REQ_RDY     : out std_logic;
 
@@ -93,8 +108,11 @@ entity DMA_IUVENTUS is
         -- Althougn the data size seems unlimited, the maximum is 128 KiB, or 256 LBAs/32 pages
         -- =========================================================================================
         WR_MFB_DATA    : in  std_logic_vector(USR_MFB_REGIONS*USR_MFB_REGION_SIZE*USR_MFB_BLOCK_SIZE*USR_MFB_ITEM_WIDTH-1 downto 0);
-        -- Contains LBA to which data should be written
-        WR_MFB_META    : in  std_logic_vector(USR_MFB_REGIONS*SQE_LBA_PTR_W -1 downto 0);
+        -- Per region: bits [SQE_LBA_PTR_W-1:0] = LBA to which data should be written; bits
+        -- [SQE_LBA_PTR_W+QID_W-1:SQE_LBA_PTR_W] = Queue Identifier this write request targets
+        -- (see NVME_WR_REQ_QID below). A single-queue caller supplying only the low
+        -- SQE_LBA_PTR_W bits gets the high QID bits zero-extended (QID=0) automatically.
+        WR_MFB_META    : in  std_logic_vector(USR_MFB_REGIONS*(SQE_LBA_PTR_W + maximum(1, log2(NUM_QUEUES))) -1 downto 0);
         WR_MFB_SOF     : in  std_logic_vector(USR_MFB_REGIONS-1 downto 0);
         WR_MFB_EOF     : in  std_logic_vector(USR_MFB_REGIONS-1 downto 0);
         WR_MFB_SOF_POS : in  std_logic_vector(USR_MFB_REGIONS*maximum(1, log2(USR_MFB_REGION_SIZE))-1 downto 0);
@@ -152,6 +170,9 @@ architecture FULL of DMA_IUVENTUS is
 
     constant UPDATE_DELAY : positive := 2**8;
 
+    -- Width of a Queue Identifier value (0 to NUM_QUEUES-1).
+    constant QID_W : natural := maximum(1, log2(NUM_QUEUES));
+
     package iuventus_mfb_meta_pkg_i is new work.iuventus_mfb_meta_pkg
     generic map (
         MFB_REGION_SIZE => PCIE_MFB_REGION_SIZE,
@@ -207,9 +228,19 @@ architecture FULL of DMA_IUVENTUS is
     signal cqp_cqhdbl      : std_logic_vector(15 downto 0);
     signal cqp_last_cqe    : std_logic_vector(CQ_ENTRY_RANGE);
     signal cqp_status_upd  : std_logic;
+    -- Queue Identifier of the completion reported alongside cqp_last_cqe/cqp_status_upd. Always
+    -- "0" at NUM_QUEUES=1 -- see CQE_PROCESSOR.
+    signal cqp_cqe_qid     : std_logic_vector(QID_W -1 downto 0);
 
     signal disp_cmd_id     : std_logic_vector(15 downto 0);
     signal disp_cmd_id_vld : std_logic;
+
+    -- Queue Identifier of the command currently being dispatched (op_ctrl -> c2n_controller ->
+    -- nvme_cmd_dispatcher). Always "0" at NUM_QUEUES=1.
+    signal opc_c2n_qid     : std_logic_vector(QID_W -1 downto 0);
+    -- Queue Identifier that c2n_sqtdbl_data/c2n_sqes_disp_incr apply to (mirrors opc_c2n_qid at
+    -- the dispatch commit cycle). Always "0" at NUM_QUEUES=1.
+    signal c2n_sqtdbl_qid  : std_logic_vector(QID_W -1 downto 0);
 
     -- ============================================================================================
     -- Software management interface
@@ -225,8 +256,16 @@ architecture FULL of DMA_IUVENTUS is
     signal swm_lba_num_mask   : std_logic_vector(15 downto 0);
     signal swm_lba_space_size : std_logic_vector(63 downto 0);
 
-    signal swm_cqhdbl_base_addr : std_logic_vector(63 downto 0);
-    signal swm_sqtdbl_base_addr : std_logic_vector(63 downto 0);
+    signal swm_cqhdbl_base_addr : slv_array_t(NUM_QUEUES -1 downto 0)(63 downto 0);
+    signal swm_sqtdbl_base_addr : slv_array_t(NUM_QUEUES -1 downto 0)(63 downto 0);
+
+    -- =============================================================================================
+    -- Write-request QID (parsed out of the widened WR_MFB_META -- see the entity port comment)
+    -- =============================================================================================
+    -- The LBA-pointer portion of WR_MFB_META, at the same low-bit position/width as before.
+    signal wr_mfb_meta_lba_ptr : std_logic_vector(USR_MFB_REGIONS*SQE_LBA_PTR_W -1 downto 0);
+    -- The Queue Identifier this write request targets, appended at the high end of WR_MFB_META.
+    signal wr_mfb_meta_qid     : std_logic_vector(QID_W -1 downto 0);
 
     -- =============================================================================================
     -- PCIe Header interface from Metadata Extractor
@@ -426,6 +465,14 @@ architecture FULL of DMA_IUVENTUS is
     -- attribute mark_debug of status_upd_vld : signal is "true";
 begin
     -- =============================================================================================
+    -- Parse the Queue Identifier out of the widened WR_MFB_META (see the entity port comment).
+    -- Assumes USR_MFB_REGIONS = 1, as already assumed by the direct WR_MFB_META->LBA_PTR wiring
+    -- this replaces (and by the OP_CTRL/C2N_CONTROLLER instances downstream).
+    -- =============================================================================================
+    wr_mfb_meta_lba_ptr <= WR_MFB_META(SQE_LBA_PTR_W -1 downto 0);
+    wr_mfb_meta_qid     <= WR_MFB_META(SQE_LBA_PTR_W + QID_W -1 downto SQE_LBA_PTR_W);
+
+    -- =============================================================================================
     -- MI Access logic
     -- =============================================================================================
     mi_async_g : if (not MI_SAME_CLK) generate
@@ -521,7 +568,8 @@ begin
         MRRS         => PCIE_TRANS_SIZE_MAX,
         -- Matches the WRBUFF drain packet size cap (2**POINTER_WIDTH, the buffer's per-channel
         -- span), so N2C_BUFF_USR_RDS_BYTES is wide enough for n2c_buff_usr_rds_bytes.
-        PKT_SIZE_MAX => 2**POINTER_WIDTH)
+        PKT_SIZE_MAX => 2**POINTER_WIDTH,
+        NUM_QUEUES   => NUM_QUEUES)
     port map (
         CLK      => CLK,
         RST      => RST,
@@ -599,8 +647,10 @@ begin
 
     operation_control_i : entity work.OP_CTRL
     generic map (
-        BUFF_PTR_WIDTH => POINTER_WIDTH,
-        QUEUE_DEPTH    => QUEUE_DEPTH)
+        BUFF_PTR_WIDTH         => POINTER_WIDTH,
+        QUEUE_DEPTH            => QUEUE_DEPTH,
+        NUM_QUEUES             => NUM_QUEUES,
+        FLUSH_DELAY_CNTR_WIDTH => FLUSH_DELAY_CNTR_WIDTH)
     port map (
         CLK => CLK,
         RST => RST or user_rst,
@@ -620,6 +670,7 @@ begin
 
         NVME_RD_REQ_LBA_NUM => NVME_RD_REQ_LBA_NUM,
         NVME_RD_REQ_LBA_PTR => NVME_RD_REQ_LBA_PTR,
+        NVME_RD_REQ_QID     => NVME_RD_REQ_QID,
         NVME_RD_REQ_VLD     => NVME_RD_REQ_VLD,
         NVME_RD_REQ_RDY     => NVME_RD_REQ_RDY,
 
@@ -638,6 +689,7 @@ begin
         CQP_CQE_STAT_CODE => cqp_last_cqe(CQ_ENTRY_STAT_CODE),
         CQP_CQE_VLD       => cqp_status_upd,
         CQP_CQE_CID       => cqp_last_cqe(CQ_ENTRY_CMD_ID),
+        CQP_CQE_QID       => cqp_cqe_qid,
 
         DISP_CMD_ID     => disp_cmd_id,
         DISP_CMD_ID_VLD => disp_cmd_id_vld,
@@ -649,8 +701,10 @@ begin
         C2N_PRP_ENTRY_2   => opc_prp_entry_2,
         C2N_START_LBA_PTR => opc_start_lba_ptr,
         C2N_LBA_NUM       => opc_lba_num,
+        C2N_QID           => opc_c2n_qid,
 
-        NVME_WR_REQ_LBA_PTR         => WR_MFB_META,
+        NVME_WR_REQ_LBA_PTR         => wr_mfb_meta_lba_ptr,
+        NVME_WR_REQ_QID             => wr_mfb_meta_qid,
         NVME_WR_REQ_START           => WR_MFB_SOF(0) and WR_MFB_SRC_RDY,
         NVME_WR_REQ_END             => WR_MFB_EOF(0) and WR_MFB_SRC_RDY and inp_mfb_dst_rdy,
         NVME_WR_REQ_FRAME_LNG       => wr_frame_lng_sel,
@@ -676,7 +730,8 @@ begin
             MFB_REGION_SIZE => PCIE_MFB_REGION_SIZE,
             MFB_BLOCK_SIZE  => PCIE_MFB_BLOCK_SIZE,
             MFB_ITEM_WIDTH  => PCIE_MFB_ITEM_WIDTH,
-            POINTER_WIDTH   => POINTER_WIDTH)
+            POINTER_WIDTH   => POINTER_WIDTH,
+            NUM_QUEUES      => NUM_QUEUES)
         port map (
             CLK   => CLK,
             RESET => RST or user_rst,
@@ -732,7 +787,8 @@ begin
 
             MI_WIDTH            => MI_WIDTH,
             DEVICE              => DEVICE,
-            BUFF_PTR_WIDTH      => POINTER_WIDTH)
+            BUFF_PTR_WIDTH      => POINTER_WIDTH,
+            NUM_QUEUES          => NUM_QUEUES)
         port map (
             CLK => CLK,
             RST => RST or user_rst,
@@ -762,6 +818,7 @@ begin
             CQP_SQHDBL             => cqp_sqhdbl,
             CQP_LAST_CQE           => cqp_last_cqe,
             CQP_STATUS_UPD         => cqp_status_upd,
+            CQP_CQE_QID            => cqp_cqe_qid,
 
             WRBUFF_USR_RDS_INCR      => n2c_buff_usr_rds_incr,
             WRBUFF_USR_RDS_BYTES     => n2c_buff_usr_rds_bytes,
@@ -836,7 +893,10 @@ begin
             RESET        => RST or user_rst,
 
             RX_DATA      => WR_MFB_DATA,
-            RX_META      => WR_MFB_META,
+            -- Only the LBA-pointer portion of the (now QID-widened) WR_MFB_META; TX_META
+            -- (fr_lng_mfb_meta) is unused downstream, but the port width must still match
+            -- META_WIDTH => SQE_LBA_PTR_W above.
+            RX_META      => wr_mfb_meta_lba_ptr,
             RX_SOF       => WR_MFB_SOF,
             RX_EOF       => WR_MFB_EOF,
             RX_SOF_POS   => WR_MFB_SOF_POS,
@@ -905,7 +965,8 @@ begin
 
             DEVICE               => DEVICE,
             BUFF_PTR_WIDTH       => POINTER_WIDTH,
-            QUEUE_DEPTH          => QUEUE_DEPTH)
+            QUEUE_DEPTH          => QUEUE_DEPTH,
+            NUM_QUEUES           => NUM_QUEUES)
         port map (
             CLK                 => CLK,
             RST                 => RST or user_rst,
@@ -943,10 +1004,12 @@ begin
             LBA_SPACE_SIZE  => swm_lba_space_size,
             LBA_NUM         => opc_lba_num,
             LBA_NUM_MASK    => swm_lba_num_mask,
+            QID             => opc_c2n_qid,
 
             CPL_STAT_TAG        => cqp_last_cqe(CQ_ENTRY_CMD_ID),
             CPL_STAT_SQHDBL     => cqp_sqhdbl,
             CPL_STAT_VLD        => cqp_status_upd,
+            CPL_STAT_QID        => cqp_cqe_qid,
 
             RDBUFF_DISP_RDS_CHAN      => c2n_buff_disp_rds_chan,
             RDBUFF_DISP_RDS_BYTES     => c2n_buff_disp_rds_bytes,
@@ -959,6 +1022,7 @@ begin
             TAG_FIFO_STATUS     => c2n_tag_fifo_status,
             TAG_INIT_DONE       => c2n_tag_init_done,
             SQTDBL_VAL          => c2n_sqtdbl_data,
+            SQTDBL_QID          => c2n_sqtdbl_qid,
 
             DISP_CMD_ID         => disp_cmd_id,
             DISP_CMD_ID_VLD     => disp_cmd_id_vld,
@@ -979,7 +1043,8 @@ begin
             MFB_REGION_SIZE => PCIE_MFB_REGION_SIZE,
             MFB_BLOCK_SIZE  => PCIE_MFB_BLOCK_SIZE,
             MFB_ITEM_WIDTH  => PCIE_MFB_ITEM_WIDTH,
-            UPDATE_DELAY    => UPDATE_DELAY)
+            UPDATE_DELAY    => UPDATE_DELAY,
+            NUM_QUEUES      => NUM_QUEUES)
         port map (
             CLK => CLK,
             RST => RST or user_rst or cmd_disp_rst,
@@ -987,10 +1052,12 @@ begin
             CQHDBL_BASE_ADDR => swm_cqhdbl_base_addr,
             CQHDBL_DATA      => cqp_cqhdbl,
             CQHDBL_VLD       => cqp_status_upd,
+            CQHDBL_QID       => cqp_cqe_qid,
 
             SQTDBL_BASE_ADDR => swm_sqtdbl_base_addr,
             SQTDBL_DATA      => c2n_sqtdbl_data,
             SQTDBL_VLD       => c2n_sqes_disp_incr,
+            SQTDBL_QID       => c2n_sqtdbl_qid,
 
             CQHDBL_REG_UPD_DISP => dup_cqhdbl_reg_upd_disp,
             SQTDBL_REG_UPD_DISP => dup_sqtdbl_reg_upd_disp,

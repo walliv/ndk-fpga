@@ -30,7 +30,12 @@ entity DBL_UPDATER is
 
         -- The maximum delay in clock cycles between the dispatch of two updates of DBL to the
         -- NVMe controller
-        UPDATE_DELAY : positive := 10);
+        UPDATE_DELAY : positive := 10;
+
+        -- Number of independent SQ/CQ queues (one per SSD). Each queue needs one SQ-tail and one
+        -- CQ-head doorbell (see DBL_NUM below). At NUM_QUEUES=1 (the default) this design is
+        -- bit-identical to the original 2-doorbell (CQHDBL, SQTDBL) implementation.
+        NUM_QUEUES : positive := 1);
 
     port (
         CLK : in std_logic;
@@ -39,13 +44,22 @@ entity DBL_UPDATER is
         -- =========================================================================================
         -- Control interface
         -- =========================================================================================
-        CQHDBL_BASE_ADDR : in std_logic_vector(63 downto 0);
+        -- Per-queue PCIe destination address of the CQ-head/SQ-tail doorbell (all NUM_QUEUES
+        -- addresses live simultaneously -- each queue's update-state machine below needs its own
+        -- at all times, unlike *_DATA/_VLD/_QID which only ever describe one queue's event at a
+        -- time). At NUM_QUEUES=1 these are 1-element arrays, identical to the original scalar
+        -- ports.
+        CQHDBL_BASE_ADDR : in slv_array_t(NUM_QUEUES -1 downto 0)(63 downto 0);
         CQHDBL_DATA      : in std_logic_vector(15 downto 0);
         CQHDBL_VLD       : in std_logic;
+        -- Queue Identifier the CQHDBL_DATA/VLD pulse belongs to. Always "0" at NUM_QUEUES=1.
+        CQHDBL_QID       : in std_logic_vector(maximum(1, log2(NUM_QUEUES)) -1 downto 0);
 
-        SQTDBL_BASE_ADDR : in std_logic_vector(63 downto 0);
+        SQTDBL_BASE_ADDR : in slv_array_t(NUM_QUEUES -1 downto 0)(63 downto 0);
         SQTDBL_DATA      : in std_logic_vector(15 downto 0);
         SQTDBL_VLD       : in std_logic;
+        -- Queue Identifier the SQTDBL_DATA/VLD pulse belongs to. Always "0" at NUM_QUEUES=1.
+        SQTDBL_QID       : in std_logic_vector(maximum(1, log2(NUM_QUEUES)) -1 downto 0);
 
         -- =========================================================================================
         -- Status interface
@@ -69,7 +83,10 @@ end entity;
 
 architecture FULL of DBL_UPDATER is
 
-    constant DBL_NUM : positive := 2;
+    -- One SQ-tail and one CQ-head doorbell per queue: dbl_reg/dbl_base_addr indices 0..NUM_QUEUES-1
+    -- are the N queues' CQHDBL, indices NUM_QUEUES..2*NUM_QUEUES-1 are the N queues' SQTDBL. At
+    -- NUM_QUEUES=1 this is exactly the original 2-entry (CQHDBL=0, SQTDBL=1) layout.
+    constant DBL_NUM : positive := 2*NUM_QUEUES;
     constant MFB_LENGTH : positive := MFB_REGIONS * MFB_REGION_SIZE * MFB_BLOCK_SIZE * MFB_ITEM_WIDTH;
 
     signal dbl_reg : slv_array_t(DBL_NUM -1 downto 0)(CQHDBL_DATA'range);
@@ -89,11 +106,11 @@ architecture FULL of DBL_UPDATER is
 
     -- Size of a PCIE RQ header and 2 pointers (HHP and HDP, that are aligned to 4 byte boundary)
     constant FIFO_DATA_W   : positive := 16 + 64;
-    constant FIFO_WR_PORTS : positive := 2;
+    constant FIFO_WR_PORTS : positive := DBL_NUM;
     constant FIFO_RD_PORTS : positive := MFB_REGIONS;
     constant FIFO_SIZE     : positive := 16;
 
-    signal fifo_din     : std_logic_vector(2*FIFO_DATA_W -1 downto 0);
+    signal fifo_din     : std_logic_vector(FIFO_WR_PORTS*FIFO_DATA_W -1 downto 0);
     signal fifo_din_arr : slv_array_t(FIFO_WR_PORTS-1 downto 0)(FIFO_DATA_W -1 downto 0);
     signal fifo_wr      : std_logic_vector(FIFO_WR_PORTS-1 downto 0);
     signal fifo_do      : std_logic_vector(FIFO_RD_PORTS*FIFO_DATA_W -1 downto 0);
@@ -107,27 +124,37 @@ architecture FULL of DBL_UPDATER is
     signal tx_mfb_eof_pos_arr : slv_array_t(MFB_REGIONS -1 downto 0)(maximum(1, log2(MFB_REGION_SIZE*MFB_BLOCK_SIZE)) -1 downto 0);
 begin
 
-    cqhdbl_reg_p : process (CLK) is
-    begin
-        if (rising_edge(CLK)) then
-            if (RST = '1') then
-                dbl_reg(0) <= (others => '0');
-            elsif (CQHDBL_VLD = '1') then
-                dbl_reg(0) <= CQHDBL_DATA;
+    -- One process per queue (q is a generate-time constant, so each instance's dbl_reg(q)/
+    -- dbl_reg(NUM_QUEUES+q) target is a static name -- a single, unambiguous driver per element).
+    -- Splitting this across two SEPARATE processes that each dynamically indexed the SAME
+    -- dbl_reg signal (by CQHDBL_QID/SQTDBL_QID) would make VHDL treat the whole dbl_reg array as
+    -- driven by both processes (the longest *static* prefix of a variable-indexed target is the
+    -- whole signal), corrupting every element to 'X' via driver contention -- hence the
+    -- generate-per-queue structure instead. At NUM_QUEUES=1 this is exactly the original
+    -- dbl_reg(0)<=CQHDBL_DATA/dbl_reg(1)<=SQTDBL_DATA behavior (the qid compare is always true).
+    dbl_reg_wr_g : for q in 0 to NUM_QUEUES -1 generate
+        cqhdbl_reg_p : process (CLK) is
+        begin
+            if (rising_edge(CLK)) then
+                if (RST = '1') then
+                    dbl_reg(q) <= (others => '0');
+                elsif (CQHDBL_VLD = '1' and to_integer(unsigned(CQHDBL_QID)) = q) then
+                    dbl_reg(q) <= CQHDBL_DATA;
+                end if;
             end if;
-        end if;
-    end process;
+        end process;
 
-    sqtdbl_reg_p : process (CLK) is
-    begin
-        if (rising_edge(CLK)) then
-            if (RST = '1') then
-                dbl_reg(1) <= (others => '0');
-            elsif (SQTDBL_VLD = '1') then
-                dbl_reg(1) <= SQTDBL_DATA;
+        sqtdbl_reg_p : process (CLK) is
+        begin
+            if (rising_edge(CLK)) then
+                if (RST = '1') then
+                    dbl_reg(NUM_QUEUES + q) <= (others => '0');
+                elsif (SQTDBL_VLD = '1' and to_integer(unsigned(SQTDBL_QID)) = q) then
+                    dbl_reg(NUM_QUEUES + q) <= SQTDBL_DATA;
+                end if;
             end if;
-        end if;
-    end process;
+        end process;
+    end generate;
 
     dbl_update_logic_g : for idx in (DBL_NUM -1) downto 0 generate
         update_state_reg_p : process (CLK) is
@@ -199,12 +226,21 @@ begin
         end process;
     end generate;
 
-    fifo_din_arr(0)     <= dbl_reg(0) & CQHDBL_BASE_ADDR;
-    fifo_din_arr(1)     <= dbl_reg(1) & SQTDBL_BASE_ADDR;
-    dbl_base_addr(0)    <= CQHDBL_BASE_ADDR;
-    dbl_base_addr(1)    <= SQTDBL_BASE_ADDR;
-    CQHDBL_REG_UPD_DISP <= dbl_reg_upd_disp(0);
-    SQTDBL_REG_UPD_DISP <= dbl_reg_upd_disp(1);
+    -- Per-queue base addresses/dbl_reg mapping: indices 0..NUM_QUEUES-1 = CQHDBL[q], indices
+    -- NUM_QUEUES..2*NUM_QUEUES-1 = SQTDBL[q]. At NUM_QUEUES=1 this is exactly the original
+    -- fifo_din_arr(0)<=CQHDBL, fifo_din_arr(1)<=SQTDBL assignment.
+    dbl_din_arr_g : for q in 0 to NUM_QUEUES -1 generate
+        fifo_din_arr(q)              <= dbl_reg(q) & CQHDBL_BASE_ADDR(q);
+        fifo_din_arr(NUM_QUEUES + q)  <= dbl_reg(NUM_QUEUES + q) & SQTDBL_BASE_ADDR(q);
+        dbl_base_addr(q)             <= CQHDBL_BASE_ADDR(q);
+        dbl_base_addr(NUM_QUEUES + q) <= SQTDBL_BASE_ADDR(q);
+    end generate;
+
+    -- Status pulses stay system-wide (any queue's update dispatching), not per-queue -- the
+    -- original scalar semantics generalized via reduction; at NUM_QUEUES=1 each reduction is over
+    -- a single bit, exactly the original dbl_reg_upd_disp(0)/(1).
+    CQHDBL_REG_UPD_DISP <= or (dbl_reg_upd_disp(NUM_QUEUES -1 downto 0));
+    SQTDBL_REG_UPD_DISP <= or (dbl_reg_upd_disp(2*NUM_QUEUES -1 downto NUM_QUEUES));
 
     -- =============================================================================================
     -- Dispatch FIFO where all of the update requests get collected

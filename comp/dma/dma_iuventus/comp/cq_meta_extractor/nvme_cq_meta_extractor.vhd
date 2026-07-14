@@ -28,7 +28,13 @@ entity NVME_CQ_META_EXTRACTOR is
 
         -- The amount of bits from the PCIE address that are used to address the data in the
         -- transaction buffer
-        POINTER_WIDTH : natural := 17
+        POINTER_WIDTH : natural := 17;
+
+        -- Number of independent SQ/CQ queues (one per SSD). Flat pages 0..NUM_QUEUES-1 are the
+        -- queues (SQ[q]/CQ[q] at page q); pages NUM_QUEUES..127 are the shared data pool -- see
+        -- bar_id_translate_p below. At NUM_QUEUES=1 this is unchanged from the original
+        -- page-0-only routing.
+        NUM_QUEUES : natural := 1
     );
     port (
         CLK   : in std_logic;
@@ -276,19 +282,22 @@ begin
 
         pcie_addr_masked(i) <= (pcie_hdr_addr(i)(63 downto 2) & byte_shift(i)) and pcie_addr_mask(i);
 
-        -- Translate (physical BAR_ID, flat page) -> LOGICAL BAR_ID. Page 0 (masked address bits
-        -- [POINTER_WIDTH:12] all zero) is the queue (SQ on physical BAR0, CQ on physical BAR1);
-        -- pages >= 1 are the data buffer (RDBUFF on physical BAR0, WRBUFF on physical BAR1).
+        -- Translate (physical BAR_ID, flat page) -> LOGICAL BAR_ID. Pages 0..NUM_QUEUES-1 (masked
+        -- address bits [POINTER_WIDTH:12] < NUM_QUEUES) are the queues (SQ[q] on physical BAR0,
+        -- CQ[q] on physical BAR1); pages >= NUM_QUEUES are the data buffer (RDBUFF on physical
+        -- BAR0, WRBUFF on physical BAR1). The page bits already encode which queue q; the
+        -- buffer read/write at that address inherently hits SQ[q]/CQ[q], so no extra QID output
+        -- is needed here. At NUM_QUEUES=1 this is the original page-0-only test.
         bar_id_translate_p : process (all) is
         begin
             if (pcie_hdr_bar_id(i) = "000") then
-                if (unsigned(pcie_addr_masked(i)(POINTER_WIDTH downto 12)) = 0) then
+                if (unsigned(pcie_addr_masked(i)(POINTER_WIDTH downto 12)) < NUM_QUEUES) then
                     pcie_hdr_bar_id_log(i) <= SQ_BAR_ID;
                 else
                     pcie_hdr_bar_id_log(i) <= RDBUFF_BAR_ID;
                 end if;
             else
-                if (unsigned(pcie_addr_masked(i)(POINTER_WIDTH downto 12)) = 0) then
+                if (unsigned(pcie_addr_masked(i)(POINTER_WIDTH downto 12)) < NUM_QUEUES) then
                     pcie_hdr_bar_id_log(i) <= CQ_BAR_ID;
                 else
                     pcie_hdr_bar_id_log(i) <= WRBUFF_BAR_ID;

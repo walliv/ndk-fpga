@@ -34,7 +34,10 @@ entity N2C_CONTROLLER is
         -- The allowed is only "ULTRASCALE"
         DEVICE : string := "ULTRASCALE";
         -- The size of a pointer to a buffer of one channel in the buffer unit
-        BUFF_PTR_WIDTH : positive := 17
+        BUFF_PTR_WIDTH : positive := 17;
+        -- Number of independent SQ/CQ queues (one per SSD); see CQE_PROCESSOR. Default 1 is
+        -- bit-identical to the original single-queue design.
+        NUM_QUEUES     : positive := 1
     );
 
     port (
@@ -75,6 +78,9 @@ entity N2C_CONTROLLER is
         CQP_SQHDBL     : out std_logic_vector(15 downto 0);
         CQP_LAST_CQE   : out std_logic_vector(CQ_ENTRY_RANGE);
         CQP_STATUS_UPD : out std_logic;
+        -- Queue Identifier of the completion reported alongside CQP_LAST_CQE/CQP_STATUS_UPD.
+        -- Always "0" at NUM_QUEUES=1 -- see CQE_PROCESSOR.
+        CQP_CQE_QID    : out std_logic_vector(maximum(1, log2(NUM_QUEUES)) -1 downto 0);
 
         WRBUFF_USR_RDS_INCR      : out std_logic;
         WRBUFF_USR_RDS_BYTES     : out std_logic_vector(BUFF_PTR_WIDTH downto 0);
@@ -180,6 +186,7 @@ architecture FULL of N2C_CONTROLLER is
     signal cqp_sqhdbl_int   : std_logic_vector(15 downto 0);
     signal cqp_last_cqe_int : std_logic_vector(CQ_ENTRY_RANGE);
     signal cqp_status_upd_int : std_logic;
+    signal cqp_cqe_qid_int : std_logic_vector(maximum(1, log2(NUM_QUEUES)) -1 downto 0);
 begin
     -- The speed meter measures the data rate of the stream to the data buffer
     cq_mfb_speed_meter_i : entity work.MFB_SPEED_METER_MI
@@ -278,7 +285,8 @@ begin
             DEVICE => DEVICE,
             DATA_WIDTH => EXT_MFB_DATA'length,
 
-            BUFF_POINTER_WIDTH => BUFF_PTR_WIDTH)
+            BUFF_POINTER_WIDTH => BUFF_PTR_WIDTH,
+            NUM_QUEUES         => NUM_QUEUES)
         port map (
             CLK   => CLK,
             RESET => RST,
@@ -301,7 +309,8 @@ begin
             CQHDBL_UPD_DATA => cqp_cqhdbl_int,
             SQHDBL_UPD_DATA => cqp_sqhdbl_int,
             LAST_CQ_ENTRY   => cqp_last_cqe_int,
-            STATUS_UPD_EN   => cqp_status_upd_int);
+            STATUS_UPD_EN   => cqp_status_upd_int,
+            CQP_CQE_QID     => cqp_cqe_qid_int);
 
     cqp_status_reg_p : process (CLK)
     begin
@@ -310,6 +319,7 @@ begin
             CQP_SQHDBL     <= cqp_sqhdbl_int;
             CQP_LAST_CQE   <= cqp_last_cqe_int;
             CQP_STATUS_UPD <= cqp_status_upd_int;
+            CQP_CQE_QID    <= cqp_cqe_qid_int;
         end if;
     end process;
 

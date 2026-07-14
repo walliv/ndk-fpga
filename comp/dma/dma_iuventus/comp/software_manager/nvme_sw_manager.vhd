@@ -35,7 +35,12 @@ entity NVME_SW_MANAGER is
         -- Maximum Read Reaquest SIze according to the PCIe specification (up to 4096 B)
         MRRS        : positive := 2**13;
         -- Maximum size of a packet that can be dispatched from the H2C/C2N buffers
-        PKT_SIZE_MAX : positive := 2**17
+        PKT_SIZE_MAX : positive := 2**17;
+        -- Number of independent SQ/CQ queues (one per SSD). At NUM_QUEUES=1 (the default) the MI
+        -- register map is unchanged from the original single-queue layout; laying out per-queue
+        -- SQTDBL_BASE_ADDR/CQHDBL_BASE_ADDR/*_BADDR register sets (base + q*stride) is Stage B
+        -- work, not yet implemented here.
+        NUM_QUEUES   : positive := 1
         );
 
     port (
@@ -111,8 +116,12 @@ entity NVME_SW_MANAGER is
         -- =========================================================================================
         -- DBL Updater
         -- =========================================================================================
-        CQHDBL_BASE_ADDR : out std_logic_vector(63 downto 0);
-        SQTDBL_BASE_ADDR : out std_logic_vector(63 downto 0);
+        -- Per-queue doorbell PCIe destination addresses; see the EXTRA_Q_BASE_ADDR/EXTRA_Q_STRIDE
+        -- MI register map below. Index 0 is the original R_SQTDBL_BADDR_*/R_CQHDBL_BADDR_*
+        -- registers (0x018/0x01C/0x020/0x024), unchanged; at NUM_QUEUES=1 these are 1-element
+        -- arrays, identical to the original scalar ports.
+        CQHDBL_BASE_ADDR : out slv_array_t(NUM_QUEUES -1 downto 0)(63 downto 0);
+        SQTDBL_BASE_ADDR : out slv_array_t(NUM_QUEUES -1 downto 0)(63 downto 0);
 
         CQHDBL_REG_UPD_DISP : in std_logic;
         SQTDBL_REG_UPD_DISP : in std_logic;
@@ -140,6 +149,27 @@ end entity;
 architecture FULL of NVME_SW_MANAGER is
     constant ADDR_LENGTH : positive := 9;
     constant CNTR_WIDTH  : positive := 64;
+
+    -- =============================================================================================
+    -- Per-queue doorbell base-address registers (queues 1..NUM_QUEUES-1).
+    --
+    -- Queue 0 keeps using the existing R_SQTDBL_BADDR_L/H (0x018/0x01C) and R_CQHDBL_BADDR_L/H
+    -- (0x020/0x024) registers below, unchanged -- N=1 software is unaffected.
+    --
+    -- Extra-queue register block, starting at EXTRA_Q_BASE_ADDR = 0x180 (within the same
+    -- ADDR_LENGTH=9-bit (0x000-0x1FF) MI window as the rest of this register file, past the
+    -- last legacy register at 0x15C), one EXTRA_Q_STRIDE = 0x10 (16 B) slot per queue
+    -- q = 1..NUM_QUEUES-1:
+    --   base + (q-1)*0x10 + 0x0  SQTDBL_BADDR_L(q)
+    --   base + (q-1)*0x10 + 0x4  SQTDBL_BADDR_H(q)
+    --   base + (q-1)*0x10 + 0x8  CQHDBL_BADDR_L(q)
+    --   base + (q-1)*0x10 + 0xC  CQHDBL_BADDR_H(q)
+    -- (0x180..0x1FF spans 8 slots, i.e. up to 8 extra queues / NUM_QUEUES=9.) At NUM_QUEUES=1
+    -- this whole block is unused (the q=1..NUM_QUEUES-1 loops below are null ranges), so the MI
+    -- map is unchanged from today.
+    -- =============================================================================================
+    constant EXTRA_Q_BASE_ADDR : natural := 16#180#;
+    constant EXTRA_Q_STRIDE    : natural := 16#010#;
 
     constant R_CONTROL                      : natural := 0;
     constant R_STATUS                       : natural := 1;
@@ -767,6 +797,12 @@ architecture FULL of NVME_SW_MANAGER is
     signal sqiops_evctr_total_cycles : std_logic_vector(log2(EVCR_MAX_INTERVAL_CYCLES+1) -1 downto 0);
     signal sqiops_evctr_update       : std_logic;
 
+    -- Per-queue doorbell base-address registers (see EXTRA_Q_BASE_ADDR/EXTRA_Q_STRIDE above).
+    -- Index 0 is driven from the legacy R_SQTDBL_BADDR_*/R_CQHDBL_BADDR_* registers; indices
+    -- 1..NUM_QUEUES-1 are driven by extra_q_baddr_wr_p below.
+    signal sqtdbl_base_addr_arr : slv_array_t(NUM_QUEUES -1 downto 0)(63 downto 0);
+    signal cqhdbl_base_addr_arr : slv_array_t(NUM_QUEUES -1 downto 0)(63 downto 0);
+
     -- =============================================================================================
     -- MI splitter tree
     -- =============================================================================================
@@ -1073,8 +1109,45 @@ begin
     LBA_SPACE_SIZE   <= regs_arr(R_LBA_SPACE_SIZE_H) & regs_arr(R_LBA_SPACE_SIZE_L);
     LBA_NUM_MASK     <= regs_arr(R_LBA_NUM_MASK)(REG_WIDTH(R_LBA_NUM_MASK)-1 downto 0);
 
-    SQTDBL_BASE_ADDR <= regs_arr(R_SQTDBL_BADDR_H) & regs_arr(R_SQTDBL_BADDR_L);
-    CQHDBL_BASE_ADDR <= regs_arr(R_CQHDBL_BADDR_H) & regs_arr(R_CQHDBL_BADDR_L);
+    -- Queue 0's doorbell base addresses come from the legacy registers, unchanged.
+    sqtdbl_base_addr_arr(0) <= regs_arr(R_SQTDBL_BADDR_H) & regs_arr(R_SQTDBL_BADDR_L);
+    cqhdbl_base_addr_arr(0) <= regs_arr(R_CQHDBL_BADDR_H) & regs_arr(R_CQHDBL_BADDR_L);
+
+    SQTDBL_BASE_ADDR <= sqtdbl_base_addr_arr;
+    CQHDBL_BASE_ADDR <= cqhdbl_base_addr_arr;
+
+    -- =============================================================================================
+    -- Per-queue doorbell base-address registers (queues 1..NUM_QUEUES-1) -- see
+    -- EXTRA_Q_BASE_ADDR/EXTRA_Q_STRIDE above. One process per queue (q is a generate-time
+    -- constant, so each instance's sqtdbl_base_addr_arr(q)/cqhdbl_base_addr_arr(q) target is a
+    -- static name -- a single, unambiguous driver per element); a runtime "for q in 1 to
+    -- NUM_QUEUES-1 loop ... sig(q) <= ...; end loop;" inside ONE process would instead make VHDL
+    -- treat the WHOLE array as driven by that process (the longest *static* prefix of a
+    -- variable-indexed target is the whole signal), conflicting with the element-0 concurrent
+    -- assignment above and corrupting index 0 to 'X'. At NUM_QUEUES=1 this generate has zero
+    -- instances (null range), so it does nothing.
+    -- =============================================================================================
+    extra_q_baddr_wr_g : for q in 1 to NUM_QUEUES -1 generate
+        extra_q_baddr_wr_p : process (CLK) is
+        begin
+            if (rising_edge(CLK)) then
+                if (RST = '1') then
+                    sqtdbl_base_addr_arr(q) <= (others => '0');
+                    cqhdbl_base_addr_arr(q) <= (others => '0');
+                else
+                    if (mi_split_wr(0) = '1' and mi_split_addr(0)(ADDR_LENGTH -1 downto 0) = std_logic_vector(to_unsigned(EXTRA_Q_BASE_ADDR + (q-1)*EXTRA_Q_STRIDE + 0, ADDR_LENGTH))) then
+                        sqtdbl_base_addr_arr(q)(31 downto 0) <= mi_split_dwr(0);
+                    elsif (mi_split_wr(0) = '1' and mi_split_addr(0)(ADDR_LENGTH -1 downto 0) = std_logic_vector(to_unsigned(EXTRA_Q_BASE_ADDR + (q-1)*EXTRA_Q_STRIDE + 4, ADDR_LENGTH))) then
+                        sqtdbl_base_addr_arr(q)(63 downto 32) <= mi_split_dwr(0);
+                    elsif (mi_split_wr(0) = '1' and mi_split_addr(0)(ADDR_LENGTH -1 downto 0) = std_logic_vector(to_unsigned(EXTRA_Q_BASE_ADDR + (q-1)*EXTRA_Q_STRIDE + 8, ADDR_LENGTH))) then
+                        cqhdbl_base_addr_arr(q)(31 downto 0) <= mi_split_dwr(0);
+                    elsif (mi_split_wr(0) = '1' and mi_split_addr(0)(ADDR_LENGTH -1 downto 0) = std_logic_vector(to_unsigned(EXTRA_Q_BASE_ADDR + (q-1)*EXTRA_Q_STRIDE + 12, ADDR_LENGTH))) then
+                        cqhdbl_base_addr_arr(q)(63 downto 32) <= mi_split_dwr(0);
+                    end if;
+                end if;
+            end if;
+        end process;
+    end generate;
 
     -- =============================================================================================
     -- Selecting registers to READ
@@ -1090,6 +1163,20 @@ begin
             for reg_idx in 0 to (REGS-1) loop
                 if (reg_sel_addr = std_logic_vector(to_unsigned(R_ADDRS(reg_idx), ADDR_LENGTH))) then
                     mi_split_drd(0)(REG_WIDTH(reg_idx)-1 downto 0) <= regs_arr(reg_idx)(REG_WIDTH(reg_idx)-1 downto 0);
+                end if;
+            end loop;
+
+            -- Per-queue doorbell base-address registers (queues 1..NUM_QUEUES-1); null range (so
+            -- a no-op) at NUM_QUEUES=1.
+            for q in 1 to NUM_QUEUES -1 loop
+                if (reg_sel_addr = std_logic_vector(to_unsigned(EXTRA_Q_BASE_ADDR + (q-1)*EXTRA_Q_STRIDE + 0, ADDR_LENGTH))) then
+                    mi_split_drd(0) <= sqtdbl_base_addr_arr(q)(31 downto 0);
+                elsif (reg_sel_addr = std_logic_vector(to_unsigned(EXTRA_Q_BASE_ADDR + (q-1)*EXTRA_Q_STRIDE + 4, ADDR_LENGTH))) then
+                    mi_split_drd(0) <= sqtdbl_base_addr_arr(q)(63 downto 32);
+                elsif (reg_sel_addr = std_logic_vector(to_unsigned(EXTRA_Q_BASE_ADDR + (q-1)*EXTRA_Q_STRIDE + 8, ADDR_LENGTH))) then
+                    mi_split_drd(0) <= cqhdbl_base_addr_arr(q)(31 downto 0);
+                elsif (reg_sel_addr = std_logic_vector(to_unsigned(EXTRA_Q_BASE_ADDR + (q-1)*EXTRA_Q_STRIDE + 12, ADDR_LENGTH))) then
+                    mi_split_drd(0) <= cqhdbl_base_addr_arr(q)(63 downto 32);
                 end if;
             end loop;
         end if;

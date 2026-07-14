@@ -34,7 +34,10 @@ entity C2N_CONTROLLER is
         -- The size of a pointer to a buffer of one channel in the transaction buffer
         BUFF_PTR_WIDTH : positive := 17;
         -- Amount of tags/Command Identifiers available for outstanding NVMe commands
-        QUEUE_DEPTH    : positive := 2048
+        QUEUE_DEPTH    : positive := 2048;
+        -- Number of independent SQ/CQ queues (one per SSD); see NVME_CMD_DISPATCHER. Default 1
+        -- is bit-identical to the original single-queue design.
+        NUM_QUEUES     : positive := 1
     );
     port (
         CLK : in std_logic;
@@ -85,6 +88,9 @@ entity C2N_CONTROLLER is
         LBA_SPACE_SIZE  : in std_logic_vector(63 downto 0);
         LBA_NUM         : in std_logic_vector(15 downto 0);
         LBA_NUM_MASK    : in std_logic_vector(15 downto 0);
+        -- Queue Identifier of the command currently being dispatched -- see NVME_CMD_DISPATCHER.
+        -- Always "0" at NUM_QUEUES=1.
+        QID             : in std_logic_vector(maximum(1, log2(NUM_QUEUES)) -1 downto 0);
 
         -- =========================================================================================
         -- Status return interface for Command dispatcher
@@ -92,6 +98,8 @@ entity C2N_CONTROLLER is
         CPL_STAT_TAG    : in std_logic_vector(15 downto 0);
         CPL_STAT_SQHDBL : in std_logic_vector(15 downto 0);
         CPL_STAT_VLD    : in std_logic;
+        -- Queue Identifier the CPL_STAT_* completion belongs to. Always "0" at NUM_QUEUES=1.
+        CPL_STAT_QID    : in std_logic_vector(maximum(1, log2(NUM_QUEUES)) -1 downto 0);
 
         -- =========================================================================================
         -- Status interface
@@ -107,6 +115,9 @@ entity C2N_CONTROLLER is
         TAG_FIFO_STATUS    : out std_logic_vector(11 downto 0);
         TAG_INIT_DONE      : out std_logic;
         SQTDBL_VAL         : out std_logic_vector(15 downto 0);
+        -- Queue Identifier that SQTDBL_VAL/SQE_DISP_CNTR_INCR apply to (mirrors QID). Always "0"
+        -- at NUM_QUEUES=1.
+        SQTDBL_QID         : out std_logic_vector(maximum(1, log2(NUM_QUEUES)) -1 downto 0);
 
         -- Command Identifier assigned to the command being dispatched, valid when DISP_CMD_ID_VLD
         -- is asserted
@@ -329,7 +340,8 @@ begin
             -- Matches the merged-meta pointer field width (META_PTR_WIDTH), not the buffer's own
             -- BUFF_PTR_WIDTH -- see WR_REQ_MFB_META.
             BUFF_PTR_WIDTH  => META_PTR_WIDTH,
-            QUEUE_DEPTH     => QUEUE_DEPTH)
+            QUEUE_DEPTH     => QUEUE_DEPTH,
+            NUM_QUEUES      => NUM_QUEUES)
         port map (
             CLK                => CLK,
             RST                => RST,
@@ -348,8 +360,10 @@ begin
             LBA_SPACE_SIZE     => LBA_SPACE_SIZE,
             LBA_NUM            => LBA_NUM,
             LBA_NUM_MASK       => LBA_NUM_MASK,
+            QID                => QID,
 
             SQTDBL_VAL         => SQTDBL_VAL,
+            SQTDBL_QID         => SQTDBL_QID,
             TAG_FIFO_STATUS    => TAG_FIFO_STATUS,
             TAG_INIT_DONE      => TAG_INIT_DONE,
 
@@ -363,6 +377,7 @@ begin
             CPL_STAT_TAG       => CPL_STAT_TAG,
             CPL_STAT_SQHDBL    => CPL_STAT_SQHDBL,
             CPL_STAT_VLD       => CPL_STAT_VLD,
+            CPL_STAT_QID       => CPL_STAT_QID,
 
             SQ_CMD_MFB_DATA    => cmdisp_mfb_data,
             SQ_CMD_MFB_META    => cmdisp_mfb_meta,

@@ -33,7 +33,12 @@ entity NVME_CMD_DISPATCHER is
         -- The size of a pointer to the transaction buffer with SQ/Read buffer
         BUFF_PTR_WIDTH : positive := 17;
         -- Amount of tags/Command Identifiers available for outstanding NVMe commands
-        QUEUE_DEPTH    : positive := 2048
+        QUEUE_DEPTH    : positive := 2048;
+        -- Number of independent SQ/CQ queues (one per SSD). Each queue has its own tag pool,
+        -- SQ-tail/SQ-head doorbell shadow register and SQ page (flat page q, SQE i at byte
+        -- address q*4096 + i*64). At NUM_QUEUES=1 (the default) this design is bit-identical to
+        -- the original single-queue implementation: QID/CPL_STAT_QID are always "0".
+        NUM_QUEUES     : positive := 1
         );
     port(
         CLK     : in std_logic;
@@ -71,6 +76,11 @@ entity NVME_CMD_DISPATCHER is
         LBA_NUM        : in std_logic_vector(15 downto 0);
         -- Top value of the maximum amount of LBAs that can be requested in one command
         LBA_NUM_MASK   : in std_logic_vector(15 downto 0);
+        -- Queue Identifier of the command currently being staged/dispatched (part of the SQ
+        -- command attributes group -- stable throughout TRIGG_DISP, like CMD_OPCODE etc). Selects
+        -- which queue's tag pool, doorbell state and SQ page (flat page QID) this dispatch uses.
+        -- Always "0" at NUM_QUEUES=1.
+        QID            : in std_logic_vector(maximum(1, log2(NUM_QUEUES)) -1 downto 0);
 
         -- =========================================================================================
         -- Status IO
@@ -83,6 +93,9 @@ entity NVME_CMD_DISPATCHER is
         -- Set to 1 if tags used as Command Identifiers have been asserted
         TAG_INIT_DONE      : out std_logic;
         SQTDBL_VAL         : out std_logic_vector(15 downto 0);
+        -- Queue Identifier that SQTDBL_VAL/SQE_DISP_CNTR_INCR apply to this cycle (mirrors QID).
+        -- Always "0" at NUM_QUEUES=1.
+        SQTDBL_QID         : out std_logic_vector(maximum(1, log2(NUM_QUEUES)) -1 downto 0);
 
         -- Command Identifier assigned to the command being dispatched, valid when DISP_CMD_ID_VLD
         -- is asserted
@@ -95,6 +108,10 @@ entity NVME_CMD_DISPATCHER is
         CPL_STAT_TAG    : in std_logic_vector(15 downto 0);
         CPL_STAT_SQHDBL : in std_logic_vector(15 downto 0);
         CPL_STAT_VLD    : in std_logic;
+        -- Queue Identifier that the completion reported via CPL_STAT_* belongs to (mirrors
+        -- CQE_PROCESSOR's CQP_CQE_QID, threaded up through the top level). Always "0" at
+        -- NUM_QUEUES=1.
+        CPL_STAT_QID    : in std_logic_vector(maximum(1, log2(NUM_QUEUES)) -1 downto 0);
 
         -- =========================================================================================
         -- Output MFB bus for Submission Commands
@@ -115,6 +132,9 @@ architecture FULL of NVME_CMD_DISPATCHER is
     -- Size of the submission queue entry in bytes
     constant SQ_ENTRY_W       : positive                               := 64;
     constant SQ_ADDR_OFFS_VEC : unsigned(log2(SQ_ENTRY_W) -1 downto 0) := (others => '0');
+    -- Bits of the flat buffer address occupied by one 4096 B page (see op_ctrl.vhd's
+    -- FIRST_DATA_PAGE geometry / nvme_cq_meta_extractor.vhd).
+    constant PAGE_OFFSET_W    : natural := 12;
 
     -- =============================================================================================
     -- Output metadata signal fields
@@ -137,18 +157,35 @@ architecture FULL of NVME_CMD_DISPATCHER is
     -- =============================================================================================
     -- Generated SQ command entry as well as PCI headers for it and for the doorbell update
     -- =============================================================================================
-    signal tag_fifo_init_done : std_logic;
-    signal cmd_id             : std_logic_vector(15 downto 0);
-    signal cmd_id_src_rdy     : std_logic;
-    signal cmd_id_dst_rdy     : std_logic;
+    -- Per-queue tag pools (one IUVENTUS_CMD_TAG_MANAGER per queue -- see tag_manager_g). At
+    -- NUM_QUEUES=1 only index 0 is ever used, identical to the original scalar
+    -- tag_fifo_init_done/cmd_id/cmd_id_src_rdy/cmd_id_dst_rdy.
+    signal tag_fifo_init_done_arr : std_logic_vector(NUM_QUEUES -1 downto 0);
+    signal cmd_id_arr             : slv_array_t(NUM_QUEUES -1 downto 0)(15 downto 0);
+    signal cmd_id_src_rdy_arr     : std_logic_vector(NUM_QUEUES -1 downto 0);
+    signal cmd_id_dst_rdy_arr     : std_logic_vector(NUM_QUEUES -1 downto 0);
+    signal tag_fifo_status_arr    : slv_array_t(NUM_QUEUES -1 downto 0)(11 downto 0);
+    -- Gates CPL_STAT_TAG/CPL_STAT_VLD to the one tag manager (CPL_STAT_QID) the completing
+    -- command actually belongs to; every other queue's tag manager sees '0'.
+    signal tag_in_src_rdy_arr     : std_logic_vector(NUM_QUEUES -1 downto 0);
 
     signal sq_cmd_entry                 : std_logic_vector(511 downto 0);
     signal sq_addr_w_offset             : unsigned(BUFF_PTR_WIDTH -1 downto 0);
+    -- Flat page (QID*4096) of the queue currently being dispatched to.
+    signal sq_page_base                 : unsigned(BUFF_PTR_WIDTH -1 downto 0);
 
-    signal sqhdbl_reg      : unsigned(CPL_STAT_SQHDBL'range);
-    signal sqtdbl_reg      : unsigned(15 downto 0);
-    signal sqtdbl_next_val : unsigned(15 downto 0);
+    -- Per-queue SQ tail/head doorbell shadow registers. At NUM_QUEUES=1 only index 0 is ever
+    -- used, identical to the original scalar sqhdbl_reg/sqtdbl_reg/sqtdbl_next_val.
+    signal sqhdbl_reg      : u_array_t(NUM_QUEUES -1 downto 0)(CPL_STAT_SQHDBL'range);
+    signal sqtdbl_reg      : u_array_t(NUM_QUEUES -1 downto 0)(15 downto 0);
+    signal sqtdbl_next_val : u_array_t(NUM_QUEUES -1 downto 0)(15 downto 0);
     signal sq_cmd_mfb_meta_arr : slv_array_t(MFB_REGIONS -1 downto 0)(MFB_META_REDUCED_WIDTH_INT -1 downto 0);
+
+    -- Integer views of QID (dispatch-side, selects the queue being staged/dispatched this cycle)
+    -- and CPL_STAT_QID (completion-side, selects the queue a CPL_STAT_* pulse belongs to). Always
+    -- 0 at NUM_QUEUES=1.
+    signal qid_int          : natural range 0 to NUM_QUEUES -1;
+    signal cpl_stat_qid_int : natural range 0 to NUM_QUEUES -1;
 
     signal lba_num_capped : std_logic_vector(15 downto 0);
 begin
@@ -163,31 +200,48 @@ begin
 
     -- NOTE: The assumption that this component should always accept the incoming tag without a
     -- backpressure, can be a source of error.
-    tag_manager_i : entity work.IUVENTUS_CMD_TAG_MANAGER
-        generic map (
-            DEVICE      => DEVICE,
-            QUEUE_DEPTH => QUEUE_DEPTH
-            )
-        port map (
-            CLK   => CLK,
-            RESET => RST,
+    qid_int          <= to_integer(unsigned(QID));
+    cpl_stat_qid_int <= to_integer(unsigned(CPL_STAT_QID));
 
-            INIT_DONE => tag_fifo_init_done,
+    -- One tag pool per queue. Only the queue selected by CPL_STAT_QID actually returns the tag
+    -- (TAG_IN_SRC_RDY); every other queue's pool sees '0' for it, so tags are never leaked into
+    -- the wrong queue's pool. At NUM_QUEUES=1 this generate has exactly one instance and
+    -- tag_in_src_rdy_arr(0) = CPL_STAT_VLD always (cpl_stat_qid_int is always 0), identical to the
+    -- original single tag_manager_i.
+    tag_manager_g : for q in 0 to NUM_QUEUES -1 generate
+        tag_in_src_rdy_arr(q) <= CPL_STAT_VLD when (cpl_stat_qid_int = q) else '0';
 
-            TAG_IN_DATA    => CPL_STAT_TAG,
-            TAG_IN_SRC_RDY => CPL_STAT_VLD,
+        tag_manager_i : entity work.IUVENTUS_CMD_TAG_MANAGER
+            generic map (
+                DEVICE      => DEVICE,
+                QUEUE_DEPTH => QUEUE_DEPTH
+                )
+            port map (
+                CLK   => CLK,
+                RESET => RST,
 
-            TAG_OUT_DATA    => cmd_id,
-            TAG_OUT_SRC_RDY => cmd_id_src_rdy,
-            TAG_OUT_DST_RDY => cmd_id_dst_rdy,
+                INIT_DONE => tag_fifo_init_done_arr(q),
 
-            TAG_FIFO_STATUS => TAG_FIFO_STATUS
-            );
+                TAG_IN_DATA    => CPL_STAT_TAG,
+                TAG_IN_SRC_RDY => tag_in_src_rdy_arr(q),
 
-    TAG_INIT_DONE <= tag_fifo_init_done;
+                TAG_OUT_DATA    => cmd_id_arr(q),
+                TAG_OUT_SRC_RDY => cmd_id_src_rdy_arr(q),
+                TAG_OUT_DST_RDY => cmd_id_dst_rdy_arr(q),
 
-    DISP_CMD_ID     <= cmd_id;
-    DISP_CMD_ID_VLD <= cmd_id_dst_rdy;
+                TAG_FIFO_STATUS => tag_fifo_status_arr(q)
+                );
+    end generate;
+
+    -- System-wide ready only once every queue's tag pool has initialized (all queues initialize
+    -- with identical, input-independent timing, so this is equivalent to -- but safer than --
+    -- gating only on the currently-dispatching queue).
+    TAG_INIT_DONE   <= and (tag_fifo_init_done_arr);
+    -- Occupancy of the queue currently being dispatched to.
+    TAG_FIFO_STATUS <= tag_fifo_status_arr(qid_int);
+
+    DISP_CMD_ID     <= cmd_id_arr(qid_int);
+    DISP_CMD_ID_VLD <= cmd_id_dst_rdy_arr(qid_int);
 
     -- =============================================================================================
     -- Dispatching logic with command generation
@@ -196,16 +250,16 @@ begin
     begin
         if (rising_edge(CLK)) then
             if (RST = '1' or RST_PTR = '1') then
-                sqhdbl_reg <= (others => '0');
+                sqhdbl_reg <= (others => (others => '0'));
             elsif (CPL_STAT_VLD = '1') then
-                sqhdbl_reg <= unsigned(CPL_STAT_SQHDBL);
+                sqhdbl_reg(cpl_stat_qid_int) <= unsigned(CPL_STAT_SQHDBL);
             end if;
         end if;
     end process;
 
     nvme_cmd_composer_i : entity work.NVME_CMD_COMPOSER
         port map (
-            CMD_ID        => cmd_id,
+            CMD_ID        => cmd_id_arr(qid_int),
             CMD_OPCODE    => CMD_OPCODE,
             NAMESPACE_ID  => NAMESPACE_ID,
             METADATA_PTR  => METADATA_PTR,
@@ -235,14 +289,16 @@ begin
         end if;
     end process;
 
-    -- Add masked doorbell pointer to the the SQ base address
-    sq_addr_w_offset <= resize(sqtdbl_reg & SQ_ADDR_OFFS_VEC, BUFF_PTR_WIDTH);
+    -- SQE i of queue QID lives at flat byte address QID*4096 + i*64: add the queue's page base to
+    -- the masked doorbell pointer offset within that page.
+    sq_page_base    <= shift_left(to_unsigned(qid_int, BUFF_PTR_WIDTH), PAGE_OFFSET_W);
+    sq_addr_w_offset <= sq_page_base + resize(sqtdbl_reg(qid_int) & SQ_ADDR_OFFS_VEC, BUFF_PTR_WIDTH);
 
     sqtdbl_cntr_reg_p : process (CLK) is
     begin
         if (rising_edge(CLK)) then
             if (RST = '1' or RST_PTR = '1') then
-                sqtdbl_reg <= (others => '0');
+                sqtdbl_reg <= (others => (others => '0'));
             else
                 sqtdbl_reg <= sqtdbl_next_val;
             end if;
@@ -253,18 +309,20 @@ begin
     begin
         SQ_CMD_MFB_SRC_RDY     <= '0';
 
+        -- Default: every queue's tentative next value holds at its current value; only the
+        -- queue actually dispatched to (qid_int) below gets overridden.
         sqtdbl_next_val    <= sqtdbl_reg;
         SQE_DISP_CNTR_INCR <= '0';
         RDY_FOR_DISP <= '0';
-        cmd_id_dst_rdy     <= '0';
+        cmd_id_dst_rdy_arr <= (others => '0');
 
         if (
             -- The Submission Queue has not be full
-            (((sqtdbl_reg + 1) and unsigned(DBL_MASK)) /= sqhdbl_reg)
+            (((sqtdbl_reg(qid_int) + 1) and unsigned(DBL_MASK)) /= sqhdbl_reg(qid_int))
             -- All the tags in the TAG Manager have to be initialized
-            and tag_fifo_init_done = '1'
+            and tag_fifo_init_done_arr(qid_int) = '1'
             -- There have to be some tags present in the FIFO
-            and cmd_id_src_rdy = '1'
+            and cmd_id_src_rdy_arr(qid_int) = '1'
             )then
 
             RDY_FOR_DISP <= SQ_CMD_MFB_DST_RDY;
@@ -274,11 +332,14 @@ begin
             -- full (i.e. the SQTDBL is one position before SQHDBL)
             if (TRIGG_DISP = '1' and SQ_CMD_MFB_DST_RDY = '1') then
                 SQE_DISP_CNTR_INCR <= '1';
-                sqtdbl_next_val    <= (sqtdbl_reg + 1) and unsigned(DBL_MASK);
-                cmd_id_dst_rdy     <= '1';
+                sqtdbl_next_val(qid_int)    <= (sqtdbl_reg(qid_int) + 1) and unsigned(DBL_MASK);
+                cmd_id_dst_rdy_arr(qid_int) <= '1';
             end if;
         end if;
     end process;
+
+    -- SQTDBL_VAL/SQE_DISP_CNTR_INCR (below) apply to whichever queue is being dispatched to.
+    SQTDBL_QID <= QID;
 
     -- Size of the dispatched command in bytes
     SQE_DISP_CNTR_TYPE <= CMD_OPCODE;
@@ -287,7 +348,8 @@ begin
     sq_cmd_mfb_meta_arr_g: for rgn_idx in (MFB_REGIONS -1) downto 0 generate
         sq_cmd_mfb_meta_arr(rgn_idx)(META_PCIE_ADDR)   <= std_logic_vector(sq_addr_w_offset);
         -- The buffer is flat-addressed (MEM_PARTITIONING => FALSE): the channel bit is a
-        -- don't-care, the address alone (SQ at flat page 0) locates the datum.
+        -- don't-care, the address alone (sq_addr_w_offset, which already includes the SQ[QID]
+        -- page offset) locates the datum.
         sq_cmd_mfb_meta_arr(rgn_idx)(META_CHAN_NUM_O)  <= '0';
         sq_cmd_mfb_meta_arr(rgn_idx)(META_BE)          <= MFB_BE_VLD and SQ_CMD_MFB_SRC_RDY;
     end generate;
@@ -299,5 +361,5 @@ begin
     SQ_CMD_MFB_SOF_POS <= (others => '0');
     SQ_CMD_MFB_EOF_POS <= "111111";
 
-    SQTDBL_VAL  <= std_logic_vector(sqtdbl_reg + 1 and unsigned(DBL_MASK));
+    SQTDBL_VAL  <= std_logic_vector(sqtdbl_reg(qid_int) + 1 and unsigned(DBL_MASK));
 end architecture;

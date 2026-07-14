@@ -11,6 +11,7 @@ use IEEE.numeric_std.all;
 
 -- Note:
 
+use work.type_pack.all;
 use work.math_pack.all;
 use work.nvme_meta_pack.all;
 
@@ -22,6 +23,12 @@ entity OP_CTRL is
         BUFF_PTR_WIDTH : positive := 17;
         -- Amount of tags/Command Identifiers available for outstanding NVMe commands
         QUEUE_DEPTH    : positive := 16;
+        -- Number of independent SQ/CQ queues (one per SSD). At NUM_QUEUES=1 (the default) this
+        -- design is bit-identical to the original single-queue implementation: one queue page is
+        -- reserved, ctx_reg degenerates to a single-qid table, CQP_CQE_QID is always "0", and each
+        -- queue's own FLUSH keepalive (see flush_delay_cnt_reg et al.) degenerates to the original
+        -- single global timer.
+        NUM_QUEUES     : positive := 1;
         -- Number of pages a WRITE command reserves in the RDBUFF at frame start (its actual
         -- size is only known at EOF, once the frame length has been measured). 32 pages covers
         -- the largest write a single NVMe command can carry (NVME_WR_REQ_FRAME_LNG derives from
@@ -31,6 +38,12 @@ entity OP_CTRL is
         -- size is known at admission, always allocate their exact page count and can be
         -- multiple-outstanding.
         MAX_WR_PAGES   : positive := 32;
+        -- Width of each queue's one-shot FLUSH keepalive delay counter (see flush_delay_cnt_reg);
+        -- FLUSH is dispatched after a queue's own counter wraps around (overflow) following that
+        -- queue's last successful WRITE completion. 28 bits (the real, production default) is
+        -- impractically slow to hit in functional simulation; a testbench may override this to a
+        -- much smaller value to exercise the FLUSH path quickly. Never change the default itself.
+        FLUSH_DELAY_CNTR_WIDTH : positive := 28;
         DEVICE         : string  := "ULTRASCALE"
     );
     port (
@@ -64,6 +77,8 @@ entity OP_CTRL is
         -- 0-based number (i.e. 0 means 1 LBA will be read)
         NVME_RD_REQ_LBA_NUM : in  std_logic_vector(7 downto 0);
         NVME_RD_REQ_LBA_PTR : in  std_logic_vector(63 downto 0);
+        -- Queue Identifier this read request targets. Always "0" at NUM_QUEUES=1.
+        NVME_RD_REQ_QID     : in  std_logic_vector(maximum(1, log2(NUM_QUEUES)) -1 downto 0);
         NVME_RD_REQ_VLD     : in  std_logic;
         NVME_RD_REQ_RDY     : out std_logic;
 
@@ -94,6 +109,10 @@ entity OP_CTRL is
         CQP_CQE_VLD       : in std_logic;
         -- Command Identifier of the command being completed
         CQP_CQE_CID       : in std_logic_vector(CQ_ENTRY_CMD_ID_W -1 downto 0);
+        -- Queue Identifier of the completion being processed, i.e. which per-queue ctx_reg row
+        -- CQP_CQE_CID indexes into (also which queue's own FLUSH keepalive timer a WRITE
+        -- completion arms -- see flush_delay_cnt_reg). Always "0" at NUM_QUEUES=1.
+        CQP_CQE_QID       : in std_logic_vector(maximum(1, log2(NUM_QUEUES)) -1 downto 0);
 
         -- =========================================================================================
         -- Command Identifier assigned by the Command Dispatcher's tag manager to the command being
@@ -112,12 +131,18 @@ entity OP_CTRL is
         C2N_PRP_ENTRY_2   : out std_logic_vector(63 downto 0);
         C2N_START_LBA_PTR : out std_logic_vector(63 downto 0);
         C2N_LBA_NUM       : out std_logic_vector(15 downto 0);
+        -- Queue Identifier of the command currently being dispatched (part of the same "SQ
+        -- command attributes" group as C2N_CMD_OPCODE etc). Always "0" at NUM_QUEUES=1.
+        C2N_QID           : out std_logic_vector(maximum(1, log2(NUM_QUEUES)) -1 downto 0);
 
         -- =========================================================================================
         -- Frame to write parameters (i.e. data for NVMe write command)
         -- =========================================================================================
         -- Valid wwhen NVME_WR_REQ_START pulses high
         NVME_WR_REQ_LBA_PTR       : in std_logic_vector(63 downto 0);
+        -- Queue Identifier this write request targets, valid alongside NVME_WR_REQ_LBA_PTR.
+        -- Always "0" at NUM_QUEUES=1.
+        NVME_WR_REQ_QID           : in std_logic_vector(maximum(1, log2(NUM_QUEUES)) -1 downto 0);
         NVME_WR_REQ_START         : in std_logic;
         NVME_WR_REQ_END           : in std_logic;
         -- Valid when NVME_WR_REQ_END pulses high
@@ -139,10 +164,6 @@ entity OP_CTRL is
 end entity;
 
 architecture FULL of OP_CTRL is
-    -- Width of one-shot flush delay counter.
-    -- Flush is dispatched after the counter wraps around (overflow).
-    constant FLUSH_DELAY_CNTR_WIDTH : positive := 28;
-
     -- =============================================================================================
     -- Buffer/page geometry
     --
@@ -160,9 +181,10 @@ architecture FULL of OP_CTRL is
     -- Bits of byte-address within one page (log2(4096) = 12, always, by construction above)
     constant PAGE_OFFSET_W   : natural  := FLAT_PTR_WIDTH - PAGE_IDX_W;
     constant CTX_IDX_W       : natural  := log2(QUEUE_DEPTH);
-    -- The queue (SQ/CQ) lives at flat page 0; data pages (allocated to READ/WRITE commands) start
-    -- at page FIRST_DATA_PAGE.
-    constant FIRST_DATA_PAGE : natural  := 1;
+    -- The queues (SQ/CQ, one pair per NUM_QUEUES) live at flat pages 0..NUM_QUEUES-1; data pages
+    -- (allocated to READ/WRITE commands) start at page FIRST_DATA_PAGE. At NUM_QUEUES=1 this is
+    -- page 1, identical to the original single-queue layout.
+    constant FIRST_DATA_PAGE : natural  := NUM_QUEUES;
     -- Number of data pages actually available to the allocators (excludes the reserved queue page)
     constant DATA_PAGES      : natural  := BUFF_PAGES - FIRST_DATA_PAGE;
 
@@ -179,6 +201,9 @@ architecture FULL of OP_CTRL is
     end record;
 
     type ctx_array_t is array (0 to QUEUE_DEPTH -1) of ctx_entry_t;
+    -- One ctx_array_t (CID-indexed table) per queue; at NUM_QUEUES=1 this degenerates to the
+    -- original single-queue ctx_reg (ctx_reg(0) is the whole table).
+    type ctx_table_t is array (0 to NUM_QUEUES -1) of ctx_array_t;
 
     constant CTX_ENTRY_ZERO : ctx_entry_t := (
         op_type    => (others => '0'),
@@ -186,7 +211,10 @@ architecture FULL of OP_CTRL is
         first_page => (others => '0'),
         npages     => (others => '0'));
 
-    signal ctx_reg : ctx_array_t := (others => CTX_ENTRY_ZERO);
+    signal ctx_reg : ctx_table_t := (others => (others => CTX_ENTRY_ZERO));
+
+    -- Width of a Queue Identifier value (0 to NUM_QUEUES-1).
+    constant QID_W : natural := maximum(1, log2(NUM_QUEUES));
 
     -- nvc workaround-friendly helpers: whole-signal-in, whole-signal-out functions (kept as plain
     -- functions -- not generic packages -- so none of the known nvc 1.21.0 generic-package bugs
@@ -216,6 +244,10 @@ architecture FULL of OP_CTRL is
     signal start_lba_ptr_next : std_logic_vector(63 downto 0);
     signal op_type_reg        : std_logic_vector(CMD_OPCODE_W -1 downto 0);
     signal op_type_next       : std_logic_vector(CMD_OPCODE_W -1 downto 0);
+    -- Queue Identifier of the request currently admitted/in flight, captured from
+    -- NVME_RD_REQ_QID/NVME_WR_REQ_QID at admission (S_IDLE), same lifetime as op_type_reg.
+    signal qid_reg            : std_logic_vector(QID_W -1 downto 0);
+    signal qid_next           : std_logic_vector(QID_W -1 downto 0);
     signal comp_enabled       : std_logic;
 
     -- Page reserved for the write currently being admitted/in flight, captured at SOF acceptance
@@ -223,16 +255,21 @@ architecture FULL of OP_CTRL is
     signal k_wr_reg  : std_logic_vector(PAGE_IDX_W -1 downto 0);
     signal k_wr_next : std_logic_vector(PAGE_IDX_W -1 downto 0);
 
-    signal flush_delay_cnt_reg         : unsigned(FLUSH_DELAY_CNTR_WIDTH -1 downto 0);
-    signal flush_delay_cnt_next        : unsigned(FLUSH_DELAY_CNTR_WIDTH -1 downto 0);
-    -- Counter enable/arm flag: when '1' counter increments every cycle;
-    -- after overflow it is cleared to stop counting until next write arms it again.
-    signal flush_delay_cnt_active_reg  : std_logic;
-    signal flush_delay_cnt_active_next : std_logic;
-    -- Pending FLUSH request flag set by counter overflow.
-    -- Consumed in S_IDLE to enter S_FLUSH_REQ_PREPARE and then cleared.
-    signal flush_dispatch_reg          : std_logic;
-    signal flush_dispatch_next         : std_logic;
+    -- One keepalive delay counter per queue: each queue's own timer is armed independently by
+    -- ITS OWN successful WRITE completion (CQP_CQE_QID), so one queue's write traffic never
+    -- delays or suppresses another queue's FLUSH. At NUM_QUEUES=1 these arrays degenerate to a
+    -- single element, identical to the original scalar signals.
+    signal flush_delay_cnt_reg         : u_array_t(NUM_QUEUES -1 downto 0)(FLUSH_DELAY_CNTR_WIDTH -1 downto 0);
+    signal flush_delay_cnt_next        : u_array_t(NUM_QUEUES -1 downto 0)(FLUSH_DELAY_CNTR_WIDTH -1 downto 0);
+    -- Counter enable/arm flag: when '1' the corresponding queue's counter increments every cycle;
+    -- after overflow it is cleared to stop counting until that queue's next write arms it again.
+    signal flush_delay_cnt_active_reg  : std_logic_vector(NUM_QUEUES -1 downto 0);
+    signal flush_delay_cnt_active_next : std_logic_vector(NUM_QUEUES -1 downto 0);
+    -- Pending FLUSH request flag per queue, set by that queue's own counter overflow.
+    -- Consumed in S_IDLE (one queue at a time, priority-picked -- see flush_qid_v) to enter
+    -- S_FLUSH_REQ_PREPARE and then cleared for that queue only.
+    signal flush_dispatch_reg          : std_logic_vector(NUM_QUEUES -1 downto 0);
+    signal flush_dispatch_next         : std_logic_vector(NUM_QUEUES -1 downto 0);
 
     -- =============================================================================================
     -- Page allocators: rd_alloc hands out WRBUFF pages to READ commands (exact size, so reads can
@@ -285,6 +322,9 @@ architecture FULL of OP_CTRL is
     signal ctx_in_lba_num    : std_logic_vector(7 downto 0);
     signal ctx_in_first_page : std_logic_vector(PAGE_IDX_W -1 downto 0);
     signal ctx_in_npages     : std_logic_vector(NPAGES_W -1 downto 0);
+    -- Queue Identifier row of ctx_reg that this dispatch commits into (mirrors C2N_QID at the
+    -- same cycle). Always "0" at NUM_QUEUES=1.
+    signal ctx_in_qid        : std_logic_vector(QID_W -1 downto 0);
 
     -- =============================================================================================
     -- Queue of finished READs waiting to have their data drained out of WRBUFF. Decoupled from the
@@ -369,15 +409,17 @@ begin
                 lba_num_reg                <= (others => '0');
                 start_lba_ptr_reg          <= (others => '0');
                 op_type_reg                <= (others => '0');
+                qid_reg                    <= (others => '0');
                 k_wr_reg                   <= (others => '0');
-                flush_delay_cnt_reg        <= (others => '0');
-                flush_delay_cnt_active_reg <= '0';
-                flush_dispatch_reg         <= '0';
+                flush_delay_cnt_reg        <= (others => (others => '0'));
+                flush_delay_cnt_active_reg <= (others => '0');
+                flush_dispatch_reg         <= (others => '0');
             else
                 op_state_pst               <= op_state_nst;
                 lba_num_reg                <= lba_num_next;
                 start_lba_ptr_reg          <= start_lba_ptr_next;
                 op_type_reg                <= op_type_next;
+                qid_reg                    <= qid_next;
                 k_wr_reg                   <= k_wr_next;
                 flush_delay_cnt_reg        <= flush_delay_cnt_next;
                 flush_delay_cnt_active_reg <= flush_delay_cnt_active_next;
@@ -394,11 +436,18 @@ begin
         -- Context of the command completing this cycle (looked up from CQP_CQE_CID)
         variable cqe_idx_v    : natural range 0 to QUEUE_DEPTH -1;
         variable cqe_ctx_v    : ctx_entry_t;
+        -- Queue the completion currently being processed (CQP_CQE_VLD) belongs to.
+        variable cqp_cqe_qid_int : natural range 0 to NUM_QUEUES -1;
+        -- Priority-picked queue (lowest index first) whose own FLUSH keepalive timer has expired
+        -- and is still waiting to be dispatched; valid only when flush_pending_v = '1'.
+        variable flush_qid_v     : natural range 0 to NUM_QUEUES -1;
+        variable flush_pending_v : std_logic;
     begin
         op_state_nst                <= op_state_pst;
         lba_num_next                <= lba_num_reg;
         start_lba_ptr_next          <= start_lba_ptr_reg;
         op_type_next                <= op_type_reg;
+        qid_next                    <= qid_reg;
         k_wr_next                   <= k_wr_reg;
         flush_delay_cnt_next        <= flush_delay_cnt_reg;
         flush_delay_cnt_active_next <= flush_delay_cnt_active_reg;
@@ -410,6 +459,7 @@ begin
         C2N_PRP_ENTRY_2    <= WRBUFF_PRP_LIST_PTR;
         C2N_START_LBA_PTR  <= start_lba_ptr_reg;
         C2N_LBA_NUM        <= "00000000" & lba_num_reg;
+        C2N_QID            <= qid_reg;
 
         OP_STAT_TYPE       <= '1'; -- READ operation by default;
         OP_STAT_CODE       <= "01"; -- FAILURE by default
@@ -436,26 +486,47 @@ begin
         ctx_in_lba_num    <= (others => '0');
         ctx_in_first_page <= (others => '0');
         ctx_in_npages     <= (others => '0');
+        ctx_in_qid        <= (others => '0');
 
         lba_cnt_v := resize(unsigned(lba_num_reg), lba_cnt_v'length) + 1;
         npages_v  := resize((lba_cnt_v + 7) / 8, NPAGES_W);
 
-        if (flush_delay_cnt_active_reg = '1') then
-            flush_delay_cnt_next <= flush_delay_cnt_reg + 1;
+        -- Advance every queue's own FLUSH keepalive timer independently; at NUM_QUEUES=1 this
+        -- loop has exactly one iteration, identical to the original scalar check.
+        for q in 0 to NUM_QUEUES -1 loop
+            if (flush_delay_cnt_active_reg(q) = '1') then
+                flush_delay_cnt_next(q) <= flush_delay_cnt_reg(q) + 1;
 
-            if ((flush_delay_cnt_reg + 1) = to_unsigned(0, flush_delay_cnt_reg'length)) then
-                flush_delay_cnt_active_next <= '0';
-                flush_dispatch_next         <= '1';
+                if ((flush_delay_cnt_reg(q) + 1) = to_unsigned(0, FLUSH_DELAY_CNTR_WIDTH)) then
+                    flush_delay_cnt_active_next(q) <= '0';
+                    flush_dispatch_next(q)         <= '1';
+                end if;
             end if;
-        end if;
+        end loop;
+
+        -- Priority-pick (lowest queue index first) the one queue -- among any with a pending,
+        -- not-yet-dispatched FLUSH -- that S_IDLE below will actually dispatch this cycle. Based
+        -- on flush_dispatch_reg (the state as of the end of last cycle), same as the timer
+        -- overflow check above reads flush_delay_cnt_active_reg; the loop above may additionally
+        -- set flush_dispatch_next for OTHER queues this very cycle, which will simply be picked up
+        -- on a later cycle. At NUM_QUEUES=1 flush_qid_v is always 0.
+        flush_pending_v := '0';
+        flush_qid_v      := 0;
+        for q in 0 to NUM_QUEUES -1 loop
+            if (flush_pending_v = '0' and flush_dispatch_reg(q) = '1') then
+                flush_pending_v := '1';
+                flush_qid_v      := q;
+            end if;
+        end loop;
 
         -- =========================================================================================
         -- Completion processing: always active (independent of the issue FSM's state) so that
         -- completions of outstanding reads never have to wait for the issue side to be idle.
         -- =========================================================================================
         if (CQP_CQE_VLD = '1') then
+            cqp_cqe_qid_int := to_integer(unsigned(CQP_CQE_QID));
             cqe_idx_v := to_integer(unsigned(CQP_CQE_CID(CTX_IDX_W -1 downto 0)));
-            cqe_ctx_v := ctx_reg(cqe_idx_v);
+            cqe_ctx_v := ctx_reg(cqp_cqe_qid_int)(cqe_idx_v);
 
             OP_STAT_TYPE <= '1' when cqe_ctx_v.op_type = RD_CMD_OPCODE else '0';
 
@@ -484,9 +555,11 @@ begin
                     rd_cpl_fifo_din <= cqe_ctx_v.first_page & cqe_ctx_v.lba_num;
                     rd_cpl_fifo_wr  <= '1';
                 elsif (cqe_ctx_v.op_type = WR_CMD_OPCODE) then
-                    OP_STAT_VLD                 <= '1';
-                    flush_delay_cnt_next        <= (others => '0');
-                    flush_delay_cnt_active_next <= '1';
+                    OP_STAT_VLD <= '1';
+                    -- Arm THIS queue's own keepalive timer only -- a write on queue A must never
+                    -- arm or disturb queue B's independent FLUSH schedule.
+                    flush_delay_cnt_next(cqp_cqe_qid_int)        <= (others => '0');
+                    flush_delay_cnt_active_next(cqp_cqe_qid_int) <= '1';
                 end if;
             else
                 OP_STAT_CODE <= "01"; -- FAILURE
@@ -507,10 +580,13 @@ begin
             when S_IDLE =>
                 -- TODO: Block read when write gets accepted and vice versa.
                 if (comp_enabled = '1' and STOP_REQ_VLD = '0') then
-                    if (flush_dispatch_reg = '1') then
-                        op_state_nst        <= S_FLUSH_REQ_PREPARE;
-                        flush_dispatch_next <= '0';
-                        op_type_next        <= FLUSH_CMD_OPCODE;
+                    if (flush_pending_v = '1') then
+                        op_state_nst                     <= S_FLUSH_REQ_PREPARE;
+                        flush_dispatch_next(flush_qid_v) <= '0';
+                        op_type_next                     <= FLUSH_CMD_OPCODE;
+                        -- Route this FLUSH at the priority-picked queue: held in qid_reg for
+                        -- S_FLUSH_REQ_PREPARE's C2N_QID/ctx_in_qid (both default to qid_reg).
+                        qid_next                         <= std_logic_vector(to_unsigned(flush_qid_v, QID_W));
                     else
                         NVME_RD_REQ_RDY <= '1';
                         -- Only accept a new write frame if its whole reservation fits; the read
@@ -524,6 +600,7 @@ begin
                             and (NVME_RD_REQ_VLD = '0' or (NVME_RD_REQ_VLD = '1' and op_type_reg = RD_CMD_OPCODE))) then
                             start_lba_ptr_next <= NVME_WR_REQ_LBA_PTR;
                             op_type_next       <= WR_CMD_OPCODE;
+                            qid_next           <= NVME_WR_REQ_QID;
                             NVME_RD_REQ_RDY    <= '0';
                             wr_alloc_req_vld   <= '1';
                             k_wr_next          <= wr_alloc_page;
@@ -539,6 +616,7 @@ begin
                             lba_num_next       <= NVME_RD_REQ_LBA_NUM;
                             start_lba_ptr_next <= NVME_RD_REQ_LBA_PTR;
                             op_type_next       <= RD_CMD_OPCODE;
+                            qid_next           <= NVME_RD_REQ_QID;
                             WR_MFB_DST_RDY     <= '0';
                         end if;
                     end if;
@@ -628,6 +706,7 @@ begin
                     ctx_in_lba_num    <= lba_num_reg;
                     ctx_in_first_page <= k_wr_reg;
                     ctx_in_npages     <= std_logic_vector(to_unsigned(MAX_WR_PAGES, NPAGES_W));
+                    ctx_in_qid        <= qid_reg;
                 end if;
 
             when S_FLUSH_REQ_PREPARE =>
@@ -637,17 +716,24 @@ begin
                 C2N_PRP_ENTRY_2     <= (others => '0');
                 C2N_START_LBA_PTR   <= (others => '0');
                 C2N_LBA_NUM         <= (others => '0');
+                -- C2N_QID is left at its process-wide default (qid_reg), which S_IDLE set to the
+                -- priority-picked flush_qid_v when entering this state -- routing the FLUSH SQE to
+                -- SQ[qid_reg] and, once dispatched, ringing queue qid_reg's own SQTDBL.
                 WR_MFB_DST_RDY      <= '0';
 
                 if (C2N_RDY_FOR_DISP = '1') then
                     op_state_nst <= S_IDLE;
 
                     -- FLUSH holds no buffer pages; keep the ctx entry harmless (its op_type never
-                    -- matches RD/WR so completion processing skips it).
+                    -- matches RD/WR so completion processing skips it). ctx_in_qid must still be
+                    -- qid_reg (not "0") so this FLUSH's own CQE -- on CQ[qid_reg] -- looks up a
+                    -- real, harmless entry in THAT queue's ctx table rather than aliasing onto
+                    -- queue 0's.
                     ctx_in_op_type    <= FLUSH_CMD_OPCODE;
                     ctx_in_lba_num    <= (others => '0');
                     ctx_in_first_page <= (others => '0');
                     ctx_in_npages     <= (others => '0');
+                    ctx_in_qid        <= qid_reg;
                 end if;
 
             when S_RD_REQ_PREPARE =>
@@ -681,6 +767,7 @@ begin
                     ctx_in_lba_num    <= lba_num_reg;
                     ctx_in_first_page <= rd_alloc_page;
                     ctx_in_npages     <= std_logic_vector(npages_v);
+                    ctx_in_qid        <= qid_reg;
                 end if;
         end case;
     end process;
@@ -693,7 +780,7 @@ begin
     begin
         if (rising_edge(CLK)) then
             if (DISP_CMD_ID_VLD = '1') then
-                ctx_reg(to_integer(unsigned(DISP_CMD_ID(CTX_IDX_W -1 downto 0)))) <= (
+                ctx_reg(to_integer(unsigned(ctx_in_qid)))(to_integer(unsigned(DISP_CMD_ID(CTX_IDX_W -1 downto 0)))) <= (
                     op_type    => ctx_in_op_type,
                     lba_num    => ctx_in_lba_num,
                     first_page => ctx_in_first_page,
