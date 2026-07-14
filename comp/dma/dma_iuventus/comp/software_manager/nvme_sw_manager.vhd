@@ -36,12 +36,20 @@ entity NVME_SW_MANAGER is
         MRRS        : positive := 2**13;
         -- Maximum size of a packet that can be dispatched from the H2C/C2N buffers
         PKT_SIZE_MAX : positive := 2**17;
+        -- Number of MFB regions of DBL_UPDATER's dispatch path -- sizes the dispatch-side read
+        -- ports of the base-address LUTRAM (CQHDBL_BADDR_RD_QID/SQTDBL_BADDR_RD_QID below): up to
+        -- MFB_REGIONS doorbell updates can be dequeued from DBL_UPDATER's own FIFO in the SAME
+        -- cycle, each needing an independent (potentially different-queue) base-address lookup.
+        MFB_REGIONS : positive := 2;
         -- Number of independent SQ/CQ queues (one per SSD). The MI register map is a COMMON
         -- (shared, low-offset) block followed by a generated PER-QUEUE 2D block (PER_Q_BASE +
         -- q*PER_Q_STRIDE, q = 0..NUM_QUEUES-1 -- queue 0 is just q=0 of that block, not
-        -- special-cased). At NUM_QUEUES=1 the register map is NOT bit-identical to the historical
-        -- single-queue layout (it has been intentionally redefined -- see PER_Q_BASE/PER_Q_STRIDE/
-        -- PQ_* below), but single-queue behavior is functionally equivalent.
+        -- special-cased). Per-queue registers are stored in NP_LUTRAM (distributed RAM, ITEMS =>
+        -- NUM_QUEUES, one instance per field), not per-queue flops -- see the report accompanying
+        -- this change for exactly which reader gets which LUTRAM read port. At NUM_QUEUES=1 the
+        -- register map is NOT bit-identical to the historical single-queue layout (it has been
+        -- intentionally redefined -- see PER_Q_BASE/PER_Q_STRIDE/PQ_* below), but single-queue
+        -- behavior is functionally equivalent.
         NUM_QUEUES   : positive := 1
         );
 
@@ -89,23 +97,31 @@ entity NVME_SW_MANAGER is
         WRBUFF_BADDR         : out std_logic_vector(63 downto 0);
         WRBUFF_PRP_LIST_PTR  : out std_logic_vector(63 downto 0);
 
+        -- Queue (OP_CTRL's own admitted-command qid_reg, mirrored by its C2N_QID output) whose
+        -- LBA_SPACE_SIZE/LBA_NUM_MASK OP_CTRL needs this cycle for its OOR check. Always "0" at
+        -- NUM_QUEUES=1.
+        LBA_CHECK_QID      : in  std_logic_vector(maximum(1, log2(NUM_QUEUES)) -1 downto 0);
+        LBA_SPACE_SIZE_OPC : out std_logic_vector(63 downto 0);
+        LBA_NUM_MASK_OPC   : out std_logic_vector(15 downto 0);
+
         -- ========================================================================================
         -- C2N Command dispatcher
         -- ========================================================================================
         -- The current value of SQTDBL, and the queue it belongs to -- routes into that queue's
-        -- own PQ_SQTDBL observation register (see sqtdbl_reg_arr/pq_readback_g below). Always "0"
-        -- at NUM_QUEUES=1.
+        -- own PQ_SQTDBL observation register. The SAME qid also selects C2N_CONTROLLER's own
+        -- (dispatch-time) DBL_MASK/NAMESPACE_ID/LBA_SPACE_SIZE/LBA_NUM_MASK reads below, since it
+        -- mirrors NVME_CMD_DISPATCHER's own QID at the same cycle. Always "0" at NUM_QUEUES=1.
         SQTDBL_DATA     : in  std_logic_vector(15 downto 0);
         SQTDBL_QID      : in  std_logic_vector(maximum(1, log2(NUM_QUEUES)) -1 downto 0);
         TAG_FIFO_STATUS : in std_logic_vector(11 downto 0);
         TAG_INIT_DONE   : in std_logic;
 
-        -- Per-queue configuration (one element per queue -- see the PER_Q_BASE 2D register block
-        -- below).
-        DBL_MASK       : out slv_array_t(NUM_QUEUES -1 downto 0)(15 downto 0);
-        NAMESPACE_ID   : out slv_array_t(NUM_QUEUES -1 downto 0)(31 downto 0);
-        LBA_NUM_MASK   : out slv_array_t(NUM_QUEUES -1 downto 0)(15 downto 0);
-        LBA_SPACE_SIZE : out slv_array_t(NUM_QUEUES -1 downto 0)(63 downto 0);
+        -- Per-queue configuration of the queue NVME_CMD_DISPATCHER is currently dispatching to
+        -- (SQTDBL_QID above).
+        DBL_MASK_C2N       : out std_logic_vector(15 downto 0);
+        NAMESPACE_ID_C2N   : out std_logic_vector(31 downto 0);
+        LBA_SPACE_SIZE_C2N : out std_logic_vector(63 downto 0);
+        LBA_NUM_MASK_C2N   : out std_logic_vector(15 downto 0);
         -- COMMON: a single shared metadata pointer for every queue.
         METADATA_PTR   : out std_logic_vector(63 downto 0);
 
@@ -118,8 +134,7 @@ entity NVME_SW_MANAGER is
         -- =========================================================================================
         -- SQHDBL_DATA/CQHDBL_DATA/LAST_CQ_ENTRY/STATUS_UPD_VLD all describe the SAME completion
         -- event, reported for queue CQHDBL_QID -- routes SQHDBL_DATA/CQHDBL_DATA into that
-        -- queue's own PQ_SQHDBL/PQ_CQHDBL observation registers (see sqhdbl_reg_arr/
-        -- cqhdbl_reg_arr/pq_readback_g below). Always "0" at NUM_QUEUES=1.
+        -- queue's own PQ_SQHDBL/PQ_CQHDBL observation registers. Always "0" at NUM_QUEUES=1.
         SQHDBL_DATA     : in std_logic_vector(15 downto 0);
         CQHDBL_DATA     : in std_logic_vector(15 downto 0);
         CQHDBL_QID      : in std_logic_vector(maximum(1, log2(NUM_QUEUES)) -1 downto 0);
@@ -130,11 +145,27 @@ entity NVME_SW_MANAGER is
         LAST_CQ_ENTRY   : in std_logic_vector(CQ_ENTRY_RANGE);
         STATUS_UPD_VLD  : in std_logic;
 
+        -- Queue (CQE_PROCESSOR's own resp_qidx, undelayed -- unlike CQP_CQE_QID above, which
+        -- N2C_CONTROLLER registers) whose DBL_MASK CQE_PROCESSOR needs to interpret THIS cycle's
+        -- CQ read response. Always "0" at NUM_QUEUES=1.
+        DBL_MASK_RD_QID : in  std_logic_vector(maximum(1, log2(NUM_QUEUES)) -1 downto 0);
+        DBL_MASK_N2C    : out std_logic_vector(15 downto 0);
+
         -- =========================================================================================
         -- DBL Updater
         -- =========================================================================================
-        CQHDBL_BASE_ADDR : out slv_array_t(NUM_QUEUES -1 downto 0)(63 downto 0);
-        SQTDBL_BASE_ADDR : out slv_array_t(NUM_QUEUES -1 downto 0)(63 downto 0);
+        -- One bit per doorbell (indices 0..NUM_QUEUES-1 = CQHDBL[q], NUM_QUEUES..2*NUM_QUEUES-1 =
+        -- SQTDBL[q], matching DBL_UPDATER's own dbl_reg indexing), sticky-set once a non-zero PCIe
+        -- base address has been written via MI for that doorbell -- see DBL_UPDATER's own port
+        -- comment.
+        DBL_ENABLED : out std_logic_vector(2*NUM_QUEUES -1 downto 0);
+
+        -- Dispatch-side base-address lookup, one queue at a time per MFB region -- see
+        -- DBL_UPDATER's own port comment for why MFB_REGIONS ports (not 1, not NUM_QUEUES).
+        CQHDBL_BADDR_RD_QID  : in  slv_array_t(MFB_REGIONS -1 downto 0)(maximum(1, log2(NUM_QUEUES)) -1 downto 0);
+        CQHDBL_BADDR_RD_DATA : out slv_array_t(MFB_REGIONS -1 downto 0)(63 downto 0);
+        SQTDBL_BADDR_RD_QID  : in  slv_array_t(MFB_REGIONS -1 downto 0)(maximum(1, log2(NUM_QUEUES)) -1 downto 0);
+        SQTDBL_BADDR_RD_DATA : out slv_array_t(MFB_REGIONS -1 downto 0)(63 downto 0);
 
         CQHDBL_REG_UPD_DISP : in std_logic;
         SQTDBL_REG_UPD_DISP : in std_logic;
@@ -168,12 +199,23 @@ architecture FULL of NVME_SW_MANAGER is
     constant ADDR_LENGTH : positive := 12;
     constant CNTR_WIDTH  : positive := 64;
 
+    -- Width of a Queue Identifier value (0 to NUM_QUEUES-1) as used on every QID port throughout
+    -- this design (always at least 1 bit, even at NUM_QUEUES=1).
+    constant QID_W : positive := maximum(1, log2(NUM_QUEUES));
+    -- Actual per-queue LUTRAM depth: NUM_QUEUES rounded up to at least 2, so that
+    -- log2(LUTRAM_ITEMS) always equals QID_W exactly (log2(1) = 0 would otherwise give a
+    -- 0-bit -- null-range -- NP_LUTRAM address port at NUM_QUEUES=1, which is unnecessary risk
+    -- for one wasted, never-addressed extra row of distributed RAM).
+    constant LUTRAM_ITEMS : positive := maximum(2, NUM_QUEUES);
+
     -- =============================================================================================
     -- COMMON register block (shared across every queue): CONTROL/STATUS, the shared RDBUFF/WRBUFF
     -- data-pool base addresses/PRP list pointers, METADATA_PTR, LAST_CQ_ENTRY/CPL_ERR_MASK/
     -- TAG_FIFO_STATUS status, and every *_CNTR performance counter (all of these remain
     -- aggregated across queues for now -- see the report accompanying this change for exactly
-    -- which ones, and whether any should become per-queue in a later pass).
+    -- which ones, and whether any should become per-queue in a later pass). Stored in plain flops
+    -- (regs_arr below), unchanged from before -- only the PER-QUEUE block (further below) moved
+    -- to NP_LUTRAM.
     -- =============================================================================================
     constant R_CONTROL                      : natural := 0;
     constant R_STATUS                       : natural := 1;
@@ -253,10 +295,12 @@ architecture FULL of NVME_SW_MANAGER is
     constant R_NVME_FLUSH_CMD_DISP_CNTR_L   : natural := 75;
     constant R_NVME_FLUSH_CMD_DISP_CNTR_H   : natural := 76;
 
-    -- Number of registers in the COMMON block above.
+    -- Number of registers in the COMMON block above; also the total register count (REGS), since
+    -- the PER-QUEUE block is no longer part of regs_arr/R_ADDRS -- see PQ_* below instead.
     constant COMMON_REGS : natural := 77;
+    constant REGS        : natural := COMMON_REGS;
 
-    constant R_ADDRS_COMMON : n_array_t(0 to COMMON_REGS-1) := (
+    constant R_ADDRS : n_array_t(0 to REGS-1) := (
         R_CONTROL                       => 16#000#,
         R_STATUS                        => 16#004#,
         R_RDBUFF_BADDR_L                => 16#008#,
@@ -336,7 +380,7 @@ architecture FULL of NVME_SW_MANAGER is
         R_NVME_FLUSH_CMD_DISP_CNTR_H    => 16#130#
     );
 
-    constant WR_EN_COMMON : b_array_t(0 to COMMON_REGS-1) := (
+    constant WR_EN : b_array_t(0 to REGS-1) := (
         R_CONTROL                       => TRUE,
         R_STATUS                        => FALSE,
         R_RDBUFF_BADDR_L                => TRUE,
@@ -416,7 +460,7 @@ architecture FULL of NVME_SW_MANAGER is
         R_NVME_FLUSH_CMD_DISP_CNTR_H    => FALSE
     );
 
-    constant STROBE_EN_COMMON : b_array_t(0 to COMMON_REGS-1) := (
+    constant STROBE_EN : b_array_t(0 to REGS-1) := (
         R_CONTROL                       => FALSE,
         R_STATUS                        => FALSE,
         R_RDBUFF_BADDR_L                => FALSE,
@@ -496,7 +540,7 @@ architecture FULL of NVME_SW_MANAGER is
         R_NVME_FLUSH_CMD_DISP_CNTR_H    => TRUE
     );
 
-    constant REG_IS_CNTR_COMMON : b_array_t(0 to COMMON_REGS-1) := (
+    constant REG_IS_CNTR : b_array_t(0 to REGS-1) := (
         R_CONTROL                       => FALSE,
         R_STATUS                        => FALSE,
         R_RDBUFF_BADDR_L                => FALSE,
@@ -576,7 +620,7 @@ architecture FULL of NVME_SW_MANAGER is
         R_NVME_FLUSH_CMD_DISP_CNTR_H    => FALSE
     );
 
-    constant REG_WIDTH_COMMON : n_array_t(0 to COMMON_REGS-1) := (
+    constant REG_WIDTH : n_array_t(0 to REGS-1) := (
         R_CONTROL                       => 6,
         R_STATUS                        => 3,
         R_RDBUFF_BADDR_L                => 32,
@@ -658,13 +702,15 @@ architecture FULL of NVME_SW_MANAGER is
 
     -- =============================================================================================
     -- PER-QUEUE 2D register block: base PER_Q_BASE, one PER_Q_STRIDE-byte slot per queue
-    -- q = 0..NUM_QUEUES-1 (queue 0 is just q=0 of this block -- no special-casing, unlike the
-    -- prior "legacy scalar registers for queue 0 + appended EXTRA_Q block for queues 1+" scheme,
-    -- which passed simulation but was physically unwritable for q>0 on real hardware). Each slot
-    -- holds PQ_REGS registers, at PQ_OFFSETS(i) relative to PER_Q_BASE + q*PER_Q_STRIDE.
+    -- q = 0..NUM_QUEUES-1 (queue 0 is just q=0 of this block -- no special-casing). Each field is
+    -- one NP_LUTRAM (ITEMS => LUTRAM_ITEMS, i.e. NUM_QUEUES rounded up to >= 2 -- see LUTRAM_ITEMS
+    -- above), at PQ_OFFSETS(i) relative to PER_Q_BASE + q*PER_Q_STRIDE. PQ_SQTDBL..PQ_LBA_NUM_MASK
+    -- (0..11) double as both the field's MI word index (PQ_OFFSETS(i) = i*4) and the index into
+    -- pq_mi_dob below -- see pq_word_idx.
     -- =============================================================================================
     constant PER_Q_BASE   : natural := 16#200#;
     constant PER_Q_STRIDE : natural := 16#040#;
+    constant PER_Q_BASE_SLOTS : natural := PER_Q_BASE / PER_Q_STRIDE;
 
     constant PQ_SQTDBL           : natural := 0;
     constant PQ_SQHDBL           : natural := 1;
@@ -680,44 +726,8 @@ architecture FULL of NVME_SW_MANAGER is
     constant PQ_LBA_NUM_MASK     : natural := 11;
     constant PQ_REGS             : natural := 12;
 
-    constant PQ_OFFSETS : n_array_t(0 to PQ_REGS-1) := (
-        PQ_SQTDBL           => 16#00#,
-        PQ_SQHDBL           => 16#04#,
-        PQ_CQHDBL           => 16#08#,
-        PQ_DBL_MASK         => 16#0C#,
-        PQ_SQTDBL_BADDR_L   => 16#10#,
-        PQ_SQTDBL_BADDR_H   => 16#14#,
-        PQ_CQHDBL_BADDR_L   => 16#18#,
-        PQ_CQHDBL_BADDR_H   => 16#1C#,
-        PQ_LBA_SPACE_SIZE_L => 16#20#,
-        PQ_LBA_SPACE_SIZE_H => 16#24#,
-        PQ_NAMESPACE_ID     => 16#28#,
-        PQ_LBA_NUM_MASK     => 16#2C#
-    );
-
-    -- Doorbell VALUE registers (SQTDBL/SQHDBL/CQHDBL) are read-only observation mirrors, driven
-    -- from sqtdbl_reg_arr/sqhdbl_reg_arr/cqhdbl_reg_arr (see pq_readback_g below); everything else
-    -- in a queue's slot is host-writable configuration. NAMESPACE_ID is now a real writable
-    -- register (previously hardcoded to x"00000001") -- software must program it after reset.
-    constant PQ_WR_EN : b_array_t(0 to PQ_REGS-1) := (
-        PQ_SQTDBL           => FALSE,
-        PQ_SQHDBL           => FALSE,
-        PQ_CQHDBL           => FALSE,
-        PQ_DBL_MASK         => TRUE,
-        PQ_SQTDBL_BADDR_L   => TRUE,
-        PQ_SQTDBL_BADDR_H   => TRUE,
-        PQ_CQHDBL_BADDR_L   => TRUE,
-        PQ_CQHDBL_BADDR_H   => TRUE,
-        PQ_LBA_SPACE_SIZE_L => TRUE,
-        PQ_LBA_SPACE_SIZE_H => TRUE,
-        PQ_NAMESPACE_ID     => TRUE,
-        PQ_LBA_NUM_MASK     => TRUE
-    );
-
-    -- None of the per-queue registers are sampled (STROBE_EN) or STAT_CNTR-backed (REG_IS_CNTR).
-    constant PQ_STROBE_EN   : b_array_t(0 to PQ_REGS-1) := (others => FALSE);
-    constant PQ_REG_IS_CNTR : b_array_t(0 to PQ_REGS-1) := (others => FALSE);
-
+    -- Element width (16 or 32 bits) actually meaningful within each field's 32-bit MI word --
+    -- indexed by the same PQ_* constants / pq_word_idx.
     constant PQ_REG_WIDTH : n_array_t(0 to PQ_REGS-1) := (
         PQ_SQTDBL           => 16,
         PQ_SQHDBL           => 16,
@@ -733,66 +743,11 @@ architecture FULL of NVME_SW_MANAGER is
         PQ_LBA_NUM_MASK     => 16
     );
 
-    -- Total register count: the COMMON block, plus one PQ_REGS-sized slot per queue.
-    constant REGS : natural := COMMON_REGS + NUM_QUEUES*PQ_REGS;
-
-    -- Index into regs_arr/R_ADDRS/etc of per-queue register pq_reg for queue q.
-    function pq_reg_idx(q : natural; pq_reg : natural) return natural is
-    begin
-        return COMMON_REGS + q*PQ_REGS + pq_reg;
-    end function;
-
-    -- Appends, for each queue q = 0..nq-1, one copy of pq_offsets (relative slot offsets),
-    -- rebased to pq_base + q*pq_stride, after the COMMON addresses.
-    function build_r_addrs(common_addrs : n_array_t; nq : positive; pq_base : natural; pq_stride : natural; pq_offsets : n_array_t) return n_array_t is
-        variable arr : n_array_t(0 to common_addrs'length + nq*pq_offsets'length -1);
-    begin
-        arr(0 to common_addrs'length -1) := common_addrs;
-        for q in 0 to nq -1 loop
-            for i in 0 to pq_offsets'length -1 loop
-                arr(common_addrs'length + q*pq_offsets'length + i) := pq_base + q*pq_stride + pq_offsets(i);
-            end loop;
-        end loop;
-        return arr;
-    end function;
-
-    -- Appends nq copies of pq_pattern (one per queue's slot) after common_arr.
-    function extend_b_array(common_arr : b_array_t; nq : positive; pq_pattern : b_array_t) return b_array_t is
-        variable arr : b_array_t(0 to common_arr'length + nq*pq_pattern'length -1);
-    begin
-        arr(0 to common_arr'length -1) := common_arr;
-        for q in 0 to nq -1 loop
-            arr(common_arr'length + q*pq_pattern'length to common_arr'length + (q+1)*pq_pattern'length -1) := pq_pattern;
-        end loop;
-        return arr;
-    end function;
-
-    function extend_n_array(common_arr : n_array_t; nq : positive; pq_pattern : n_array_t) return n_array_t is
-        variable arr : n_array_t(0 to common_arr'length + nq*pq_pattern'length -1);
-    begin
-        arr(0 to common_arr'length -1) := common_arr;
-        for q in 0 to nq -1 loop
-            arr(common_arr'length + q*pq_pattern'length to common_arr'length + (q+1)*pq_pattern'length -1) := pq_pattern;
-        end loop;
-        return arr;
-    end function;
-
-    constant R_ADDRS     : n_array_t(0 to REGS-1) := build_r_addrs(R_ADDRS_COMMON, NUM_QUEUES, PER_Q_BASE, PER_Q_STRIDE, PQ_OFFSETS);
-    constant WR_EN       : b_array_t(0 to REGS-1) := extend_b_array(WR_EN_COMMON, NUM_QUEUES, PQ_WR_EN);
-    constant STROBE_EN   : b_array_t(0 to REGS-1) := extend_b_array(STROBE_EN_COMMON, NUM_QUEUES, PQ_STROBE_EN);
-    constant REG_IS_CNTR : b_array_t(0 to REGS-1) := extend_b_array(REG_IS_CNTR_COMMON, NUM_QUEUES, PQ_REG_IS_CNTR);
-    constant REG_WIDTH   : n_array_t(0 to REGS-1) := extend_n_array(REG_WIDTH_COMMON, NUM_QUEUES, PQ_REG_WIDTH);
-
     -- =============================================================================================
-    -- Input registers
+    -- Input registers (COMMON)
     -- =============================================================================================
-    -- Per-queue doorbell VALUE observation registers -- see SQTDBL_QID/CQHDBL_QID above and
-    -- pq_readback_g below.
-    signal sqtdbl_reg_arr : slv_array_t(NUM_QUEUES -1 downto 0)(15 downto 0);
-    signal sqhdbl_reg_arr : slv_array_t(NUM_QUEUES -1 downto 0)(15 downto 0);
-    signal cqhdbl_reg_arr : slv_array_t(NUM_QUEUES -1 downto 0)(15 downto 0);
-    -- COMMON: a single system-wide "last completion" snapshot (whichever queue's CQE was
-    -- processed most recently), used only to feed the aggregate CQE_ERROR_TRACKER below.
+    -- A single system-wide "last completion" snapshot (whichever queue's CQE was processed most
+    -- recently), used only to feed the aggregate CQE_ERROR_TRACKER below.
     signal last_cq_entry_inp_reg     : std_logic_vector(CQ_ENTRY_RANGE);
 
     -- =============================================================================================
@@ -824,7 +779,7 @@ architecture FULL of NVME_SW_MANAGER is
     signal design_running      : std_logic;
 
     -- =============================================================================================
-    -- Register array declaratiions
+    -- Register array declaratiions (COMMON only)
     -- =============================================================================================
     signal regs_arr : slv_array_t(REGS-1 downto 0)(MI_WIDTH -1 downto 0);
     signal sample_regs_ins : slv_array_t(REGS-1 downto 0)(MI_WIDTH -1 downto 0);
@@ -840,11 +795,33 @@ architecture FULL of NVME_SW_MANAGER is
     signal unsucc_compl_cntr_incr    : std_logic;
     -- The error mask of the previously captured errors with regards to the completion status
     signal cpl_err_mask              : std_logic_vector(ERR_MASK_W -1 downto 0);
-    -- Per-queue next value of the SQTDBL pointer (anticipates the possible doorbell pointer
-    -- rollover and is therefore masked); OR-reduced into the single COMMON sq_write_blocking
-    -- perf-counter input below -- not yet made per-queue.
-    signal sqtdbl_next_val_arr       : slv_array_t(NUM_QUEUES -1 downto 0)(15 downto 0);
-    signal sq_write_blocking_arr     : std_logic_vector(NUM_QUEUES -1 downto 0);
+    -- Next value of queue 0's SQTDBL pointer (anticipates the possible doorbell pointer rollover
+    -- and is therefore masked), feeding the single COMMON sq_write_blocking perf-counter input
+    -- below. Queue-0-only (not truly per-queue): this was already an approximation before this
+    -- change (an OR-reduction across queues), and a genuinely per-queue version would need a
+    -- dedicated extra read port per queue on the DBL_MASK LUTRAM for this one non-critical
+    -- debug/perf statistic alone -- not worth the extra ports. At NUM_QUEUES=1 queue 0 IS the only
+    -- queue, so this remains exactly correct there.
+    signal sqtdbl_next_val_q0    : std_logic_vector(15 downto 0);
+    -- Fixed qid=0 literal, used only to address DBL_MASK's dedicated sq_write_blocking read port
+    -- (see pq_dbl_mask_i further down) -- SQTDBL/SQHDBL below are plain flop arrays instead (see
+    -- their own comment), so queue 0's value is read directly, without any extra LUTRAM port.
+    signal sq_write_blocking_qid0 : std_logic_vector(QID_W -1 downto 0) := (others => '0');
+    signal dbl_mask_q0_dob        : std_logic_vector(MI_WIDTH -1 downto 0);
+
+    -- =============================================================================================
+    -- SQTDBL/SQHDBL/CQHDBL doorbell VALUE observation mirrors: kept as plain flop arrays (NOT
+    -- NP_LUTRAM, unlike every other per-queue register below), because NP_LUTRAM has no bulk-clear
+    -- port and these three are explicitly reset on every CQP_START_REQ_VLD pulse (a
+    -- disable/re-enable cycle, not just power-up RST) -- matching the model/testbench's own
+    -- expectation that a fresh completion-processor start begins these back at 0. At 16 bits x
+    -- NUM_QUEUES each, the three of them are a comparatively small fraction of the per-queue flop
+    -- footprint this whole change is meant to reduce (DBL_MASK/base-address/LBA_SPACE_SIZE/
+    -- NAMESPACE_ID/LBA_NUM_MASK -- 32/64-bit fields -- are the ones moved to NP_LUTRAM).
+    -- =============================================================================================
+    signal sqtdbl_reg_arr : slv_array_t(NUM_QUEUES -1 downto 0)(15 downto 0);
+    signal sqhdbl_reg_arr : slv_array_t(NUM_QUEUES -1 downto 0)(15 downto 0);
+    signal cqhdbl_reg_arr : slv_array_t(NUM_QUEUES -1 downto 0)(15 downto 0);
 
     -- =============================================================================================
     -- Data Logger related signals
@@ -866,14 +843,6 @@ architecture FULL of NVME_SW_MANAGER is
     signal sqiops_evctr_total_cycles : std_logic_vector(log2(EVCR_MAX_INTERVAL_CYCLES+1) -1 downto 0);
     signal sqiops_evctr_update       : std_logic;
 
-    -- Per-queue configuration/doorbell-address output arrays -- see pq_output_g below.
-    signal dbl_mask_arr         : slv_array_t(NUM_QUEUES -1 downto 0)(15 downto 0);
-    signal namespace_id_arr     : slv_array_t(NUM_QUEUES -1 downto 0)(31 downto 0);
-    signal lba_num_mask_arr     : slv_array_t(NUM_QUEUES -1 downto 0)(15 downto 0);
-    signal lba_space_size_arr   : slv_array_t(NUM_QUEUES -1 downto 0)(63 downto 0);
-    signal sqtdbl_base_addr_arr : slv_array_t(NUM_QUEUES -1 downto 0)(63 downto 0);
-    signal cqhdbl_base_addr_arr : slv_array_t(NUM_QUEUES -1 downto 0)(63 downto 0);
-
     -- =============================================================================================
     -- MI splitter tree
     -- =============================================================================================
@@ -891,6 +860,27 @@ architecture FULL of NVME_SW_MANAGER is
     signal mi_split_drd  : slv_array_t(MI_SPLIT_PORTS -1 downto 0)(MI_WIDTH -1 downto 0);
     signal mi_split_ardy : std_logic_vector(MI_SPLIT_PORTS -1 downto 0);
     signal mi_split_drdy : std_logic_vector(MI_SPLIT_PORTS -1 downto 0);
+
+    -- =============================================================================================
+    -- Per-queue MI address decode: PER_Q_STRIDE (0x40) is a power of 2, so the queue index is the
+    -- address bits above the per-slot field offset, and the field is the low 6 bits.
+    -- =============================================================================================
+    signal pq_valid    : std_logic;
+    signal pq_qid      : std_logic_vector(QID_W -1 downto 0);
+    signal pq_field    : std_logic_vector(5 downto 0);
+    signal pq_word_idx : natural range 0 to 63;
+
+    -- MI-port (read port 0) data-out of every per-queue field's own NP_LUTRAM -- see pq_word_idx.
+    signal pq_mi_dob : slv_array_t(0 to PQ_REGS-1)(MI_WIDTH -1 downto 0);
+    -- MI write-enable per per-queue field (pq_we(PQ_XXX)): a conditional-expression port map
+    -- actual (WE(0) => '1' when ... else '0') is not accepted by nvc, so this is computed as an
+    -- ordinary concurrent signal assignment instead and referenced by name in each NP_LUTRAM's own
+    -- port map below.
+    signal pq_we : std_logic_vector(0 to PQ_REGS-1);
+
+    -- One bit per doorbell (indices 0..NUM_QUEUES-1 = CQHDBL[q], NUM_QUEUES..2*NUM_QUEUES-1 =
+    -- SQTDBL[q]) -- see DBL_ENABLED's port comment.
+    signal dbl_enabled_reg : std_logic_vector(2*NUM_QUEUES -1 downto 0);
 begin
     assert (MPS <= 4096)
         report "NVME_CPL_SW_MANAGER: The set size of MPS exceeded the maximum defined by the PCIe Specification (up to 4096 B, current is " &
@@ -993,6 +983,32 @@ begin
 
     mi_split_ardy(0) <= mi_split_rd(0) or mi_split_wr(0);
 
+    -- =============================================================================================
+    -- Per-queue MI address decode (COMMON register range vs PER_Q_BASE block). Combinational, so
+    -- it settles the SAME cycle as mi_split_addr(0)/reg_sel_addr, matching read_from_regs_p's own
+    -- COMMON-register decode timing exactly.
+    -- =============================================================================================
+    pq_mi_decode_p : process (all)
+        variable addr_slots_v : natural;
+    begin
+        pq_field <= mi_split_addr(0)(5 downto 0);
+        addr_slots_v := to_integer(unsigned(mi_split_addr(0)(ADDR_LENGTH-1 downto 6)));
+
+        if (addr_slots_v >= PER_Q_BASE_SLOTS and (addr_slots_v - PER_Q_BASE_SLOTS) < NUM_QUEUES) then
+            pq_valid <= '1';
+            pq_qid   <= std_logic_vector(to_unsigned(addr_slots_v - PER_Q_BASE_SLOTS, QID_W));
+        else
+            pq_valid <= '0';
+            pq_qid   <= (others => '0');
+        end if;
+    end process;
+
+    pq_word_idx <= to_integer(unsigned(pq_field(5 downto 2)));
+
+    pq_we_g : for i in 0 to PQ_REGS -1 generate
+        pq_we(i) <= '1' when (pq_valid = '1' and mi_split_wr(0) = '1' and pq_word_idx = i) else '0';
+    end generate;
+
     regs_g : for reg_idx in 0 to (REGS-1) generate
         wr_en_g : if (WR_EN(reg_idx) and not REG_IS_CNTR(reg_idx)) generate
             reg_type_g : if (reg_idx = R_CONTROL) generate
@@ -1066,16 +1082,290 @@ begin
     (regs_arr(R_CPL_ERR_MASK_H), regs_arr(R_CPL_ERR_MASK_L))              <= cpl_err_mask;
     regs_arr(R_TAG_FIFO_STATUS)(REG_WIDTH(R_TAG_FIFO_STATUS) -1 downto 0) <= TAG_FIFO_STATUS;
 
-    -- Per-queue doorbell VALUE observation registers (q is a generate-time constant, so each
-    -- instance's regs_arr(pq_reg_idx(q,...)) target is a static name -- a single, unambiguous
-    -- driver per element, alongside regs_g's write processes for the OTHER registers in the same
-    -- queue's slot, since PQ_WR_EN is FALSE for these three -- see the note near dbl_reg_wr_g in
-    -- dbl_updater.vhd for the general rule this follows).
-    pq_readback_g : for q in 0 to NUM_QUEUES -1 generate
-        regs_arr(pq_reg_idx(q, PQ_SQTDBL))(PQ_REG_WIDTH(PQ_SQTDBL) -1 downto 0) <= sqtdbl_reg_arr(q);
-        regs_arr(pq_reg_idx(q, PQ_SQHDBL))(PQ_REG_WIDTH(PQ_SQHDBL) -1 downto 0) <= sqhdbl_reg_arr(q);
-        regs_arr(pq_reg_idx(q, PQ_CQHDBL))(PQ_REG_WIDTH(PQ_CQHDBL) -1 downto 0) <= cqhdbl_reg_arr(q);
-    end generate;
+    -- =============================================================================================
+    -- PER-QUEUE register storage: one NP_LUTRAM (ITEMS => LUTRAM_ITEMS) per field. READ_PORTS is
+    -- sized to the number of distinct PHYSICAL modules that read that field (never NUM_QUEUES):
+    -- port 0 of both WRITE and READ is always MI; further ports are the actual consumers, each
+    -- addressed by that consumer's own qid on its own read port.
+    -- =============================================================================================
+
+    -- ---- SQTDBL/SQHDBL/CQHDBL doorbell VALUE observation mirrors -----------------------------
+    -- Plain flop arrays (sqtdbl_reg_arr/sqhdbl_reg_arr/cqhdbl_reg_arr, written in inp_reg_p/
+    -- sqtdbl_reg_p above) -- see their own declaration comment for why NOT NP_LUTRAM. Read back
+    -- for MI directly here, combinationally addressed by pq_qid (same timing as every other
+    -- field's MI-port NP_LUTRAM read below).
+    pq_mi_dob(PQ_SQTDBL) <= (MI_WIDTH -1 downto 16 => '0') & sqtdbl_reg_arr(to_integer(unsigned(pq_qid)));
+    pq_mi_dob(PQ_SQHDBL) <= (MI_WIDTH -1 downto 16 => '0') & sqhdbl_reg_arr(to_integer(unsigned(pq_qid)));
+    pq_mi_dob(PQ_CQHDBL) <= (MI_WIDTH -1 downto 16 => '0') & cqhdbl_reg_arr(to_integer(unsigned(pq_qid)));
+
+    -- ---- DBL_MASK ------------------------------------------------------------------------------
+    -- WRITE_PORTS=1 (MI). READ_PORTS=4: 0=MI, 1=NVME_CMD_DISPATCHER (via SQTDBL_QID, the dispatch
+    -- qid), 2=CQE_PROCESSOR (via DBL_MASK_RD_QID, resp_qidx), 3=sq_write_blocking (fixed qid=0).
+    pq_dbl_mask_i : entity work.NP_LUTRAM
+        generic map (
+            DATA_WIDTH => MI_WIDTH,
+            ITEMS => LUTRAM_ITEMS,
+            WRITE_PORTS => 1,
+            READ_PORTS => 4,
+            DEVICE => DEVICE
+        )
+        port map (
+            WCLK => CLK,
+            DI(0)    => mi_split_dwr(0),
+            WE(0)    => pq_we(PQ_DBL_MASK),
+            ADDRA(0) => pq_qid,
+            ADDRB(0) => pq_qid,
+            ADDRB(1) => SQTDBL_QID,
+            ADDRB(2) => DBL_MASK_RD_QID,
+            ADDRB(3) => sq_write_blocking_qid0,
+            DOB(0)   => pq_mi_dob(PQ_DBL_MASK),
+            DOB(1)(15 downto 0) => DBL_MASK_C2N,
+            DOB(2)(15 downto 0) => DBL_MASK_N2C,
+            DOB(3)   => dbl_mask_q0_dob
+        );
+
+    -- ---- SQTDBL_BADDR_L/H, CQHDBL_BADDR_L/H -----------------------------------------------------
+    -- WRITE_PORTS=1 (MI). READ_PORTS = 1 (MI) + MFB_REGIONS (DBL_UPDATER's dispatch, one lookup
+    -- per region -- see DBL_UPDATER's own port comment for why not just 1).
+    sqtdbl_baddr_l_g : block is
+        signal addrb : slv_array_t(MFB_REGIONS downto 0)(QID_W -1 downto 0);
+        signal dob   : slv_array_t(MFB_REGIONS downto 0)(MI_WIDTH -1 downto 0);
+    begin
+        addrb(0) <= pq_qid;
+        addrb_g : for rgn in 0 to MFB_REGIONS -1 generate
+            addrb(1+rgn) <= SQTDBL_BADDR_RD_QID(rgn);
+        end generate;
+        dob_g : for rgn in 0 to MFB_REGIONS -1 generate
+            SQTDBL_BADDR_RD_DATA(rgn)(31 downto 0) <= dob(1+rgn);
+        end generate;
+
+        pq_sqtdbl_baddr_l_i : entity work.NP_LUTRAM
+            generic map (
+                DATA_WIDTH => MI_WIDTH,
+                ITEMS => LUTRAM_ITEMS,
+                WRITE_PORTS => 1,
+                READ_PORTS => 1 + MFB_REGIONS,
+                DEVICE => DEVICE
+            )
+            port map (
+                WCLK => CLK,
+                DI(0)    => mi_split_dwr(0),
+                WE(0)    => pq_we(PQ_SQTDBL_BADDR_L),
+                ADDRA(0) => pq_qid,
+                ADDRB    => addrb,
+                DOB      => dob
+            );
+        pq_mi_dob(PQ_SQTDBL_BADDR_L) <= dob(0);
+    end block sqtdbl_baddr_l_g;
+
+    sqtdbl_baddr_h_g : block is
+        signal addrb : slv_array_t(MFB_REGIONS downto 0)(QID_W -1 downto 0);
+        signal dob   : slv_array_t(MFB_REGIONS downto 0)(MI_WIDTH -1 downto 0);
+    begin
+        addrb(0) <= pq_qid;
+        addrb_g : for rgn in 0 to MFB_REGIONS -1 generate
+            addrb(1+rgn) <= SQTDBL_BADDR_RD_QID(rgn);
+        end generate;
+        dob_g : for rgn in 0 to MFB_REGIONS -1 generate
+            SQTDBL_BADDR_RD_DATA(rgn)(63 downto 32) <= dob(1+rgn);
+        end generate;
+
+        pq_sqtdbl_baddr_h_i : entity work.NP_LUTRAM
+            generic map (
+                DATA_WIDTH => MI_WIDTH,
+                ITEMS => LUTRAM_ITEMS,
+                WRITE_PORTS => 1,
+                READ_PORTS => 1 + MFB_REGIONS,
+                DEVICE => DEVICE
+            )
+            port map (
+                WCLK => CLK,
+                DI(0)    => mi_split_dwr(0),
+                WE(0)    => pq_we(PQ_SQTDBL_BADDR_H),
+                ADDRA(0) => pq_qid,
+                ADDRB    => addrb,
+                DOB      => dob
+            );
+        pq_mi_dob(PQ_SQTDBL_BADDR_H) <= dob(0);
+    end block sqtdbl_baddr_h_g;
+
+    cqhdbl_baddr_l_g : block is
+        signal addrb : slv_array_t(MFB_REGIONS downto 0)(QID_W -1 downto 0);
+        signal dob   : slv_array_t(MFB_REGIONS downto 0)(MI_WIDTH -1 downto 0);
+    begin
+        addrb(0) <= pq_qid;
+        addrb_g : for rgn in 0 to MFB_REGIONS -1 generate
+            addrb(1+rgn) <= CQHDBL_BADDR_RD_QID(rgn);
+        end generate;
+        dob_g : for rgn in 0 to MFB_REGIONS -1 generate
+            CQHDBL_BADDR_RD_DATA(rgn)(31 downto 0) <= dob(1+rgn);
+        end generate;
+
+        pq_cqhdbl_baddr_l_i : entity work.NP_LUTRAM
+            generic map (
+                DATA_WIDTH => MI_WIDTH,
+                ITEMS => LUTRAM_ITEMS,
+                WRITE_PORTS => 1,
+                READ_PORTS => 1 + MFB_REGIONS,
+                DEVICE => DEVICE
+            )
+            port map (
+                WCLK => CLK,
+                DI(0)    => mi_split_dwr(0),
+                WE(0)    => pq_we(PQ_CQHDBL_BADDR_L),
+                ADDRA(0) => pq_qid,
+                ADDRB    => addrb,
+                DOB      => dob
+            );
+        pq_mi_dob(PQ_CQHDBL_BADDR_L) <= dob(0);
+    end block cqhdbl_baddr_l_g;
+
+    cqhdbl_baddr_h_g : block is
+        signal addrb : slv_array_t(MFB_REGIONS downto 0)(QID_W -1 downto 0);
+        signal dob   : slv_array_t(MFB_REGIONS downto 0)(MI_WIDTH -1 downto 0);
+    begin
+        addrb(0) <= pq_qid;
+        addrb_g : for rgn in 0 to MFB_REGIONS -1 generate
+            addrb(1+rgn) <= CQHDBL_BADDR_RD_QID(rgn);
+        end generate;
+        dob_g : for rgn in 0 to MFB_REGIONS -1 generate
+            CQHDBL_BADDR_RD_DATA(rgn)(63 downto 32) <= dob(1+rgn);
+        end generate;
+
+        pq_cqhdbl_baddr_h_i : entity work.NP_LUTRAM
+            generic map (
+                DATA_WIDTH => MI_WIDTH,
+                ITEMS => LUTRAM_ITEMS,
+                WRITE_PORTS => 1,
+                READ_PORTS => 1 + MFB_REGIONS,
+                DEVICE => DEVICE
+            )
+            port map (
+                WCLK => CLK,
+                DI(0)    => mi_split_dwr(0),
+                WE(0)    => pq_we(PQ_CQHDBL_BADDR_H),
+                ADDRA(0) => pq_qid,
+                ADDRB    => addrb,
+                DOB      => dob
+            );
+        pq_mi_dob(PQ_CQHDBL_BADDR_H) <= dob(0);
+    end block cqhdbl_baddr_h_g;
+
+    -- ---- LBA_SPACE_SIZE_L/H ----------------------------------------------------------------------
+    -- WRITE_PORTS=1 (MI). READ_PORTS=3: 0=MI, 1=OP_CTRL (via LBA_CHECK_QID, the admitted command's
+    -- own qid), 2=NVME_CMD_DISPATCHER (via SQTDBL_QID, the dispatch qid -- NVME_CMD_DISPATCHER
+    -- ALSO caps a command's LBA_NUM against LBA_SPACE_SIZE at dispatch time, independently of
+    -- OP_CTRL's own admission-time OOR check).
+    pq_lba_space_size_l_i : entity work.NP_LUTRAM
+        generic map (
+            DATA_WIDTH => MI_WIDTH,
+            ITEMS => LUTRAM_ITEMS,
+            WRITE_PORTS => 1,
+            READ_PORTS => 3,
+            DEVICE => DEVICE
+        )
+        port map (
+            WCLK => CLK,
+            DI(0)    => mi_split_dwr(0),
+            WE(0)    => pq_we(PQ_LBA_SPACE_SIZE_L),
+            ADDRA(0) => pq_qid,
+            ADDRB(0) => pq_qid,
+            ADDRB(1) => LBA_CHECK_QID,
+            ADDRB(2) => SQTDBL_QID,
+            DOB(0)   => pq_mi_dob(PQ_LBA_SPACE_SIZE_L),
+            DOB(1)   => LBA_SPACE_SIZE_OPC(31 downto 0),
+            DOB(2)   => LBA_SPACE_SIZE_C2N(31 downto 0)
+        );
+
+    pq_lba_space_size_h_i : entity work.NP_LUTRAM
+        generic map (
+            DATA_WIDTH => MI_WIDTH,
+            ITEMS => LUTRAM_ITEMS,
+            WRITE_PORTS => 1,
+            READ_PORTS => 3,
+            DEVICE => DEVICE
+        )
+        port map (
+            WCLK => CLK,
+            DI(0)    => mi_split_dwr(0),
+            WE(0)    => pq_we(PQ_LBA_SPACE_SIZE_H),
+            ADDRA(0) => pq_qid,
+            ADDRB(0) => pq_qid,
+            ADDRB(1) => LBA_CHECK_QID,
+            ADDRB(2) => SQTDBL_QID,
+            DOB(0)   => pq_mi_dob(PQ_LBA_SPACE_SIZE_H),
+            DOB(1)   => LBA_SPACE_SIZE_OPC(63 downto 32),
+            DOB(2)   => LBA_SPACE_SIZE_C2N(63 downto 32)
+        );
+
+    -- ---- NAMESPACE_ID ---------------------------------------------------------------------------
+    -- WRITE_PORTS=1 (MI). READ_PORTS=2: 0=MI, 1=NVME_CMD_DISPATCHER (via SQTDBL_QID). Previously
+    -- hardcoded to x"00000001" -- now a real writable register; software must program it.
+    pq_namespace_id_i : entity work.NP_LUTRAM
+        generic map (
+            DATA_WIDTH => MI_WIDTH,
+            ITEMS => LUTRAM_ITEMS,
+            WRITE_PORTS => 1,
+            READ_PORTS => 2,
+            DEVICE => DEVICE
+        )
+        port map (
+            WCLK => CLK,
+            DI(0)    => mi_split_dwr(0),
+            WE(0)    => pq_we(PQ_NAMESPACE_ID),
+            ADDRA(0) => pq_qid,
+            ADDRB(0) => pq_qid,
+            ADDRB(1) => SQTDBL_QID,
+            DOB(0)   => pq_mi_dob(PQ_NAMESPACE_ID),
+            DOB(1)   => NAMESPACE_ID_C2N
+        );
+
+    -- ---- LBA_NUM_MASK -----------------------------------------------------------------------------
+    -- WRITE_PORTS=1 (MI). READ_PORTS=3: 0=MI, 1=OP_CTRL (via LBA_CHECK_QID), 2=NVME_CMD_DISPATCHER
+    -- (via SQTDBL_QID) -- same reasoning as LBA_SPACE_SIZE above.
+    pq_lba_num_mask_i : entity work.NP_LUTRAM
+        generic map (
+            DATA_WIDTH => MI_WIDTH,
+            ITEMS => LUTRAM_ITEMS,
+            WRITE_PORTS => 1,
+            READ_PORTS => 3,
+            DEVICE => DEVICE
+        )
+        port map (
+            WCLK => CLK,
+            DI(0)    => mi_split_dwr(0),
+            WE(0)    => pq_we(PQ_LBA_NUM_MASK),
+            ADDRA(0) => pq_qid,
+            ADDRB(0) => pq_qid,
+            ADDRB(1) => LBA_CHECK_QID,
+            ADDRB(2) => SQTDBL_QID,
+            DOB(0)   => pq_mi_dob(PQ_LBA_NUM_MASK),
+            DOB(1)(15 downto 0) => LBA_NUM_MASK_OPC,
+            DOB(2)(15 downto 0) => LBA_NUM_MASK_C2N
+        );
+
+    -- =============================================================================================
+    -- Per-queue base-address "enabled" sticky flags -- see DBL_ENABLED's port comment. Single
+    -- process, dynamically indexed by pq_qid -- a single, unambiguous driver of the whole
+    -- dbl_enabled_reg array (see the note near dbl_reg_wr_g in dbl_updater.vhd for the general
+    -- rule this follows).
+    -- =============================================================================================
+    dbl_enabled_p : process (CLK) is
+    begin
+        if (rising_edge(CLK)) then
+            if (RST = '1') then
+                dbl_enabled_reg <= (others => '0');
+            elsif (pq_valid = '1' and mi_split_wr(0) = '1' and mi_split_dwr(0) /= x"00000000") then
+                if (pq_word_idx = PQ_CQHDBL_BADDR_L or pq_word_idx = PQ_CQHDBL_BADDR_H) then
+                    dbl_enabled_reg(to_integer(unsigned(pq_qid))) <= '1';
+                elsif (pq_word_idx = PQ_SQTDBL_BADDR_L or pq_word_idx = PQ_SQTDBL_BADDR_H) then
+                    dbl_enabled_reg(NUM_QUEUES + to_integer(unsigned(pq_qid))) <= '1';
+                end if;
+            end if;
+        end if;
+    end process;
+
+    DBL_ENABLED <= dbl_enabled_reg;
 
     -- =============================================================================================
     -- Connecting counter increment inputs to system inputs
@@ -1191,25 +1481,6 @@ begin
     WRBUFF_PRP_LIST_PTR  <= regs_arr(R_WRBUFF_PRP_LIST_PTR_H) & regs_arr(R_WRBUFF_PRP_LIST_PTR_L);
     METADATA_PTR         <= regs_arr(R_META_PTR_H) & regs_arr(R_META_PTR_L);
 
-    -- Per-queue outputs, driven from queue q's slot of the PER_Q_BASE 2D block (q is a
-    -- generate-time constant, so each target is a static name -- a single, unambiguous driver per
-    -- element).
-    pq_output_g : for q in 0 to NUM_QUEUES -1 generate
-        dbl_mask_arr(q)         <= regs_arr(pq_reg_idx(q, PQ_DBL_MASK))(PQ_REG_WIDTH(PQ_DBL_MASK) -1 downto 0);
-        namespace_id_arr(q)     <= regs_arr(pq_reg_idx(q, PQ_NAMESPACE_ID))(PQ_REG_WIDTH(PQ_NAMESPACE_ID) -1 downto 0);
-        lba_num_mask_arr(q)     <= regs_arr(pq_reg_idx(q, PQ_LBA_NUM_MASK))(PQ_REG_WIDTH(PQ_LBA_NUM_MASK) -1 downto 0);
-        lba_space_size_arr(q)   <= regs_arr(pq_reg_idx(q, PQ_LBA_SPACE_SIZE_H)) & regs_arr(pq_reg_idx(q, PQ_LBA_SPACE_SIZE_L));
-        sqtdbl_base_addr_arr(q) <= regs_arr(pq_reg_idx(q, PQ_SQTDBL_BADDR_H)) & regs_arr(pq_reg_idx(q, PQ_SQTDBL_BADDR_L));
-        cqhdbl_base_addr_arr(q) <= regs_arr(pq_reg_idx(q, PQ_CQHDBL_BADDR_H)) & regs_arr(pq_reg_idx(q, PQ_CQHDBL_BADDR_L));
-    end generate;
-
-    DBL_MASK         <= dbl_mask_arr;
-    NAMESPACE_ID     <= namespace_id_arr;
-    LBA_NUM_MASK     <= lba_num_mask_arr;
-    LBA_SPACE_SIZE   <= lba_space_size_arr;
-    SQTDBL_BASE_ADDR <= sqtdbl_base_addr_arr;
-    CQHDBL_BASE_ADDR <= cqhdbl_base_addr_arr;
-
     -- =============================================================================================
     -- Selecting registers to READ
     -- =============================================================================================
@@ -1221,12 +1492,21 @@ begin
 
             reg_sel_addr := mi_split_addr(0)(ADDR_LENGTH - 1 downto 0);
 
-            -- Covers every register, both COMMON and every queue's PER_Q_BASE slot.
+            -- COMMON block.
             for reg_idx in 0 to (REGS-1) loop
                 if (reg_sel_addr = std_logic_vector(to_unsigned(R_ADDRS(reg_idx), ADDR_LENGTH))) then
                     mi_split_drd(0)(REG_WIDTH(reg_idx)-1 downto 0) <= regs_arr(reg_idx)(REG_WIDTH(reg_idx)-1 downto 0);
                 end if;
             end loop;
+
+            -- PER-QUEUE block: pq_valid/pq_word_idx are combinational decodes of mi_split_addr(0)
+            -- (settled the same cycle as reg_sel_addr above), and pq_mi_dob(pq_word_idx) is that
+            -- field's own MI-port NP_LUTRAM read (also combinational, addressed by pq_qid) -- so
+            -- this registers the per-queue value with the SAME 1-cycle MI-read latency as every
+            -- COMMON register above (no cocotb model timing change is needed for MI reads).
+            if (pq_valid = '1' and pq_word_idx <= PQ_LBA_NUM_MASK) then
+                mi_split_drd(0)(PQ_REG_WIDTH(pq_word_idx) -1 downto 0) <= pq_mi_dob(pq_word_idx)(PQ_REG_WIDTH(pq_word_idx) -1 downto 0);
+            end if;
         end if;
     end process;
 
@@ -1320,14 +1600,11 @@ begin
     -- =============================================================================================
     -- Performance counters
     -- =============================================================================================
-    -- Per-queue "SQ write blocking" (queue q's SQTDBL would collide with its own SQHDBL);
-    -- OR-reduced into the single COMMON sq_write_blocking perf-counter input below -- not yet made
-    -- per-queue. At NUM_QUEUES=1 this is exactly the original single-bit check.
-    sq_write_blocking_g : for q in 0 to NUM_QUEUES -1 generate
-        sqtdbl_next_val_arr(q)   <= std_logic_vector((unsigned(sqtdbl_reg_arr(q)) + 1) and unsigned(dbl_mask_arr(q)));
-        sq_write_blocking_arr(q) <= '1' when (sqtdbl_next_val_arr(q) = sqhdbl_reg_arr(q)) else '0';
-    end generate;
-    sq_write_blocking <= or sq_write_blocking_arr;
+    -- "SQ write blocking" (queue 0's SQTDBL would collide with its own SQHDBL) -- queue-0-only, see
+    -- sqtdbl_next_val_q0's own comment above for why. At NUM_QUEUES=1 queue 0 IS the only queue, so
+    -- this is exactly the original single-queue check.
+    sqtdbl_next_val_q0 <= std_logic_vector((unsigned(sqtdbl_reg_arr(0)) + 1) and unsigned(dbl_mask_q0_dob(15 downto 0)));
+    sq_write_blocking  <= '1' when (sqtdbl_next_val_q0 = sqhdbl_reg_arr(0)) else '0';
 
     -- The amount of clocks when the trigger is active
     cmd_disp_trigg_active_incr <= OPC_TRIGG_DISP;

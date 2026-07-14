@@ -60,10 +60,11 @@ entity N2C_CONTROLLER is
         CQP_START_REQ_ACK : out std_logic;
         CQP_STOP_REQ_VLD  : in  std_logic;
         CQP_STOP_REQ_ACK  : out std_logic;
-        -- Per-queue doorbell wrap mask (one element per queue -- see NVME_SW_MANAGER's
-        -- PER_Q_BASE register block); passed through unchanged to CQE_PROCESSOR, which indexes it
-        -- by the queue whose CQ read response is arriving (resp_qidx).
-        DBL_MASK          : in slv_array_t(NUM_QUEUES -1 downto 0)(15 downto 0);
+        -- Doorbell wrap mask of the queue CQE_PROCESSOR is currently resolving (DBL_MASK_RD_QID
+        -- below) -- see CQE_PROCESSOR's own port comment. Plain scalar pass-through; the
+        -- per-queue selection happens in NVME_SW_MANAGER's NP_LUTRAM, not here.
+        DBL_MASK          : in  std_logic_vector(15 downto 0);
+        DBL_MASK_RD_QID   : out std_logic_vector(maximum(1, log2(NUM_QUEUES)) -1 downto 0);
 
         -- The requested data that should be read from the write buffer. One bit wider than
         -- BUFF_PTR_WIDTH: the buffer is flat-addressed (MEM_PARTITIONING => FALSE), so this
@@ -309,6 +310,7 @@ begin
             DATA_BUFF_RD_DATA_VLD => cqp_buff_data_vld_b,
 
             DBL_MASK        => DBL_MASK,
+            DBL_MASK_RD_QID => DBL_MASK_RD_QID,
             CQHDBL_UPD_DATA => cqp_cqhdbl_int,
             SQHDBL_UPD_DATA => cqp_sqhdbl_int,
             LAST_CQ_ENTRY   => cqp_last_cqe_int,

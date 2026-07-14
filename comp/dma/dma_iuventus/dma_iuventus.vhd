@@ -236,11 +236,18 @@ architecture FULL of DMA_IUVENTUS is
     signal disp_cmd_id_vld : std_logic;
 
     -- Queue Identifier of the command currently being dispatched (op_ctrl -> c2n_controller ->
-    -- nvme_cmd_dispatcher). Always "0" at NUM_QUEUES=1.
+    -- nvme_cmd_dispatcher). Always "0" at NUM_QUEUES=1. Also reused (unchanged) as the read
+    -- address for NVME_SW_MANAGER's per-queue LBA_SPACE_SIZE/LBA_NUM_MASK OOR-check read port
+    -- (op_ctrl's own C2N_QID/qid_reg -- see LBA_CHECK_QID below).
     signal opc_c2n_qid     : std_logic_vector(QID_W -1 downto 0);
     -- Queue Identifier that c2n_sqtdbl_data/c2n_sqes_disp_incr apply to (mirrors opc_c2n_qid at
-    -- the dispatch commit cycle). Always "0" at NUM_QUEUES=1.
+    -- the dispatch commit cycle). Always "0" at NUM_QUEUES=1. Also reused (unchanged) as the read
+    -- address for NVME_SW_MANAGER's per-queue DBL_MASK/NAMESPACE_ID/LBA_SPACE_SIZE/LBA_NUM_MASK
+    -- "C2N" (dispatcher) read ports.
     signal c2n_sqtdbl_qid  : std_logic_vector(QID_W -1 downto 0);
+    -- Queue whose DBL_MASK CQE_PROCESSOR needs THIS cycle to interpret its CQ read response
+    -- (mirrors resp_qidx, undelayed -- unlike cqp_cqe_qid, which N2C_CONTROLLER registers).
+    signal n2c_dbl_mask_rd_qid : std_logic_vector(QID_W -1 downto 0);
 
     -- ============================================================================================
     -- Software management interface
@@ -250,17 +257,28 @@ architecture FULL of DMA_IUVENTUS is
     signal swm_wrbuff_baddr         : std_logic_vector(63 downto 0);
     signal swm_wrbuff_prp_list_ptr  : std_logic_vector(63 downto 0);
 
-    -- Per-queue configuration (one element per queue -- see NVME_SW_MANAGER's PER_Q_BASE register
-    -- block).
-    signal swm_dbl_mask       : slv_array_t(NUM_QUEUES -1 downto 0)(15 downto 0);
-    signal swm_namespace_id   : slv_array_t(NUM_QUEUES -1 downto 0)(31 downto 0);
-    signal swm_lba_num_mask   : slv_array_t(NUM_QUEUES -1 downto 0)(15 downto 0);
-    signal swm_lba_space_size : slv_array_t(NUM_QUEUES -1 downto 0)(63 downto 0);
+    -- Per-queue configuration, resolved by NVME_SW_MANAGER's per-queue NP_LUTRAM to a plain
+    -- scalar per physical reader (op_ctrl's own admission-time OOR check ["OPC"], and
+    -- NVME_CMD_DISPATCHER's dispatch-time use ["C2N"]) -- see NVME_SW_MANAGER's own port comments.
+    signal swm_lba_space_size_opc : std_logic_vector(63 downto 0);
+    signal swm_lba_num_mask_opc   : std_logic_vector(15 downto 0);
+    signal swm_dbl_mask_c2n       : std_logic_vector(15 downto 0);
+    signal swm_namespace_id_c2n   : std_logic_vector(31 downto 0);
+    signal swm_lba_space_size_c2n : std_logic_vector(63 downto 0);
+    signal swm_lba_num_mask_c2n   : std_logic_vector(15 downto 0);
+    signal swm_dbl_mask_n2c       : std_logic_vector(15 downto 0);
     -- COMMON: a single shared metadata pointer for every queue.
     signal swm_metadata_ptr   : std_logic_vector(63 downto 0);
 
-    signal swm_cqhdbl_base_addr : slv_array_t(NUM_QUEUES -1 downto 0)(63 downto 0);
-    signal swm_sqtdbl_base_addr : slv_array_t(NUM_QUEUES -1 downto 0)(63 downto 0);
+    -- One bit per doorbell (0..NUM_QUEUES-1 = CQHDBL[q], NUM_QUEUES..2*NUM_QUEUES-1 = SQTDBL[q]) --
+    -- see NVME_SW_MANAGER's/DBL_UPDATER's own DBL_ENABLED port comment.
+    signal swm_dbl_enabled : std_logic_vector(2*NUM_QUEUES -1 downto 0);
+    -- Dispatch-side base-address lookup, one queue at a time per MFB region -- see DBL_UPDATER's
+    -- own port comment.
+    signal dup_cqhdbl_baddr_rd_qid  : slv_array_t(PCIE_MFB_REGIONS -1 downto 0)(QID_W -1 downto 0);
+    signal dup_cqhdbl_baddr_rd_data : slv_array_t(PCIE_MFB_REGIONS -1 downto 0)(63 downto 0);
+    signal dup_sqtdbl_baddr_rd_qid  : slv_array_t(PCIE_MFB_REGIONS -1 downto 0)(QID_W -1 downto 0);
+    signal dup_sqtdbl_baddr_rd_data : slv_array_t(PCIE_MFB_REGIONS -1 downto 0)(63 downto 0);
 
     -- =============================================================================================
     -- Write-request QID (parsed out of the widened WR_MFB_META -- see the entity port comment)
@@ -572,6 +590,7 @@ begin
         -- Matches the WRBUFF drain packet size cap (2**POINTER_WIDTH, the buffer's per-channel
         -- span), so N2C_BUFF_USR_RDS_BYTES is wide enough for n2c_buff_usr_rds_bytes.
         PKT_SIZE_MAX => 2**POINTER_WIDTH,
+        MFB_REGIONS  => PCIE_MFB_REGIONS,
         NUM_QUEUES   => NUM_QUEUES)
     port map (
         CLK      => CLK,
@@ -610,16 +629,20 @@ begin
         WRBUFF_BADDR         => swm_wrbuff_baddr,
         WRBUFF_PRP_LIST_PTR  => swm_wrbuff_prp_list_ptr,
 
+        LBA_CHECK_QID      => opc_c2n_qid,
+        LBA_SPACE_SIZE_OPC => swm_lba_space_size_opc,
+        LBA_NUM_MASK_OPC   => swm_lba_num_mask_opc,
+
         SQTDBL_DATA     => c2n_sqtdbl_data,
         SQTDBL_QID      => c2n_sqtdbl_qid,
         TAG_FIFO_STATUS => c2n_tag_fifo_status,
         TAG_INIT_DONE   => c2n_tag_init_done,
 
-        DBL_MASK       => swm_dbl_mask,
-        NAMESPACE_ID   => swm_namespace_id,
-        METADATA_PTR   => swm_metadata_ptr,
-        LBA_NUM_MASK   => swm_lba_num_mask,
-        LBA_SPACE_SIZE => swm_lba_space_size,
+        DBL_MASK_C2N       => swm_dbl_mask_c2n,
+        NAMESPACE_ID_C2N   => swm_namespace_id_c2n,
+        LBA_SPACE_SIZE_C2N => swm_lba_space_size_c2n,
+        LBA_NUM_MASK_C2N   => swm_lba_num_mask_c2n,
+        METADATA_PTR       => swm_metadata_ptr,
 
         SQES_DISP_TYPE  => c2n_sqes_disp_type,
         SQES_DISP_INCR  => c2n_sqes_disp_incr,
@@ -631,8 +654,15 @@ begin
         LAST_CQ_ENTRY  => cqp_last_cqe,
         STATUS_UPD_VLD => cqp_status_upd,
 
-        CQHDBL_BASE_ADDR => swm_cqhdbl_base_addr,
-        SQTDBL_BASE_ADDR => swm_sqtdbl_base_addr,
+        DBL_MASK_RD_QID => n2c_dbl_mask_rd_qid,
+        DBL_MASK_N2C    => swm_dbl_mask_n2c,
+
+        DBL_ENABLED => swm_dbl_enabled,
+
+        CQHDBL_BADDR_RD_QID  => dup_cqhdbl_baddr_rd_qid,
+        CQHDBL_BADDR_RD_DATA => dup_cqhdbl_baddr_rd_data,
+        SQTDBL_BADDR_RD_QID  => dup_sqtdbl_baddr_rd_qid,
+        SQTDBL_BADDR_RD_DATA => dup_sqtdbl_baddr_rd_data,
 
         CQHDBL_REG_UPD_DISP  => dup_cqhdbl_reg_upd_disp,
         SQTDBL_REG_UPD_DISP  => dup_sqtdbl_reg_upd_disp,
@@ -666,8 +696,8 @@ begin
         STOP_REQ_VLD  => opc_stop_req_vld,
         STOP_REQ_ACK  => opc_stop_req_ack,
 
-        LBA_NUM_MASK        => swm_lba_num_mask,
-        LBA_SPACE_SIZE      => swm_lba_space_size,
+        LBA_NUM_MASK        => swm_lba_num_mask_opc,
+        LBA_SPACE_SIZE      => swm_lba_space_size_opc,
         RDBUFF_BADDR        => swm_rdbuff_baddr,
         RDBUFF_PRP_LIST_PTR => swm_rdbuff_prp_list_ptr,
         WRBUFF_BADDR        => swm_wrbuff_baddr,
@@ -811,7 +841,8 @@ begin
             CQP_START_REQ_ACK => cqp_start_req_ack,
             CQP_STOP_REQ_VLD  => cqp_stop_req_vld,
             CQP_STOP_REQ_ACK  => cqp_stop_req_ack,
-            DBL_MASK          => swm_dbl_mask,
+            DBL_MASK          => swm_dbl_mask_n2c,
+            DBL_MASK_RD_QID   => n2c_dbl_mask_rd_qid,
 
             BUFF_RD_REQ_ADDR       => opc_wrbuff_rd_req_addr,
             BUFF_RD_REQ_SIZE       => opc_wrbuff_rd_req_size,
@@ -999,16 +1030,16 @@ begin
 
             TRIGG_DISP      => opc_trigg_disp,
             RDY_FOR_DISP    => opc_rdy_for_disp,
-            DBL_MASK        => swm_dbl_mask,
+            DBL_MASK        => swm_dbl_mask_c2n,
             CMD_OPCODE      => opc_cmd_opcode,
-            NAMESPACE_ID    => swm_namespace_id,
+            NAMESPACE_ID    => swm_namespace_id_c2n,
             METADATA_PTR    => swm_metadata_ptr,
             PRP_ENTRY_1     => opc_prp_entry_1,
             PRP_ENTRY_2     => opc_prp_entry_2,
             START_LBA_PTR   => opc_start_lba_ptr,
-            LBA_SPACE_SIZE  => swm_lba_space_size,
+            LBA_SPACE_SIZE  => swm_lba_space_size_c2n,
             LBA_NUM         => opc_lba_num,
-            LBA_NUM_MASK    => swm_lba_num_mask,
+            LBA_NUM_MASK    => swm_lba_num_mask_c2n,
             QID             => opc_c2n_qid,
 
             CPL_STAT_TAG        => cqp_last_cqe(CQ_ENTRY_CMD_ID),
@@ -1054,15 +1085,20 @@ begin
             CLK => CLK,
             RST => RST or user_rst or cmd_disp_rst,
 
-            CQHDBL_BASE_ADDR => swm_cqhdbl_base_addr,
+            DBL_ENABLED      => swm_dbl_enabled,
+
             CQHDBL_DATA      => cqp_cqhdbl,
             CQHDBL_VLD       => cqp_status_upd,
             CQHDBL_QID       => cqp_cqe_qid,
 
-            SQTDBL_BASE_ADDR => swm_sqtdbl_base_addr,
             SQTDBL_DATA      => c2n_sqtdbl_data,
             SQTDBL_VLD       => c2n_sqes_disp_incr,
             SQTDBL_QID       => c2n_sqtdbl_qid,
+
+            CQHDBL_BADDR_RD_QID  => dup_cqhdbl_baddr_rd_qid,
+            CQHDBL_BADDR_RD_DATA => dup_cqhdbl_baddr_rd_data,
+            SQTDBL_BADDR_RD_QID  => dup_sqtdbl_baddr_rd_qid,
+            SQTDBL_BADDR_RD_DATA => dup_sqtdbl_baddr_rd_data,
 
             CQHDBL_REG_UPD_DISP => dup_cqhdbl_reg_upd_disp,
             SQTDBL_REG_UPD_DISP => dup_sqtdbl_reg_upd_disp,

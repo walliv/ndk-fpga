@@ -44,22 +44,37 @@ entity DBL_UPDATER is
         -- =========================================================================================
         -- Control interface
         -- =========================================================================================
-        -- Per-queue PCIe destination address of the CQ-head/SQ-tail doorbell (all NUM_QUEUES
-        -- addresses live simultaneously -- each queue's update-state machine below needs its own
-        -- at all times, unlike *_DATA/_VLD/_QID which only ever describe one queue's event at a
-        -- time). At NUM_QUEUES=1 these are 1-element arrays, identical to the original scalar
-        -- ports.
-        CQHDBL_BASE_ADDR : in slv_array_t(NUM_QUEUES -1 downto 0)(63 downto 0);
+        -- One bit per doorbell (indices 0..NUM_QUEUES-1 = CQHDBL[q], NUM_QUEUES..2*NUM_QUEUES-1 =
+        -- SQTDBL[q], matching dbl_reg's own indexing below), set (sticky, in NVME_SW_MANAGER) once
+        -- a non-zero PCIe base address has been programmed for that doorbell via MI. Replaces a
+        -- direct, all-queues-at-once read of the 64-bit base addresses themselves (which the
+        -- per-queue base-address storage -- now NP_LUTRAM in NVME_SW_MANAGER -- no longer exposes
+        -- all at once; see CQHDBL_BADDR_RD_QID/SQTDBL_BADDR_RD_QID below for how the actual address
+        -- is fetched, one doorbell at a time, only once a dispatch is already underway).
+        DBL_ENABLED : in std_logic_vector(2*NUM_QUEUES -1 downto 0);
+
         CQHDBL_DATA      : in std_logic_vector(15 downto 0);
         CQHDBL_VLD       : in std_logic;
         -- Queue Identifier the CQHDBL_DATA/VLD pulse belongs to. Always "0" at NUM_QUEUES=1.
         CQHDBL_QID       : in std_logic_vector(maximum(1, log2(NUM_QUEUES)) -1 downto 0);
 
-        SQTDBL_BASE_ADDR : in slv_array_t(NUM_QUEUES -1 downto 0)(63 downto 0);
         SQTDBL_DATA      : in std_logic_vector(15 downto 0);
         SQTDBL_VLD       : in std_logic;
         -- Queue Identifier the SQTDBL_DATA/VLD pulse belongs to. Always "0" at NUM_QUEUES=1.
         SQTDBL_QID       : in std_logic_vector(maximum(1, log2(NUM_QUEUES)) -1 downto 0);
+
+        -- =========================================================================================
+        -- Dispatch-side base-address lookup (one queue at a time, per MFB region): NVME_SW_MANAGER
+        -- stores CQHDBL/SQTDBL_BASE_ADDR in per-queue NP_LUTRAM (ITEMS => NUM_QUEUES), which -- like
+        -- every other physical reader of a per-queue register -- gets exactly one read port here
+        -- (not one per queue). Region rgn presents the queue whose update it is currently dequeuing
+        -- from the internal FIFO (see fifo_do_arr's carried doorbell index) and receives that
+        -- queue's 64-bit base address back the same cycle (NP_LUTRAM's read is combinational).
+        -- =========================================================================================
+        CQHDBL_BADDR_RD_QID  : out slv_array_t(MFB_REGIONS -1 downto 0)(maximum(1, log2(NUM_QUEUES)) -1 downto 0);
+        CQHDBL_BADDR_RD_DATA : in  slv_array_t(MFB_REGIONS -1 downto 0)(63 downto 0);
+        SQTDBL_BADDR_RD_QID  : out slv_array_t(MFB_REGIONS -1 downto 0)(maximum(1, log2(NUM_QUEUES)) -1 downto 0);
+        SQTDBL_BADDR_RD_DATA : in  slv_array_t(MFB_REGIONS -1 downto 0)(63 downto 0);
 
         -- =========================================================================================
         -- Status interface
@@ -83,14 +98,17 @@ end entity;
 
 architecture FULL of DBL_UPDATER is
 
-    -- One SQ-tail and one CQ-head doorbell per queue: dbl_reg/dbl_base_addr indices 0..NUM_QUEUES-1
+    -- One SQ-tail and one CQ-head doorbell per queue: dbl_reg/DBL_ENABLED indices 0..NUM_QUEUES-1
     -- are the N queues' CQHDBL, indices NUM_QUEUES..2*NUM_QUEUES-1 are the N queues' SQTDBL. At
     -- NUM_QUEUES=1 this is exactly the original 2-entry (CQHDBL=0, SQTDBL=1) layout.
     constant DBL_NUM : positive := 2*NUM_QUEUES;
     constant MFB_LENGTH : positive := MFB_REGIONS * MFB_REGION_SIZE * MFB_BLOCK_SIZE * MFB_ITEM_WIDTH;
+    -- Width of a doorbell index (0 to DBL_NUM-1) carried through the dispatch FIFO -- see
+    -- FIFO_DATA_W below.
+    constant DBL_IDX_W : positive := log2(DBL_NUM);
+    constant QID_W     : positive := maximum(1, log2(NUM_QUEUES));
 
     signal dbl_reg : slv_array_t(DBL_NUM -1 downto 0)(CQHDBL_DATA'range);
-    signal dbl_base_addr : slv_array_t(DBL_NUM -1 downto 0)(63 downto 0);
 
     type update_state_t is (S_WAIT_FOR_UPDATE, S_RUN_COUNTER, S_DISPATCH_UPDATE);
     type all_update_states_t is array (DBL_NUM -1 downto 0) of update_state_t;
@@ -104,8 +122,11 @@ architecture FULL of DBL_UPDATER is
 
     signal dbl_reg_upd_disp      : std_logic_vector(DBL_NUM -1 downto 0);
 
-    -- Size of a PCIE RQ header and 2 pointers (HHP and HDP, that are aligned to 4 byte boundary)
-    constant FIFO_DATA_W   : positive := 16 + 64;
+    -- Size of a PCIE RQ header (the doorbell VALUE, 16 bits, plus the doorbell INDEX -- the actual
+    -- 64-bit PCIe base address is looked up at dispatch time, one queue at a time, from
+    -- NVME_SW_MANAGER's per-queue base-address LUTRAM instead of being carried through the FIFO --
+    -- see CQHDBL_BADDR_RD_QID/SQTDBL_BADDR_RD_QID above).
+    constant FIFO_DATA_W   : positive := 16 + DBL_IDX_W;
     constant FIFO_WR_PORTS : positive := DBL_NUM;
     constant FIFO_RD_PORTS : positive := MFB_REGIONS;
     constant FIFO_SIZE     : positive := 16;
@@ -183,10 +204,12 @@ begin
             case update_pst(idx) is
                 when S_WAIT_FOR_UPDATE =>
 
-                    -- The dispatch can take place if the PCIe address is not zero and the doorbell
-                    -- value has changed since the last update. An unchanged value is never
-                    -- re-written (that would be a prohibited "Invalid Doorbell Write Value").
-                    if (dbl_base_addr(idx) /= x"0000000000000000") then
+                    -- The dispatch can take place if a non-zero PCIe base address has been
+                    -- programmed for this doorbell (DBL_ENABLED, a 1-bit sticky flag -- see its
+                    -- port comment -- rather than a direct read of the 64-bit address itself) and
+                    -- the doorbell value has changed since the last update. An unchanged value is
+                    -- never re-written (that would be a prohibited "Invalid Doorbell Write Value").
+                    if (DBL_ENABLED(idx) = '1') then
                         if (dbl_reg(idx) /= last_updated_value_reg(idx)) then
                             update_nst(idx)      <= S_DISPATCH_UPDATE;
                             delay_cntr_next(idx) <= delay_cntr_reg(idx) + 1;
@@ -224,16 +247,13 @@ begin
                     end if;
             end case;
         end process;
-    end generate;
 
-    -- Per-queue base addresses/dbl_reg mapping: indices 0..NUM_QUEUES-1 = CQHDBL[q], indices
-    -- NUM_QUEUES..2*NUM_QUEUES-1 = SQTDBL[q]. At NUM_QUEUES=1 this is exactly the original
-    -- fifo_din_arr(0)<=CQHDBL, fifo_din_arr(1)<=SQTDBL assignment.
-    dbl_din_arr_g : for q in 0 to NUM_QUEUES -1 generate
-        fifo_din_arr(q)              <= dbl_reg(q) & CQHDBL_BASE_ADDR(q);
-        fifo_din_arr(NUM_QUEUES + q)  <= dbl_reg(NUM_QUEUES + q) & SQTDBL_BASE_ADDR(q);
-        dbl_base_addr(q)             <= CQHDBL_BASE_ADDR(q);
-        dbl_base_addr(NUM_QUEUES + q) <= SQTDBL_BASE_ADDR(q);
+        -- Carries the doorbell VALUE plus its INDEX (not its 64-bit PCIe base address -- see
+        -- CQHDBL_BADDR_RD_QID/SQTDBL_BADDR_RD_QID above) through the dispatch FIFO. idx is a
+        -- generate-time constant, so this is a single, unambiguous driver of fifo_din_arr(idx). At
+        -- NUM_QUEUES=1 this is exactly the original fifo_din_arr(0)/(1) assignment, just carrying
+        -- the (trivial, always "0") 1-bit index instead of the full 64-bit address.
+        fifo_din_arr(idx) <= dbl_reg(idx) & std_logic_vector(to_unsigned(idx, DBL_IDX_W));
     end generate;
 
     -- Status pulses stay system-wide (any queue's update dispatching), not per-queue -- the
@@ -277,15 +297,32 @@ begin
 
     fifo_do_arr <= slv_array_deser(fifo_do, MFB_REGIONS);
 
+    -- Each region rgn independently dequeues (up to) one doorbell update per cycle, so up to
+    -- MFB_REGIONS distinct queues' base addresses can be looked up in the SAME cycle -- hence
+    -- MFB_REGIONS dispatch read ports on each base-address LUTRAM (in NVME_SW_MANAGER), one per
+    -- region, rather than a single shared one (which would only be correct if at most one region
+    -- could ever dequeue per cycle).
     pcie_rq_meta_assign_g : for rgn in 0 to (FIFO_RD_PORTS -1) generate
         signal dbl_upd_pcie_hdr : std_logic_vector(PCIE_META_REQ_HDR_W -1 downto 0);
+        signal dbl_idx_v        : unsigned(DBL_IDX_W -1 downto 0);
+        signal is_sqtdbl_v      : std_logic;
+        signal qid_v            : std_logic_vector(QID_W -1 downto 0);
+        signal resolved_baddr   : std_logic_vector(63 downto 0);
     begin
+        dbl_idx_v   <= unsigned(fifo_do_arr(rgn)(DBL_IDX_W -1 downto 0));
+        is_sqtdbl_v <= '1' when (to_integer(dbl_idx_v) >= NUM_QUEUES) else '0';
+        qid_v       <= std_logic_vector(to_unsigned(to_integer(dbl_idx_v) mod NUM_QUEUES, QID_W));
+
+        CQHDBL_BADDR_RD_QID(rgn) <= qid_v;
+        SQTDBL_BADDR_RD_QID(rgn) <= qid_v;
+        resolved_baddr <= SQTDBL_BADDR_RD_DATA(rgn) when is_sqtdbl_v = '1' else CQHDBL_BADDR_RD_DATA(rgn);
+
         dbl_upd_pcie_hdr_gen_i : entity work.PCIE_RQ_HDR_GEN
             generic map (
                 DEVICE => DEVICE
                 )
             port map (
-                IN_ADDRESS    => fifo_do_arr(rgn)(63 downto 2),
+                IN_ADDRESS    => resolved_baddr(63 downto 2),
                 IN_VFID       => std_logic_vector(to_unsigned(1, 8)),
                 IN_TAG        => (others => '0'),
                 IN_DW_CNT     => std_logic_vector(to_unsigned(1, 11)),
@@ -297,7 +334,7 @@ begin
                 OUT_HEADER    => dbl_upd_pcie_hdr
                 );
         tx_mfb_data_arr(rgn) <= (MFB_LENGTH/MFB_REGIONS -1 downto PCIE_META_REQ_HDR_W + 16 => '0')
-                                & fifo_do_arr(rgn)(16+64 -1 downto 64) & dbl_upd_pcie_hdr;
+                                & fifo_do_arr(rgn)(FIFO_DATA_W -1 downto DBL_IDX_W) & dbl_upd_pcie_hdr;
         tx_mfb_eof_pos_arr(rgn) <= std_logic_vector(to_unsigned(4, PCIE_RQ_MFB_EOF_POS'length/MFB_REGIONS));
         tx_mfb_meta_arr(rgn)    <= (PCIE_RQ_META_FBE => "1111", PCIE_RQ_META_LBE => "0000", others => '0');
     end generate;

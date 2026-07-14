@@ -60,9 +60,17 @@ entity CQE_PROCESSOR is
         --
         -- For pointer update and incrementing of packet counter.
         -- =========================================================================================
-        -- Per-queue doorbell wrap mask (one element per queue -- see NVME_SW_MANAGER's
-        -- PER_Q_BASE register block); indexed by resp_qidx below.
-        DBL_MASK        : in  slv_array_t(NUM_QUEUES -1 downto 0)(15 downto 0);
+        -- Doorbell wrap mask of the queue whose CQ read RESPONSE is arriving this cycle
+        -- (resp_qidx -- see DBL_MASK_RD_QID below). NVME_SW_MANAGER stores this per-queue in an
+        -- NP_LUTRAM with one read port per physical reader (this one, plus C2N_CONTROLLER's, plus
+        -- MI); resolving the queue selection there (rather than handing this component the whole
+        -- NUM_QUEUES-wide array) means this port stays a plain scalar regardless of NUM_QUEUES.
+        DBL_MASK        : in  std_logic_vector(15 downto 0);
+        -- Queue Identifier DBL_MASK above corresponds to -- always equal to resp_qidx, i.e. mirrors
+        -- CQP_CQE_QID's OWN value one combinational step earlier than CQP_CQE_QID reaches the top
+        -- level (CQP_CQE_QID is registered by N2C_CONTROLLER; this one is not, so NVME_SW_MANAGER
+        -- can resolve and return DBL_MASK combinationally, same cycle). Always "0" at NUM_QUEUES=1.
+        DBL_MASK_RD_QID : out std_logic_vector(maximum(1, log2(NUM_QUEUES)) -1 downto 0);
         SQHDBL_UPD_DATA : out std_logic_vector(15 downto 0);
         CQHDBL_UPD_DATA : out std_logic_vector(15 downto 0);
         LAST_CQ_ENTRY   : out std_logic_vector(CQ_ENTRY_RANGE);
@@ -198,7 +206,7 @@ begin
         resp_qidx := resp_qid_pst;
         req_qidx  := poll_qid_pst;
 
-        cqhdbl_tmp                  := (cqhdbl_pst(resp_qidx) + 1) and unsigned(DBL_MASK(resp_qidx));
+        cqhdbl_tmp                  := (cqhdbl_pst(resp_qidx) + 1) and unsigned(DBL_MASK);
         cqhdbl_nst                  <= cqhdbl_pst;
         observed_phase_value_nst    <= observed_phase_value_reg;
 
@@ -207,6 +215,9 @@ begin
         LAST_CQ_ENTRY   <= (others => '0');
         STATUS_UPD_EN   <= '0';
         CQP_CQE_QID     <= std_logic_vector(to_unsigned(resp_qidx, CQP_CQE_QID'length));
+        -- Undelayed (unlike CQP_CQE_QID above): NVME_SW_MANAGER must resolve DBL_MASK for THIS
+        -- cycle's resp_qidx combinationally, before N2C_CONTROLLER's own registration stage.
+        DBL_MASK_RD_QID <= std_logic_vector(to_unsigned(resp_qidx, DBL_MASK_RD_QID'length));
 
         -- Round-robin advance every cycle (single physical read port polls one queue at a time);
         -- runs independently of the request-address override below (poll_qid_pst just free-runs
@@ -228,11 +239,11 @@ begin
         DATA_BUFF_RD_ADDR <= std_logic_vector(cq_page_base + cq_word_addr);
 
         -- WARNING: There can be a problem when RD_DATA_VLD = '0'
-        if (comp_enabled = '1' and DATA_BUFF_RD_DATA_VLD = '1' and DBL_MASK(resp_qidx) /= x"0000") then
+        if (comp_enabled = '1' and DATA_BUFF_RD_DATA_VLD = '1' and DBL_MASK /= x"0000") then
             segm_idx := to_integer(cqhdbl_pst(resp_qidx)(1 downto 0));
             -- If a valid CQ entry is found then update status information
             if (buff_data_segm(segm_idx)(CQ_ENTRY_PHASE_TAG) = observed_phase_value_reg(resp_qidx)) then
-                SQHDBL_UPD_DATA <= buff_data_segm(segm_idx)(CQ_ENTRY_SQHD) and DBL_MASK(resp_qidx);
+                SQHDBL_UPD_DATA <= buff_data_segm(segm_idx)(CQ_ENTRY_SQHD) and DBL_MASK;
                 CQHDBL_UPD_DATA <= std_logic_vector(cqhdbl_tmp);
                 LAST_CQ_ENTRY   <= buff_data_segm(segm_idx);
                 STATUS_UPD_EN   <= '1';

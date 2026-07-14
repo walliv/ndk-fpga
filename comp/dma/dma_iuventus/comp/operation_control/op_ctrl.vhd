@@ -64,10 +64,12 @@ entity OP_CTRL is
         --
         -- Have to be all set to valid values when read requsts are sent
         -- =========================================================================================
-        -- Per-queue configuration (one element per queue -- see NVME_SW_MANAGER's PER_Q_BASE
-        -- register block); indexed by the admitted command's own qid_reg (see qid_reg_int below).
-        LBA_NUM_MASK        : in slv_array_t(NUM_QUEUES -1 downto 0)(15 downto 0);
-        LBA_SPACE_SIZE      : in slv_array_t(NUM_QUEUES -1 downto 0)(63 downto 0);
+        -- LBA_SPACE_SIZE/LBA_NUM_MASK of the admitted command's own queue (qid_reg, mirrored by
+        -- C2N_QID below). Plain scalars: NVME_SW_MANAGER resolves the per-queue selection itself
+        -- (NP_LUTRAM addressed by a copy of C2N_QID it receives), rather than handing this
+        -- component the whole NUM_QUEUES-wide array.
+        LBA_NUM_MASK        : in std_logic_vector(15 downto 0);
+        LBA_SPACE_SIZE      : in std_logic_vector(63 downto 0);
         RDBUFF_BADDR        : in std_logic_vector(63 downto 0);
         RDBUFF_PRP_LIST_PTR : in std_logic_vector(63 downto 0);
         WRBUFF_BADDR        : in std_logic_vector(63 downto 0);
@@ -217,9 +219,6 @@ architecture FULL of OP_CTRL is
 
     -- Width of a Queue Identifier value (0 to NUM_QUEUES-1).
     constant QID_W : natural := maximum(1, log2(NUM_QUEUES));
-    -- Element width of LBA_SPACE_SIZE (a slv_array_t, so LBA_SPACE_SIZE'length is the number of
-    -- queues, not the element width -- use LBA_SPACE_SIZE(0)'length, always 64, for that).
-    constant LBA_SPACE_SIZE_W : natural := 64;
 
     -- nvc workaround-friendly helpers: whole-signal-in, whole-signal-out functions (kept as plain
     -- functions -- not generic packages -- so none of the known nvc 1.21.0 generic-package bugs
@@ -434,7 +433,7 @@ begin
     end process;
 
     op_state_comb_p : process (all)
-        variable lba_num_temp : unsigned(LBA_SPACE_SIZE_W -1 downto 0);
+        variable lba_num_temp : unsigned(LBA_SPACE_SIZE'length -1 downto 0);
         -- Number of pages needed by the read currently registered: ceil((lba_num_reg+1)/8)
         variable lba_cnt_v    : unsigned(8 downto 0);
         variable npages_v     : unsigned(NPAGES_W -1 downto 0);
@@ -443,17 +442,11 @@ begin
         variable cqe_ctx_v    : ctx_entry_t;
         -- Queue the completion currently being processed (CQP_CQE_VLD) belongs to.
         variable cqp_cqe_qid_int : natural range 0 to NUM_QUEUES -1;
-        -- Queue the request currently admitted/in flight (qid_reg) belongs to -- selects the
-        -- per-queue LBA_SPACE_SIZE/LBA_NUM_MASK entry for the OOR checks in S_OP_CHECK/
-        -- S_WR_REQ_SIZE_WAIT below.
-        variable qid_reg_int  : natural range 0 to NUM_QUEUES -1;
         -- Priority-picked queue (lowest index first) whose own FLUSH keepalive timer has expired
         -- and is still waiting to be dispatched; valid only when flush_pending_v = '1'.
         variable flush_qid_v     : natural range 0 to NUM_QUEUES -1;
         variable flush_pending_v : std_logic;
     begin
-        qid_reg_int                 := to_integer(unsigned(qid_reg));
-
         op_state_nst                <= op_state_pst;
         lba_num_next                <= lba_num_reg;
         start_lba_ptr_next          <= start_lba_ptr_reg;
@@ -638,8 +631,9 @@ begin
                 WR_MFB_DST_RDY <= '0';
 
                 -- Check if the request does not exeed the LBA space size (of the queue this
-                -- request was admitted onto -- qid_reg_int).
-                if ((resize(unsigned(start_lba_ptr_reg), LBA_SPACE_SIZE_W) + resize(unsigned(lba_num_reg), LBA_SPACE_SIZE_W) + 1) > unsigned(LBA_SPACE_SIZE(qid_reg_int))) then
+                -- request was admitted onto -- LBA_SPACE_SIZE is already resolved to that queue's
+                -- own entry, see the port comment).
+                if ((resize(unsigned(start_lba_ptr_reg), LBA_SPACE_SIZE'length) + resize(unsigned(lba_num_reg), LBA_SPACE_SIZE'length) + 1) > unsigned(LBA_SPACE_SIZE)) then
                     op_state_nst <= S_IDLE;
                     OP_STAT_VLD  <= '1';
                     OP_STAT_TYPE <= '1';
@@ -660,14 +654,15 @@ begin
 
                 if (NVME_WR_REQ_FRAME_LNG_VLD = '1') then
                     -- Round the amount of LBAs up to include all of the packet's data
-                    lba_num_temp       := resize(((unsigned(NVME_WR_REQ_FRAME_LNG) + 511) / 512) -1, LBA_SPACE_SIZE_W);
+                    lba_num_temp       := resize(((unsigned(NVME_WR_REQ_FRAME_LNG) + 511) / 512) -1, LBA_SPACE_SIZE'length);
 
                     -- Check if the request does not exeed the LBA space size (of the queue this
-                    -- write was admitted onto -- qid_reg_int).
+                    -- write was admitted onto -- LBA_SPACE_SIZE is already resolved to that
+                    -- queue's own entry, see the port comment).
                     -- Use start_lba_ptr_reg (captured from NVME_WR_REQ_LBA_PTR in S_IDLE)
                     -- rather than the raw NVME_WR_REQ_LBA_PTR input, which is no longer
                     -- valid once WR_MFB_DST_RDY is deasserted after the SOF cycle.
-                    if ((resize(unsigned(start_lba_ptr_reg), LBA_SPACE_SIZE_W) + lba_num_temp + 1) > unsigned(LBA_SPACE_SIZE(qid_reg_int))) then
+                    if ((resize(unsigned(start_lba_ptr_reg), LBA_SPACE_SIZE'length) + lba_num_temp + 1) > unsigned(LBA_SPACE_SIZE)) then
                         op_state_nst <= S_IDLE;
                         OP_STAT_VLD  <= '1';
                         OP_STAT_TYPE <= '0';
