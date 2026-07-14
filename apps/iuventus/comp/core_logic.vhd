@@ -137,6 +137,10 @@ architecture FULL of CORE_LOGIC is
     constant DMA_MFB_BLOCK_SIZE  : natural := 64;  -- Number of items in block
     constant DMA_MFB_ITEM_WIDTH  : natural := 8;  -- Width of one item in bits
 
+    -- Number of independent SQ/CQ queues (one per SSD) the DMA_IUVENTUS core and USER_CORE are
+    -- built with. QUEUE_DEPTH is left at its DMA_IUVENTUS default (16) here.
+    constant NUM_QUEUES : natural := 4;
+
     -- DMA MFB RQ parameters
     constant PCIE_RQ_MFB_REGIONS     : natural := pcie_mfb_regions_calc_f("RQ");
     constant PCIE_RQ_MFB_REGION_SIZE : natural := 1;
@@ -255,6 +259,7 @@ architecture FULL of CORE_LOGIC is
     signal nvme_rd_req_lba_ptr : slv_array_t(DMA_STREAMS-1 downto 0)(SQE_LBA_PTR_W -1 downto 0);
     signal nvme_rd_req_vld     : std_logic_vector(DMA_STREAMS-1 downto 0);
     signal nvme_rd_req_rdy     : std_logic_vector(DMA_STREAMS-1 downto 0);
+    signal nvme_rd_req_qid     : slv_array_t(DMA_STREAMS-1 downto 0)(maximum(1, log2(NUM_QUEUES)) -1 downto 0);
 
     signal nvme_op_stat_type : std_logic_vector(DMA_STREAMS-1 downto 0);
     signal nvme_op_stat_code : slv_array_t(DMA_STREAMS-1 downto 0)(1 downto 0);
@@ -269,7 +274,7 @@ architecture FULL of CORE_LOGIC is
     signal nvme_rd_mfb_dst_rdy : std_logic_vector(DMA_STREAMS -1 downto 0);
 
     signal nvme_wr_mfb_data    : slv_array_t(DMA_STREAMS -1 downto 0)(DMA_MFB_REGIONS*DMA_MFB_REGION_SIZE*DMA_MFB_BLOCK_SIZE*DMA_MFB_ITEM_WIDTH-1 downto 0);
-    signal nvme_wr_mfb_meta    : slv_array_t(DMA_STREAMS -1 downto 0)(DMA_MFB_REGIONS*SQE_LBA_PTR_W-1 downto 0);
+    signal nvme_wr_mfb_meta    : slv_array_t(DMA_STREAMS -1 downto 0)(DMA_MFB_REGIONS*(SQE_LBA_PTR_W + maximum(1, log2(NUM_QUEUES)))-1 downto 0);
     signal nvme_wr_mfb_sof     : slv_array_t(DMA_STREAMS -1 downto 0)(DMA_MFB_REGIONS-1 downto 0);
     signal nvme_wr_mfb_eof     : slv_array_t(DMA_STREAMS -1 downto 0)(DMA_MFB_REGIONS-1 downto 0);
     signal nvme_wr_mfb_sof_pos : slv_array_t(DMA_STREAMS -1 downto 0)(DMA_MFB_REGIONS*max(1, log2(DMA_MFB_REGION_SIZE))-1 downto 0);
@@ -631,6 +636,12 @@ begin
                 MI_WIDTH => MI_WIDTH,
                 MI_SAME_CLK => FALSE,
 
+                NUM_QUEUES => NUM_QUEUES,
+                -- Timing-closure lever for the N=4 multi-queue build: QD8 halves the per-queue
+                -- tag pools / context table / FIFOs vs the default 16, cutting utilization and
+                -- congestion around the CQ/WRBUFF trans-buffer URAM address paths.
+                QUEUE_DEPTH => 8,
+
                 USR_MFB_REGIONS     => DMA_MFB_REGIONS,
                 USR_MFB_REGION_SIZE => DMA_MFB_REGION_SIZE,
                 USR_MFB_BLOCK_SIZE  => DMA_MFB_BLOCK_SIZE,
@@ -649,6 +660,7 @@ begin
                 NVME_RD_REQ_LBA_PTR => nvme_rd_req_lba_ptr(str),
                 NVME_RD_REQ_VLD     => nvme_rd_req_vld(str),
                 NVME_RD_REQ_RDY     => nvme_rd_req_rdy(str),
+                NVME_RD_REQ_QID     => nvme_rd_req_qid(str),
 
                 OP_STAT_TYPE => nvme_op_stat_type(str),
                 OP_STAT_CODE => nvme_op_stat_code(str),
@@ -743,6 +755,7 @@ begin
         generic map (
             MI_WIDTH         => MI_WIDTH,
             DMA_STREAMS      => DMA_STREAMS,
+            NUM_QUEUES       => NUM_QUEUES,
 
             DMA_MFB_REGIONS     => DMA_MFB_REGIONS,
             DMA_MFB_REGION_SIZE => DMA_MFB_REGION_SIZE,
@@ -775,6 +788,7 @@ begin
             NVME_RD_REQ_LBA_PTR => nvme_rd_req_lba_ptr(0),
             NVME_RD_REQ_VLD     => nvme_rd_req_vld(0),
             NVME_RD_REQ_RDY     => nvme_rd_req_rdy(0),
+            NVME_RD_REQ_QID     => nvme_rd_req_qid(0),
 
             NVME_OP_STAT_TYPE => nvme_op_stat_type(0),
             NVME_OP_STAT_CODE => nvme_op_stat_code(0),
