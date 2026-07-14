@@ -23,7 +23,7 @@ SQE_SIZE = 64
 CQE_SIZE = 16
 # Width of the LBA-pointer field carried in WR_MFB_META (nvme_meta_pack.vhd's SQE_LBA_PTR_W).
 # The Queue Identifier a write request targets is appended above these bits -- see
-# EXTRA_Q_BASE_ADDR below / dma_iuventus.vhd's WR_MFB_META port comment.
+# dma_iuventus.vhd's WR_MFB_META port comment.
 SQE_LBA_PTR_W = 64
 MPS = 512
 MRRS = 4096
@@ -62,13 +62,10 @@ FIRST_DATA_PAGE = NUM_QUEUES
 # shared by all queues.
 DATA_PAGES = BUFF_SIZE_PAGES - FIRST_DATA_PAGE
 
-# Per-queue doorbell base-address MI register block (nvme_sw_manager.vhd contract): queue 0 uses
-# the legacy SQTDBL_BADDR_L/H (0x018/0x01C) and CQHDBL_BADDR_L/H (0x020/0x024) registers; queues
-# 1..NUM_QUEUES-1 use this block instead, one EXTRA_Q_STRIDE-sized (16 B) slot per queue:
-#   EXTRA_Q_BASE_ADDR + (q-1)*EXTRA_Q_STRIDE + 0x0/0x4  = SQTDBL_BADDR_L/H(q)
-#   EXTRA_Q_BASE_ADDR + (q-1)*EXTRA_Q_STRIDE + 0x8/0xC  = CQHDBL_BADDR_L/H(q)
-EXTRA_Q_BASE_ADDR = 0x180
-EXTRA_Q_STRIDE = 0x10
+# Per-queue configuration/doorbell registers live in the PER_Q_BASE-based 2D register block (see
+# cocotbext.ofm.dma.iuventus.iuventus_reg_map.IuventusPerQueueRegMap/PER_Q_BASE/PER_Q_STRIDE/
+# per_queue_reg_addr, which must match nvme_sw_manager.vhd's PER_Q_BASE/PER_Q_STRIDE/PQ_OFFSETS
+# exactly). Queue 0 is q=0 of that block -- there is no separate/legacy register set for queue 0.
 
 # Number of pages a WRITE command reserves in RDBUFF, matching op_ctrl's MAX_WR_PAGES generic
 # (32: the largest single-command write, since NVME_WR_REQ_FRAME_LNG derives from an 8-bit LBA

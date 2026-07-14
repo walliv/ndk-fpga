@@ -77,17 +77,20 @@ entity C2N_CONTROLLER is
         -- Backpressure signal that indicates that component is prepared to dispatch signals
         RDY_FOR_DISP : out std_logic;
 
-        -- Parts of the Submission Queue Entry (i.e. the command)
-        DBL_MASK        : in std_logic_vector(15 downto 0);
+        -- Parts of the Submission Queue Entry (i.e. the command). DBL_MASK/NAMESPACE_ID/
+        -- LBA_SPACE_SIZE/LBA_NUM_MASK are per-queue (one element per queue -- see
+        -- NVME_SW_MANAGER's PER_Q_BASE register block); passed through unchanged to
+        -- NVME_CMD_DISPATCHER, which indexes them by the queue currently being dispatched to.
+        DBL_MASK        : in slv_array_t(NUM_QUEUES -1 downto 0)(15 downto 0);
         CMD_OPCODE      : in std_logic_vector(CMD_OPCODE_W -1 downto 0);
-        NAMESPACE_ID    : in std_logic_vector(31 downto 0);
+        NAMESPACE_ID    : in slv_array_t(NUM_QUEUES -1 downto 0)(31 downto 0);
         METADATA_PTR    : in std_logic_vector(63 downto 0);
         PRP_ENTRY_1     : in std_logic_vector(63 downto 0);
         PRP_ENTRY_2     : in std_logic_vector(63 downto 0);
         START_LBA_PTR   : in std_logic_vector(63 downto 0);
-        LBA_SPACE_SIZE  : in std_logic_vector(63 downto 0);
+        LBA_SPACE_SIZE  : in slv_array_t(NUM_QUEUES -1 downto 0)(63 downto 0);
         LBA_NUM         : in std_logic_vector(15 downto 0);
-        LBA_NUM_MASK    : in std_logic_vector(15 downto 0);
+        LBA_NUM_MASK    : in slv_array_t(NUM_QUEUES -1 downto 0)(15 downto 0);
         -- Queue Identifier of the command currently being dispatched -- see NVME_CMD_DISPATCHER.
         -- Always "0" at NUM_QUEUES=1.
         QID             : in std_logic_vector(maximum(1, log2(NUM_QUEUES)) -1 downto 0);

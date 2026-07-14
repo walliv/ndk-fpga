@@ -60,7 +60,9 @@ entity CQE_PROCESSOR is
         --
         -- For pointer update and incrementing of packet counter.
         -- =========================================================================================
-        DBL_MASK        : in  std_logic_vector(15 downto 0);
+        -- Per-queue doorbell wrap mask (one element per queue -- see NVME_SW_MANAGER's
+        -- PER_Q_BASE register block); indexed by resp_qidx below.
+        DBL_MASK        : in  slv_array_t(NUM_QUEUES -1 downto 0)(15 downto 0);
         SQHDBL_UPD_DATA : out std_logic_vector(15 downto 0);
         CQHDBL_UPD_DATA : out std_logic_vector(15 downto 0);
         LAST_CQ_ENTRY   : out std_logic_vector(CQ_ENTRY_RANGE);
@@ -196,7 +198,7 @@ begin
         resp_qidx := resp_qid_pst;
         req_qidx  := poll_qid_pst;
 
-        cqhdbl_tmp                  := (cqhdbl_pst(resp_qidx) + 1) and unsigned(DBL_MASK);
+        cqhdbl_tmp                  := (cqhdbl_pst(resp_qidx) + 1) and unsigned(DBL_MASK(resp_qidx));
         cqhdbl_nst                  <= cqhdbl_pst;
         observed_phase_value_nst    <= observed_phase_value_reg;
 
@@ -226,11 +228,11 @@ begin
         DATA_BUFF_RD_ADDR <= std_logic_vector(cq_page_base + cq_word_addr);
 
         -- WARNING: There can be a problem when RD_DATA_VLD = '0'
-        if (comp_enabled = '1' and DATA_BUFF_RD_DATA_VLD = '1' and DBL_MASK /= x"0000") then
+        if (comp_enabled = '1' and DATA_BUFF_RD_DATA_VLD = '1' and DBL_MASK(resp_qidx) /= x"0000") then
             segm_idx := to_integer(cqhdbl_pst(resp_qidx)(1 downto 0));
             -- If a valid CQ entry is found then update status information
             if (buff_data_segm(segm_idx)(CQ_ENTRY_PHASE_TAG) = observed_phase_value_reg(resp_qidx)) then
-                SQHDBL_UPD_DATA <= buff_data_segm(segm_idx)(CQ_ENTRY_SQHD) and DBL_MASK;
+                SQHDBL_UPD_DATA <= buff_data_segm(segm_idx)(CQ_ENTRY_SQHD) and DBL_MASK(resp_qidx);
                 CQHDBL_UPD_DATA <= std_logic_vector(cqhdbl_tmp);
                 LAST_CQ_ENTRY   <= buff_data_segm(segm_idx);
                 STATUS_UPD_EN   <= '1';

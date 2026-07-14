@@ -58,24 +58,29 @@ entity NVME_CMD_DISPATCHER is
         -- =========================================================================================
         TRIGG_DISP      : in  std_logic;
         RDY_FOR_DISP    : out std_logic;
-        DBL_MASK        : in  std_logic_vector(15 downto 0);
+        -- Per-queue doorbell wrap mask (one element per queue -- see NVME_SW_MANAGER's
+        -- PER_Q_BASE register block); indexed by qid_int below.
+        DBL_MASK        : in  slv_array_t(NUM_QUEUES -1 downto 0)(15 downto 0);
 
         -- =========================================================================================
         -- SQ command attributes
         -- =========================================================================================
         CMD_OPCODE     : in std_logic_vector(CMD_OPCODE_W -1 downto 0);
-        NAMESPACE_ID   : in std_logic_vector(31 downto 0);
+        -- Per-queue NVMe Namespace Identifier; indexed by qid_int below.
+        NAMESPACE_ID   : in slv_array_t(NUM_QUEUES -1 downto 0)(31 downto 0);
         METADATA_PTR   : in std_logic_vector(63 downto 0);
         PRP_ENTRY_1    : in std_logic_vector(63 downto 0);
         PRP_ENTRY_2    : in std_logic_vector(63 downto 0);
         -- Start pointer of the LBA required to be read/written to.
         START_LBA_PTR  : in std_logic_vector(63 downto 0);
-        -- Mask of the LBA pointer (determines a size of the SSD)
-        LBA_SPACE_SIZE : in std_logic_vector(63 downto 0);
+        -- Per-queue mask of the LBA pointer (determines a size of the SSD); indexed by qid_int
+        -- below.
+        LBA_SPACE_SIZE : in slv_array_t(NUM_QUEUES -1 downto 0)(63 downto 0);
         -- The amount of LBAs that will be read consecutively.
         LBA_NUM        : in std_logic_vector(15 downto 0);
-        -- Top value of the maximum amount of LBAs that can be requested in one command
-        LBA_NUM_MASK   : in std_logic_vector(15 downto 0);
+        -- Per-queue top value of the maximum amount of LBAs that can be requested in one command;
+        -- indexed by qid_int below.
+        LBA_NUM_MASK   : in slv_array_t(NUM_QUEUES -1 downto 0)(15 downto 0);
         -- Queue Identifier of the command currently being staged/dispatched (part of the SQ
         -- command attributes group -- stable throughout TRIGG_DISP, like CMD_OPCODE etc). Selects
         -- which queue's tag pool, doorbell state and SQ page (flat page QID) this dispatch uses.
@@ -261,7 +266,7 @@ begin
         port map (
             CMD_ID        => cmd_id_arr(qid_int),
             CMD_OPCODE    => CMD_OPCODE,
-            NAMESPACE_ID  => NAMESPACE_ID,
+            NAMESPACE_ID  => NAMESPACE_ID(qid_int),
             METADATA_PTR  => METADATA_PTR,
             PRP_ENTRY_1   => PRP_ENTRY_1,
             PRP_ENTRY_2   => PRP_ENTRY_2,
@@ -278,13 +283,15 @@ begin
     begin
         lba_num_capped <= (others => '0');
 
-        if (unsigned(START_LBA_PTR) < unsigned(LBA_SPACE_SIZE)) then
-            max_lba_num := unsigned(LBA_SPACE_SIZE) - unsigned(START_LBA_PTR);
+        -- Uses the LBA_SPACE_SIZE/LBA_NUM_MASK entry of the queue currently being dispatched to
+        -- (qid_int).
+        if (unsigned(START_LBA_PTR) < unsigned(LBA_SPACE_SIZE(qid_int))) then
+            max_lba_num := unsigned(LBA_SPACE_SIZE(qid_int)) - unsigned(START_LBA_PTR);
 
             if (unsigned(LBA_NUM) <= max_lba_num) then
-                lba_num_capped <= LBA_NUM and LBA_NUM_MASK;
+                lba_num_capped <= LBA_NUM and LBA_NUM_MASK(qid_int);
             else
-                lba_num_capped <= std_logic_vector(resize(max_lba_num, LBA_NUM'length)) and LBA_NUM_MASK;
+                lba_num_capped <= std_logic_vector(resize(max_lba_num, LBA_NUM'length)) and LBA_NUM_MASK(qid_int);
             end if;
         end if;
     end process;
@@ -318,7 +325,7 @@ begin
 
         if (
             -- The Submission Queue has not be full
-            (((sqtdbl_reg(qid_int) + 1) and unsigned(DBL_MASK)) /= sqhdbl_reg(qid_int))
+            (((sqtdbl_reg(qid_int) + 1) and unsigned(DBL_MASK(qid_int))) /= sqhdbl_reg(qid_int))
             -- All the tags in the TAG Manager have to be initialized
             and tag_fifo_init_done_arr(qid_int) = '1'
             -- There have to be some tags present in the FIFO
@@ -332,7 +339,7 @@ begin
             -- full (i.e. the SQTDBL is one position before SQHDBL)
             if (TRIGG_DISP = '1' and SQ_CMD_MFB_DST_RDY = '1') then
                 SQE_DISP_CNTR_INCR <= '1';
-                sqtdbl_next_val(qid_int)    <= (sqtdbl_reg(qid_int) + 1) and unsigned(DBL_MASK);
+                sqtdbl_next_val(qid_int)    <= (sqtdbl_reg(qid_int) + 1) and unsigned(DBL_MASK(qid_int));
                 cmd_id_dst_rdy_arr(qid_int) <= '1';
             end if;
         end if;
@@ -361,5 +368,5 @@ begin
     SQ_CMD_MFB_SOF_POS <= (others => '0');
     SQ_CMD_MFB_EOF_POS <= "111111";
 
-    SQTDBL_VAL  <= std_logic_vector(sqtdbl_reg(qid_int) + 1 and unsigned(DBL_MASK));
+    SQTDBL_VAL  <= std_logic_vector(sqtdbl_reg(qid_int) + 1 and unsigned(DBL_MASK(qid_int)));
 end architecture;

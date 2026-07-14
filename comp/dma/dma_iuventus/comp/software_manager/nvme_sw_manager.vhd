@@ -36,10 +36,12 @@ entity NVME_SW_MANAGER is
         MRRS        : positive := 2**13;
         -- Maximum size of a packet that can be dispatched from the H2C/C2N buffers
         PKT_SIZE_MAX : positive := 2**17;
-        -- Number of independent SQ/CQ queues (one per SSD). At NUM_QUEUES=1 (the default) the MI
-        -- register map is unchanged from the original single-queue layout; laying out per-queue
-        -- SQTDBL_BASE_ADDR/CQHDBL_BASE_ADDR/*_BADDR register sets (base + q*stride) is Stage B
-        -- work, not yet implemented here.
+        -- Number of independent SQ/CQ queues (one per SSD). The MI register map is a COMMON
+        -- (shared, low-offset) block followed by a generated PER-QUEUE 2D block (PER_Q_BASE +
+        -- q*PER_Q_STRIDE, q = 0..NUM_QUEUES-1 -- queue 0 is just q=0 of that block, not
+        -- special-cased). At NUM_QUEUES=1 the register map is NOT bit-identical to the historical
+        -- single-queue layout (it has been intentionally redefined -- see PER_Q_BASE/PER_Q_STRIDE/
+        -- PQ_* below), but single-queue behavior is functionally equivalent.
         NUM_QUEUES   : positive := 1
         );
 
@@ -80,7 +82,7 @@ entity NVME_SW_MANAGER is
         C2N_BUFF_DISP_RDS_BYTES : in std_logic_vector(13 -1 downto 0);
 
         -- ========================================================================================
-        -- Operation Control
+        -- Operation Control (COMMON -- the shared RDBUFF/WRBUFF data pool)
         -- ========================================================================================
         RDBUFF_BADDR         : out std_logic_vector(63 downto 0);
         RDBUFF_PRP_LIST_PTR  : out std_logic_vector(63 downto 0);
@@ -90,16 +92,22 @@ entity NVME_SW_MANAGER is
         -- ========================================================================================
         -- C2N Command dispatcher
         -- ========================================================================================
-        -- The current value of SQTDBL
+        -- The current value of SQTDBL, and the queue it belongs to -- routes into that queue's
+        -- own PQ_SQTDBL observation register (see sqtdbl_reg_arr/pq_readback_g below). Always "0"
+        -- at NUM_QUEUES=1.
         SQTDBL_DATA     : in  std_logic_vector(15 downto 0);
+        SQTDBL_QID      : in  std_logic_vector(maximum(1, log2(NUM_QUEUES)) -1 downto 0);
         TAG_FIFO_STATUS : in std_logic_vector(11 downto 0);
         TAG_INIT_DONE   : in std_logic;
 
-        DBL_MASK       : out std_logic_vector(15 downto 0);
-        NAMESPACE_ID   : out std_logic_vector(31 downto 0);
+        -- Per-queue configuration (one element per queue -- see the PER_Q_BASE 2D register block
+        -- below).
+        DBL_MASK       : out slv_array_t(NUM_QUEUES -1 downto 0)(15 downto 0);
+        NAMESPACE_ID   : out slv_array_t(NUM_QUEUES -1 downto 0)(31 downto 0);
+        LBA_NUM_MASK   : out slv_array_t(NUM_QUEUES -1 downto 0)(15 downto 0);
+        LBA_SPACE_SIZE : out slv_array_t(NUM_QUEUES -1 downto 0)(63 downto 0);
+        -- COMMON: a single shared metadata pointer for every queue.
         METADATA_PTR   : out std_logic_vector(63 downto 0);
-        LBA_NUM_MASK   : out std_logic_vector(15 downto 0);
-        LBA_SPACE_SIZE : out std_logic_vector(63 downto 0);
 
         SQES_DISP_TYPE  : in std_logic_vector(CMD_OPCODE_W -1 downto 0);
         SQES_DISP_INCR  : in std_logic;
@@ -108,18 +116,23 @@ entity NVME_SW_MANAGER is
         -- =========================================================================================
         -- N2C Completion processor
         -- =========================================================================================
+        -- SQHDBL_DATA/CQHDBL_DATA/LAST_CQ_ENTRY/STATUS_UPD_VLD all describe the SAME completion
+        -- event, reported for queue CQHDBL_QID -- routes SQHDBL_DATA/CQHDBL_DATA into that
+        -- queue's own PQ_SQHDBL/PQ_CQHDBL observation registers (see sqhdbl_reg_arr/
+        -- cqhdbl_reg_arr/pq_readback_g below). Always "0" at NUM_QUEUES=1.
         SQHDBL_DATA     : in std_logic_vector(15 downto 0);
         CQHDBL_DATA     : in std_logic_vector(15 downto 0);
+        CQHDBL_QID      : in std_logic_vector(maximum(1, log2(NUM_QUEUES)) -1 downto 0);
+        -- LAST_CQ_ENTRY/CPL_ERR_MASK stay COMMON: a single system-wide "last completion" snapshot
+        -- aggregated across every queue, feeding the aggregate CQE_ERROR_TRACKER below -- not yet
+        -- made per-queue (no per-queue consumer identified; see the report accompanying this
+        -- change).
         LAST_CQ_ENTRY   : in std_logic_vector(CQ_ENTRY_RANGE);
         STATUS_UPD_VLD  : in std_logic;
 
         -- =========================================================================================
         -- DBL Updater
         -- =========================================================================================
-        -- Per-queue doorbell PCIe destination addresses; see the EXTRA_Q_BASE_ADDR/EXTRA_Q_STRIDE
-        -- MI register map below. Index 0 is the original R_SQTDBL_BADDR_*/R_CQHDBL_BADDR_*
-        -- registers (0x018/0x01C/0x020/0x024), unchanged; at NUM_QUEUES=1 these are 1-element
-        -- arrays, identical to the original scalar ports.
         CQHDBL_BASE_ADDR : out slv_array_t(NUM_QUEUES -1 downto 0)(63 downto 0);
         SQTDBL_BASE_ADDR : out slv_array_t(NUM_QUEUES -1 downto 0)(63 downto 0);
 
@@ -147,289 +160,185 @@ entity NVME_SW_MANAGER is
 end entity;
 
 architecture FULL of NVME_SW_MANAGER is
-    constant ADDR_LENGTH : positive := 9;
+    -- MI register address width (bits of MI_ADDR matched against R_ADDRS). Must cover the whole
+    -- PER_Q_BASE + NUM_QUEUES*PER_Q_STRIDE per-queue block below (see the assertion in the
+    -- architecture body) while staying inside this component's own MI_SPLIT_ADDR_MASK=0x1000
+    -- window (see MI_SPLIT_ADDR_MASK below) -- 12 bits reaches the whole 0x000-0xFFF span, i.e.
+    -- everything below the DATA_LOGGER's own 0x1000 base.
+    constant ADDR_LENGTH : positive := 12;
     constant CNTR_WIDTH  : positive := 64;
 
     -- =============================================================================================
-    -- Per-queue doorbell base-address registers (queues 1..NUM_QUEUES-1).
-    --
-    -- Queue 0 keeps using the existing R_SQTDBL_BADDR_L/H (0x018/0x01C) and R_CQHDBL_BADDR_L/H
-    -- (0x020/0x024) registers below, unchanged -- N=1 software is unaffected.
-    --
-    -- Extra-queue register block, starting at EXTRA_Q_BASE_ADDR = 0x180 (within the same
-    -- ADDR_LENGTH=9-bit (0x000-0x1FF) MI window as the rest of this register file, past the
-    -- last legacy register at 0x15C), one EXTRA_Q_STRIDE = 0x10 (16 B) slot per queue
-    -- q = 1..NUM_QUEUES-1:
-    --   base + (q-1)*0x10 + 0x0  SQTDBL_BADDR_L(q)
-    --   base + (q-1)*0x10 + 0x4  SQTDBL_BADDR_H(q)
-    --   base + (q-1)*0x10 + 0x8  CQHDBL_BADDR_L(q)
-    --   base + (q-1)*0x10 + 0xC  CQHDBL_BADDR_H(q)
-    -- (0x180..0x1FF spans 8 slots, i.e. up to 8 extra queues / NUM_QUEUES=9.) At NUM_QUEUES=1
-    -- REGS = BASE_REGS (see below) and this whole block is unused, so the MI map is unchanged
-    -- from today. These registers are ordinary entries in the R_ADDRS/regs_arr register file
-    -- (see BASE_REGS/REGS/build_r_addrs below), the SAME mechanism every other (hardware-proven)
-    -- register in this file uses -- not a separate write process/read mux.
+    -- COMMON register block (shared across every queue): CONTROL/STATUS, the shared RDBUFF/WRBUFF
+    -- data-pool base addresses/PRP list pointers, METADATA_PTR, LAST_CQ_ENTRY/CPL_ERR_MASK/
+    -- TAG_FIFO_STATUS status, and every *_CNTR performance counter (all of these remain
+    -- aggregated across queues for now -- see the report accompanying this change for exactly
+    -- which ones, and whether any should become per-queue in a later pass).
     -- =============================================================================================
-    constant EXTRA_Q_BASE_ADDR : natural := 16#180#;
-    constant EXTRA_Q_STRIDE    : natural := 16#010#;
-
     constant R_CONTROL                      : natural := 0;
     constant R_STATUS                       : natural := 1;
-    constant R_SQTDBL                       : natural := 2;
-    constant R_SQHDBL                       : natural := 3;
-    constant R_CQHDBL                       : natural := 4;
-    constant R_DBL_MASK                     : natural := 5;
-    constant R_SQTDBL_BADDR_L               : natural := 6;
-    constant R_SQTDBL_BADDR_H               : natural := 7;
-    constant R_CQHDBL_BADDR_L               : natural := 8;
-    constant R_CQHDBL_BADDR_H               : natural := 9;
-    constant R_RDBUFF_BADDR_L               : natural := 10;
-    constant R_RDBUFF_BADDR_H               : natural := 11;
-    constant R_RDBUFF_PRP_LIST_PTR_L        : natural := 12;
-    constant R_RDBUFF_PRP_LIST_PTR_H        : natural := 13;
-    constant R_WRBUFF_BADDR_L               : natural := 14;
-    constant R_WRBUFF_BADDR_H               : natural := 15;
-    constant R_WRBUFF_PRP_LIST_PTR_L        : natural := 16;
-    constant R_WRBUFF_PRP_LIST_PTR_H        : natural := 17;
-    constant R_LAST_CQ_ENTRY_0              : natural := 18;
-    constant R_LAST_CQ_ENTRY_1              : natural := 19;
-    constant R_LAST_CQ_ENTRY_2              : natural := 20;
-    constant R_LAST_CQ_ENTRY_3              : natural := 21;
-    constant R_SQE_DISP_CNTR_L              : natural := 22;
-    constant R_SQE_DISP_CNTR_H              : natural := 23;
-    constant R_CQE_PROC_CNTR_L              : natural := 24;
-    constant R_CQE_PROC_CNTR_H              : natural := 25;
-    constant R_PCIE_RDS_CNTR_L              : natural := 26;
-    constant R_PCIE_RDS_CNTR_H              : natural := 27;
-    constant R_PCIE_RD_BYTES_CNTR_L         : natural := 28;
-    constant R_PCIE_RD_BYTES_CNTR_H         : natural := 29;
-    constant R_PCIE_WRS_CNTR_L              : natural := 30;
-    constant R_PCIE_WRS_CNTR_H              : natural := 31;
-    constant R_PCIE_WR_BYTES_CNTR_L         : natural := 32;
-    constant R_PCIE_WR_BYTES_CNTR_H         : natural := 33;
-    constant R_SQ_PCIE_RDS_CNTR_L           : natural := 34;
-    constant R_SQ_PCIE_RDS_CNTR_H           : natural := 35;
-    constant R_SQ_PCIE_RD_BYTES_CNTR_L      : natural := 36;
-    constant R_SQ_PCIE_RD_BYTES_CNTR_H      : natural := 37;
-    constant R_LBA_NUM_MASK                 : natural := 38;
-    constant R_SUCC_COMPL_CNTR_L            : natural := 39;
-    constant R_SUCC_COMPL_CNTR_H            : natural := 40;
-    constant R_UNSUCC_COMPL_CNTR_L          : natural := 41;
-    constant R_UNSUCC_COMPL_CNTR_H          : natural := 42;
-    constant R_CPL_ERR_MASK_L               : natural := 43;
-    constant R_CPL_ERR_MASK_H               : natural := 44;
-    constant R_RDBUFF_PCIE_RDS_CNTR_L       : natural := 45;
-    constant R_RDBUFF_PCIE_RDS_CNTR_H       : natural := 46;
-    constant R_RDBUFF_PCIE_RD_BYTES_CNTR_L  : natural := 47;
-    constant R_RDBUFF_PCIE_RD_BYTES_CNTR_H  : natural := 48;
-    constant R_WRBUFF_PCIE_WRS_CNTR_L       : natural := 49;
-    constant R_WRBUFF_PCIE_WRS_CNTR_H       : natural := 50;
-    constant R_WRBUFF_PCIE_WR_BYTES_CNTR_L  : natural := 51;
-    constant R_WRBUFF_PCIE_WR_BYTES_CNTR_H  : natural := 52;
-    constant R_LBA_SPACE_SIZE_L             : natural := 53;
-    constant R_LBA_SPACE_SIZE_H             : natural := 54;
-    constant R_CQ_PCIE_WRS_CNTR_L           : natural := 55;
-    constant R_CQ_PCIE_WRS_CNTR_H           : natural := 56;
-    constant R_CQ_PCIE_WR_BYTES_CNTR_L      : natural := 57;
-    constant R_CQ_PCIE_WR_BYTES_CNTR_H      : natural := 58;
-    constant R_CQHDBL_REG_UPDS_CNTR_L       : natural := 59;
-    constant R_CQHDBL_REG_UPDS_CNTR_H       : natural := 60;
-    constant R_CQHDBL_RPT_UPDS_CNTR_L       : natural := 61;
-    constant R_CQHDBL_RPT_UPDS_CNTR_H       : natural := 62;
-    constant R_SQTDBL_REG_UPDS_CNTR_L       : natural := 63;
-    constant R_SQTDBL_REG_UPDS_CNTR_H       : natural := 64;
-    constant R_SQTDBL_RPT_UPDS_CNTR_L       : natural := 65;
-    constant R_SQTDBL_RPT_UPDS_CNTR_H       : natural := 66;
-    constant R_META_PTR_L                   : natural := 67;
-    constant R_META_PTR_H                   : natural := 68;
-    constant R_NVME_RD_BYTES_CNTR_L         : natural := 69;
-    constant R_NVME_RD_BYTES_CNTR_H         : natural := 70;
-    constant R_NVME_WR_BYTES_CNTR_L         : natural := 71;
-    constant R_NVME_WR_BYTES_CNTR_H         : natural := 72;
-    constant R_WRBUFF_USR_RDS_CNTR_L        : natural := 73;
-    constant R_WRBUFF_USR_RDS_CNTR_H        : natural := 74;
-    constant R_WRBUFF_USR_RD_BYTES_CNTR_L   : natural := 75;
-    constant R_WRBUFF_USR_RD_BYTES_CNTR_H   : natural := 76;
-    constant R_RDBUFF_DISP_RDS_CNTR_L       : natural := 77;
-    constant R_RDBUFF_DISP_RDS_CNTR_H       : natural := 78;
-    constant R_RDBUFF_DISP_RD_BYTES_CNTR_L  : natural := 79;
-    constant R_RDBUFF_DISP_RD_BYTES_CNTR_H  : natural := 80;
-    constant R_SQ_DISP_RDS_CNTR_L           : natural := 81;
-    constant R_SQ_DISP_RDS_CNTR_H           : natural := 82;
-    constant R_SQ_DISP_RD_BYTES_CNTR_L      : natural := 83;
-    constant R_SQ_DISP_RD_BYTES_CNTR_H      : natural := 84;
-    constant R_TAG_FIFO_STATUS              : natural := 85;
-    constant R_NVME_FLUSH_CMD_DISP_CNTR_L   : natural := 86;
-    constant R_NVME_FLUSH_CMD_DISP_CNTR_H   : natural := 87;
+    constant R_RDBUFF_BADDR_L               : natural := 2;
+    constant R_RDBUFF_BADDR_H               : natural := 3;
+    constant R_RDBUFF_PRP_LIST_PTR_L        : natural := 4;
+    constant R_RDBUFF_PRP_LIST_PTR_H        : natural := 5;
+    constant R_WRBUFF_BADDR_L               : natural := 6;
+    constant R_WRBUFF_BADDR_H               : natural := 7;
+    constant R_WRBUFF_PRP_LIST_PTR_L        : natural := 8;
+    constant R_WRBUFF_PRP_LIST_PTR_H        : natural := 9;
+    constant R_META_PTR_L                   : natural := 10;
+    constant R_META_PTR_H                   : natural := 11;
+    constant R_LAST_CQ_ENTRY_0              : natural := 12;
+    constant R_LAST_CQ_ENTRY_1              : natural := 13;
+    constant R_LAST_CQ_ENTRY_2              : natural := 14;
+    constant R_LAST_CQ_ENTRY_3              : natural := 15;
+    constant R_CPL_ERR_MASK_L               : natural := 16;
+    constant R_CPL_ERR_MASK_H               : natural := 17;
+    constant R_TAG_FIFO_STATUS              : natural := 18;
+    constant R_SQE_DISP_CNTR_L              : natural := 19;
+    constant R_SQE_DISP_CNTR_H              : natural := 20;
+    constant R_CQE_PROC_CNTR_L              : natural := 21;
+    constant R_CQE_PROC_CNTR_H              : natural := 22;
+    constant R_PCIE_RDS_CNTR_L              : natural := 23;
+    constant R_PCIE_RDS_CNTR_H              : natural := 24;
+    constant R_PCIE_RD_BYTES_CNTR_L         : natural := 25;
+    constant R_PCIE_RD_BYTES_CNTR_H         : natural := 26;
+    constant R_PCIE_WRS_CNTR_L              : natural := 27;
+    constant R_PCIE_WRS_CNTR_H              : natural := 28;
+    constant R_PCIE_WR_BYTES_CNTR_L         : natural := 29;
+    constant R_PCIE_WR_BYTES_CNTR_H         : natural := 30;
+    constant R_SQ_PCIE_RDS_CNTR_L           : natural := 31;
+    constant R_SQ_PCIE_RDS_CNTR_H           : natural := 32;
+    constant R_SQ_PCIE_RD_BYTES_CNTR_L      : natural := 33;
+    constant R_SQ_PCIE_RD_BYTES_CNTR_H      : natural := 34;
+    constant R_SUCC_COMPL_CNTR_L            : natural := 35;
+    constant R_SUCC_COMPL_CNTR_H            : natural := 36;
+    constant R_UNSUCC_COMPL_CNTR_L          : natural := 37;
+    constant R_UNSUCC_COMPL_CNTR_H          : natural := 38;
+    constant R_RDBUFF_PCIE_RDS_CNTR_L       : natural := 39;
+    constant R_RDBUFF_PCIE_RDS_CNTR_H       : natural := 40;
+    constant R_RDBUFF_PCIE_RD_BYTES_CNTR_L  : natural := 41;
+    constant R_RDBUFF_PCIE_RD_BYTES_CNTR_H  : natural := 42;
+    constant R_WRBUFF_PCIE_WRS_CNTR_L       : natural := 43;
+    constant R_WRBUFF_PCIE_WRS_CNTR_H       : natural := 44;
+    constant R_WRBUFF_PCIE_WR_BYTES_CNTR_L  : natural := 45;
+    constant R_WRBUFF_PCIE_WR_BYTES_CNTR_H  : natural := 46;
+    constant R_CQ_PCIE_WRS_CNTR_L           : natural := 47;
+    constant R_CQ_PCIE_WRS_CNTR_H           : natural := 48;
+    constant R_CQ_PCIE_WR_BYTES_CNTR_L      : natural := 49;
+    constant R_CQ_PCIE_WR_BYTES_CNTR_H      : natural := 50;
+    constant R_CQHDBL_REG_UPDS_CNTR_L       : natural := 51;
+    constant R_CQHDBL_REG_UPDS_CNTR_H       : natural := 52;
+    constant R_CQHDBL_RPT_UPDS_CNTR_L       : natural := 53;
+    constant R_CQHDBL_RPT_UPDS_CNTR_H       : natural := 54;
+    constant R_SQTDBL_REG_UPDS_CNTR_L       : natural := 55;
+    constant R_SQTDBL_REG_UPDS_CNTR_H       : natural := 56;
+    constant R_SQTDBL_RPT_UPDS_CNTR_L       : natural := 57;
+    constant R_SQTDBL_RPT_UPDS_CNTR_H       : natural := 58;
+    constant R_NVME_RD_BYTES_CNTR_L         : natural := 59;
+    constant R_NVME_RD_BYTES_CNTR_H         : natural := 60;
+    constant R_NVME_WR_BYTES_CNTR_L         : natural := 61;
+    constant R_NVME_WR_BYTES_CNTR_H         : natural := 62;
+    constant R_WRBUFF_USR_RDS_CNTR_L        : natural := 63;
+    constant R_WRBUFF_USR_RDS_CNTR_H        : natural := 64;
+    constant R_WRBUFF_USR_RD_BYTES_CNTR_L   : natural := 65;
+    constant R_WRBUFF_USR_RD_BYTES_CNTR_H   : natural := 66;
+    constant R_RDBUFF_DISP_RDS_CNTR_L       : natural := 67;
+    constant R_RDBUFF_DISP_RDS_CNTR_H       : natural := 68;
+    constant R_RDBUFF_DISP_RD_BYTES_CNTR_L  : natural := 69;
+    constant R_RDBUFF_DISP_RD_BYTES_CNTR_H  : natural := 70;
+    constant R_SQ_DISP_RDS_CNTR_L           : natural := 71;
+    constant R_SQ_DISP_RDS_CNTR_H           : natural := 72;
+    constant R_SQ_DISP_RD_BYTES_CNTR_L      : natural := 73;
+    constant R_SQ_DISP_RD_BYTES_CNTR_H      : natural := 74;
+    constant R_NVME_FLUSH_CMD_DISP_CNTR_L   : natural := 75;
+    constant R_NVME_FLUSH_CMD_DISP_CNTR_H   : natural := 76;
 
-    -- Number of registers in the original (NUM_QUEUES=1) single-queue register map, i.e. the
-    -- fixed R_CONTROL..R_NVME_FLUSH_CMD_DISP_CNTR_H block above.
-    constant BASE_REGS : natural := 88;
-    -- Total register count: the BASE_REGS above, plus 4 per-queue doorbell base-address
-    -- registers (SQTDBL_BADDR_L/H, CQHDBL_BADDR_L/H) for each of queues 1..NUM_QUEUES-1 -- see
-    -- EXTRA_Q_BASE_ADDR/EXTRA_Q_STRIDE below. At NUM_QUEUES=1 this is exactly BASE_REGS,
-    -- bit-identical to the original single-queue register map.
-    constant REGS : natural := BASE_REGS + (NUM_QUEUES-1)*4;
+    -- Number of registers in the COMMON block above.
+    constant COMMON_REGS : natural := 77;
 
-    -- =============================================================================================
-    -- Register-array constants (R_ADDRS/WR_EN/REG_IS_CNTR/REG_WIDTH/STROBE_EN) are built by
-    -- extending the fixed-size (BASE_REGS-element) single-queue arrays below with 4 more entries
-    -- per extra queue (see the extend_*/build_r_addrs functions and their call sites further
-    -- down) -- rather than describing all REGS entries in one NUM_QUEUES-sized named aggregate,
-    -- which VHDL cannot express (a named aggregate's bounds/keys must be locally static, but
-    -- REGS depends on the NUM_QUEUES generic). This is exactly the same mechanism the proven
-    -- (hardware-validated) legacy registers already use -- e.g. R_META_PTR_L at 0x10C -- unlike
-    -- the extra-queue doorbell registers' PRIOR implementation (a separate extra_q_baddr_wr_g
-    -- generate + dedicated read mux), which synthesized fine and passed simulation but was
-    -- physically unwritable on real hardware; folding these registers into the SAME regs_g/
-    -- R_ADDRS-driven path as every other (hardware-proven) register is the fix.
-    -- =============================================================================================
-    constant R_ADDRS_BASE : n_array_t(0 to BASE_REGS-1) := (
+    constant R_ADDRS_COMMON : n_array_t(0 to COMMON_REGS-1) := (
         R_CONTROL                       => 16#000#,
         R_STATUS                        => 16#004#,
-        R_SQTDBL                        => 16#008#,
-        R_SQHDBL                        => 16#00C#,
-        R_CQHDBL                        => 16#010#,
-        R_DBL_MASK                      => 16#014#,
-        R_SQTDBL_BADDR_L                => 16#018#,
-        R_SQTDBL_BADDR_H                => 16#01C#,
-        R_CQHDBL_BADDR_L                => 16#020#,
-        R_CQHDBL_BADDR_H                => 16#024#,
-        R_RDBUFF_BADDR_L                => 16#028#,
-        R_RDBUFF_BADDR_H                => 16#02C#,
-        R_RDBUFF_PRP_LIST_PTR_L         => 16#030#,
-        R_RDBUFF_PRP_LIST_PTR_H         => 16#034#,
-        R_WRBUFF_BADDR_L                => 16#038#,
-        R_WRBUFF_BADDR_H                => 16#03C#,
-        R_WRBUFF_PRP_LIST_PTR_L         => 16#040#,
-        R_WRBUFF_PRP_LIST_PTR_H         => 16#044#,
-        R_LAST_CQ_ENTRY_0               => 16#048#,
-        R_LAST_CQ_ENTRY_1               => 16#04C#,
-        R_LAST_CQ_ENTRY_2               => 16#050#,
-        R_LAST_CQ_ENTRY_3               => 16#054#,
-        R_SQE_DISP_CNTR_L               => 16#058#,
-        R_SQE_DISP_CNTR_H               => 16#05C#,
-        R_CQE_PROC_CNTR_L               => 16#060#,
-        R_CQE_PROC_CNTR_H               => 16#064#,
-        R_PCIE_RDS_CNTR_L               => 16#068#,
-        R_PCIE_RDS_CNTR_H               => 16#06C#,
-        R_PCIE_RD_BYTES_CNTR_L          => 16#070#,
-        R_PCIE_RD_BYTES_CNTR_H          => 16#074#,
-        R_PCIE_WRS_CNTR_L               => 16#078#,
-        R_PCIE_WRS_CNTR_H               => 16#07C#,
-        R_PCIE_WR_BYTES_CNTR_L          => 16#080#,
-        R_PCIE_WR_BYTES_CNTR_H          => 16#084#,
-        R_SQ_PCIE_RDS_CNTR_L            => 16#088#,
-        R_SQ_PCIE_RDS_CNTR_H            => 16#08C#,
-        R_SQ_PCIE_RD_BYTES_CNTR_L       => 16#090#,
-        R_SQ_PCIE_RD_BYTES_CNTR_H       => 16#094#,
-        R_LBA_NUM_MASK                  => 16#098#,
-        R_SUCC_COMPL_CNTR_L             => 16#09C#,
-        R_SUCC_COMPL_CNTR_H             => 16#0A0#,
-        R_UNSUCC_COMPL_CNTR_L           => 16#0A4#,
-        R_UNSUCC_COMPL_CNTR_H           => 16#0A8#,
-        R_CPL_ERR_MASK_L                => 16#0AC#,
-        R_CPL_ERR_MASK_H                => 16#0B0#,
-        R_RDBUFF_PCIE_RDS_CNTR_L        => 16#0B4#,
-        R_RDBUFF_PCIE_RDS_CNTR_H        => 16#0B8#,
-        R_RDBUFF_PCIE_RD_BYTES_CNTR_L   => 16#0BC#,
-        R_RDBUFF_PCIE_RD_BYTES_CNTR_H   => 16#0C0#,
-        R_WRBUFF_PCIE_WRS_CNTR_L        => 16#0C4#,
-        R_WRBUFF_PCIE_WRS_CNTR_H        => 16#0C8#,
-        R_WRBUFF_PCIE_WR_BYTES_CNTR_L   => 16#0CC#,
-        R_WRBUFF_PCIE_WR_BYTES_CNTR_H   => 16#0D0#,
-        R_LBA_SPACE_SIZE_L              => 16#0D4#,
-        R_LBA_SPACE_SIZE_H              => 16#0D8#,
-        R_CQ_PCIE_WRS_CNTR_L            => 16#0DC#,
-        R_CQ_PCIE_WRS_CNTR_H            => 16#0E0#,
-        R_CQ_PCIE_WR_BYTES_CNTR_L       => 16#0E4#,
-        R_CQ_PCIE_WR_BYTES_CNTR_H       => 16#0E8#,
-        R_CQHDBL_REG_UPDS_CNTR_L        => 16#0EC#,
-        R_CQHDBL_REG_UPDS_CNTR_H        => 16#0F0#,
-        R_CQHDBL_RPT_UPDS_CNTR_L        => 16#0F4#,
-        R_CQHDBL_RPT_UPDS_CNTR_H        => 16#0F8#,
-        R_SQTDBL_REG_UPDS_CNTR_L        => 16#0FC#,
-        R_SQTDBL_REG_UPDS_CNTR_H        => 16#100#,
-        R_SQTDBL_RPT_UPDS_CNTR_L        => 16#104#,
-        R_SQTDBL_RPT_UPDS_CNTR_H        => 16#108#,
-        R_META_PTR_L                    => 16#10C#,
-        R_META_PTR_H                    => 16#110#,
-        R_NVME_RD_BYTES_CNTR_L          => 16#114#,
-        R_NVME_RD_BYTES_CNTR_H          => 16#118#,
-        R_NVME_WR_BYTES_CNTR_L          => 16#11C#,
-        R_NVME_WR_BYTES_CNTR_H          => 16#120#,
-        R_WRBUFF_USR_RDS_CNTR_L         => 16#124#,
-        R_WRBUFF_USR_RDS_CNTR_H         => 16#128#,
-        R_WRBUFF_USR_RD_BYTES_CNTR_L    => 16#12C#,
-        R_WRBUFF_USR_RD_BYTES_CNTR_H    => 16#130#,
-        R_RDBUFF_DISP_RDS_CNTR_L        => 16#134#,
-        R_RDBUFF_DISP_RDS_CNTR_H        => 16#138#,
-        R_RDBUFF_DISP_RD_BYTES_CNTR_L   => 16#13C#,
-        R_RDBUFF_DISP_RD_BYTES_CNTR_H   => 16#140#,
-        R_SQ_DISP_RDS_CNTR_L            => 16#144#,
-        R_SQ_DISP_RDS_CNTR_H            => 16#148#,
-        R_SQ_DISP_RD_BYTES_CNTR_L       => 16#14C#,
-        R_SQ_DISP_RD_BYTES_CNTR_H       => 16#150#,
-        R_TAG_FIFO_STATUS               => 16#154#,
-        R_NVME_FLUSH_CMD_DISP_CNTR_L    => 16#158#,
-        R_NVME_FLUSH_CMD_DISP_CNTR_H    => 16#15C#
+        R_RDBUFF_BADDR_L                => 16#008#,
+        R_RDBUFF_BADDR_H                => 16#00C#,
+        R_RDBUFF_PRP_LIST_PTR_L         => 16#010#,
+        R_RDBUFF_PRP_LIST_PTR_H         => 16#014#,
+        R_WRBUFF_BADDR_L                => 16#018#,
+        R_WRBUFF_BADDR_H                => 16#01C#,
+        R_WRBUFF_PRP_LIST_PTR_L         => 16#020#,
+        R_WRBUFF_PRP_LIST_PTR_H         => 16#024#,
+        R_META_PTR_L                    => 16#028#,
+        R_META_PTR_H                    => 16#02C#,
+        R_LAST_CQ_ENTRY_0               => 16#030#,
+        R_LAST_CQ_ENTRY_1               => 16#034#,
+        R_LAST_CQ_ENTRY_2               => 16#038#,
+        R_LAST_CQ_ENTRY_3               => 16#03C#,
+        R_CPL_ERR_MASK_L                => 16#040#,
+        R_CPL_ERR_MASK_H                => 16#044#,
+        R_TAG_FIFO_STATUS               => 16#048#,
+        R_SQE_DISP_CNTR_L               => 16#04C#,
+        R_SQE_DISP_CNTR_H               => 16#050#,
+        R_CQE_PROC_CNTR_L               => 16#054#,
+        R_CQE_PROC_CNTR_H               => 16#058#,
+        R_PCIE_RDS_CNTR_L               => 16#05C#,
+        R_PCIE_RDS_CNTR_H               => 16#060#,
+        R_PCIE_RD_BYTES_CNTR_L          => 16#064#,
+        R_PCIE_RD_BYTES_CNTR_H          => 16#068#,
+        R_PCIE_WRS_CNTR_L               => 16#06C#,
+        R_PCIE_WRS_CNTR_H               => 16#070#,
+        R_PCIE_WR_BYTES_CNTR_L          => 16#074#,
+        R_PCIE_WR_BYTES_CNTR_H          => 16#078#,
+        R_SQ_PCIE_RDS_CNTR_L            => 16#07C#,
+        R_SQ_PCIE_RDS_CNTR_H            => 16#080#,
+        R_SQ_PCIE_RD_BYTES_CNTR_L       => 16#084#,
+        R_SQ_PCIE_RD_BYTES_CNTR_H       => 16#088#,
+        R_SUCC_COMPL_CNTR_L             => 16#08C#,
+        R_SUCC_COMPL_CNTR_H             => 16#090#,
+        R_UNSUCC_COMPL_CNTR_L           => 16#094#,
+        R_UNSUCC_COMPL_CNTR_H           => 16#098#,
+        R_RDBUFF_PCIE_RDS_CNTR_L        => 16#09C#,
+        R_RDBUFF_PCIE_RDS_CNTR_H        => 16#0A0#,
+        R_RDBUFF_PCIE_RD_BYTES_CNTR_L   => 16#0A4#,
+        R_RDBUFF_PCIE_RD_BYTES_CNTR_H   => 16#0A8#,
+        R_WRBUFF_PCIE_WRS_CNTR_L        => 16#0AC#,
+        R_WRBUFF_PCIE_WRS_CNTR_H        => 16#0B0#,
+        R_WRBUFF_PCIE_WR_BYTES_CNTR_L   => 16#0B4#,
+        R_WRBUFF_PCIE_WR_BYTES_CNTR_H   => 16#0B8#,
+        R_CQ_PCIE_WRS_CNTR_L            => 16#0BC#,
+        R_CQ_PCIE_WRS_CNTR_H            => 16#0C0#,
+        R_CQ_PCIE_WR_BYTES_CNTR_L       => 16#0C4#,
+        R_CQ_PCIE_WR_BYTES_CNTR_H       => 16#0C8#,
+        R_CQHDBL_REG_UPDS_CNTR_L        => 16#0CC#,
+        R_CQHDBL_REG_UPDS_CNTR_H        => 16#0D0#,
+        R_CQHDBL_RPT_UPDS_CNTR_L        => 16#0D4#,
+        R_CQHDBL_RPT_UPDS_CNTR_H        => 16#0D8#,
+        R_SQTDBL_REG_UPDS_CNTR_L        => 16#0DC#,
+        R_SQTDBL_REG_UPDS_CNTR_H        => 16#0E0#,
+        R_SQTDBL_RPT_UPDS_CNTR_L        => 16#0E4#,
+        R_SQTDBL_RPT_UPDS_CNTR_H        => 16#0E8#,
+        R_NVME_RD_BYTES_CNTR_L          => 16#0EC#,
+        R_NVME_RD_BYTES_CNTR_H          => 16#0F0#,
+        R_NVME_WR_BYTES_CNTR_L          => 16#0F4#,
+        R_NVME_WR_BYTES_CNTR_H          => 16#0F8#,
+        R_WRBUFF_USR_RDS_CNTR_L         => 16#0FC#,
+        R_WRBUFF_USR_RDS_CNTR_H         => 16#100#,
+        R_WRBUFF_USR_RD_BYTES_CNTR_L    => 16#104#,
+        R_WRBUFF_USR_RD_BYTES_CNTR_H    => 16#108#,
+        R_RDBUFF_DISP_RDS_CNTR_L        => 16#10C#,
+        R_RDBUFF_DISP_RDS_CNTR_H        => 16#110#,
+        R_RDBUFF_DISP_RD_BYTES_CNTR_L   => 16#114#,
+        R_RDBUFF_DISP_RD_BYTES_CNTR_H   => 16#118#,
+        R_SQ_DISP_RDS_CNTR_L            => 16#11C#,
+        R_SQ_DISP_RDS_CNTR_H            => 16#120#,
+        R_SQ_DISP_RD_BYTES_CNTR_L       => 16#124#,
+        R_SQ_DISP_RD_BYTES_CNTR_H       => 16#128#,
+        R_NVME_FLUSH_CMD_DISP_CNTR_L    => 16#12C#,
+        R_NVME_FLUSH_CMD_DISP_CNTR_H    => 16#130#
     );
 
-    -- Appends 4 MI byte-address entries per extra queue (q = 1..nq-1) to `base`, at
-    -- EXTRA_Q_BASE_ADDR + (q-1)*EXTRA_Q_STRIDE + {0x0, 0x4, 0x8, 0xC} -- the SAME byte offsets
-    -- the previous (hardware-broken) extra_q_baddr_wr_g implementation used, so fzc/software/the
-    -- cocotb EXTRA_Q_BASE_ADDR contract are all unchanged.
-    function build_r_addrs(base : n_array_t; nq : positive) return n_array_t is
-        variable arr : n_array_t(0 to base'length + (nq-1)*4 -1);
-    begin
-        arr(0 to base'length -1) := base;
-        for q in 1 to nq -1 loop
-            arr(base'length + (q-1)*4 + 0) := EXTRA_Q_BASE_ADDR + (q-1)*EXTRA_Q_STRIDE + 16#0#;
-            arr(base'length + (q-1)*4 + 1) := EXTRA_Q_BASE_ADDR + (q-1)*EXTRA_Q_STRIDE + 16#4#;
-            arr(base'length + (q-1)*4 + 2) := EXTRA_Q_BASE_ADDR + (q-1)*EXTRA_Q_STRIDE + 16#8#;
-            arr(base'length + (q-1)*4 + 3) := EXTRA_Q_BASE_ADDR + (q-1)*EXTRA_Q_STRIDE + 16#C#;
-        end loop;
-        return arr;
-    end function;
-
-    -- Appends (nq-1)*4 copies of `pad_val` to `base`. Used for WR_EN/REG_IS_CNTR/STROBE_EN
-    -- (uniformly TRUE/FALSE/FALSE across every extra-queue register) and REG_WIDTH (uniformly
-    -- 32) -- unlike R_ADDRS, the extra-queue entries in these arrays don't depend on q.
-    function extend_b_array(base : b_array_t; nq : positive; pad_val : boolean) return b_array_t is
-        variable arr : b_array_t(0 to base'length + (nq-1)*4 -1);
-    begin
-        arr(0 to base'length -1) := base;
-        for i in base'length to arr'high loop
-            arr(i) := pad_val;
-        end loop;
-        return arr;
-    end function;
-
-    function extend_n_array(base : n_array_t; nq : positive; pad_val : natural) return n_array_t is
-        variable arr : n_array_t(0 to base'length + (nq-1)*4 -1);
-    begin
-        arr(0 to base'length -1) := base;
-        for i in base'length to arr'high loop
-            arr(i) := pad_val;
-        end loop;
-        return arr;
-    end function;
-
-    constant R_ADDRS : n_array_t(0 to REGS-1) := build_r_addrs(R_ADDRS_BASE, NUM_QUEUES);
-
-    -- Write enable (set to False for read-only registers)
-    -- Must be set to True, when the coresponding index in STROBE_EN is True
-    constant WR_EN_BASE : b_array_t(0 to BASE_REGS-1) := (
+    constant WR_EN_COMMON : b_array_t(0 to COMMON_REGS-1) := (
         R_CONTROL                       => TRUE,
         R_STATUS                        => FALSE,
-        R_SQTDBL                        => FALSE,
-        R_SQHDBL                        => FALSE,
-        R_CQHDBL                        => FALSE,
-        R_DBL_MASK                      => TRUE,
-        R_SQTDBL_BADDR_L                => TRUE,
-        R_SQTDBL_BADDR_H                => TRUE,
-        R_CQHDBL_BADDR_L                => TRUE,
-        R_CQHDBL_BADDR_H                => TRUE,
         R_RDBUFF_BADDR_L                => TRUE,
         R_RDBUFF_BADDR_H                => TRUE,
         R_RDBUFF_PRP_LIST_PTR_L         => TRUE,
@@ -438,10 +347,15 @@ architecture FULL of NVME_SW_MANAGER is
         R_WRBUFF_BADDR_H                => TRUE,
         R_WRBUFF_PRP_LIST_PTR_L         => TRUE,
         R_WRBUFF_PRP_LIST_PTR_H         => TRUE,
+        R_META_PTR_L                    => TRUE,
+        R_META_PTR_H                    => TRUE,
         R_LAST_CQ_ENTRY_0               => FALSE,
         R_LAST_CQ_ENTRY_1               => FALSE,
         R_LAST_CQ_ENTRY_2               => FALSE,
         R_LAST_CQ_ENTRY_3               => FALSE,
+        R_CPL_ERR_MASK_L                => FALSE,
+        R_CPL_ERR_MASK_H                => FALSE,
+        R_TAG_FIFO_STATUS               => FALSE,
         R_SQE_DISP_CNTR_L               => FALSE,
         R_SQE_DISP_CNTR_H               => FALSE,
         R_CQE_PROC_CNTR_L               => FALSE,
@@ -458,13 +372,10 @@ architecture FULL of NVME_SW_MANAGER is
         R_SQ_PCIE_RDS_CNTR_H            => FALSE,
         R_SQ_PCIE_RD_BYTES_CNTR_L       => FALSE,
         R_SQ_PCIE_RD_BYTES_CNTR_H       => FALSE,
-        R_LBA_NUM_MASK                  => TRUE,
         R_SUCC_COMPL_CNTR_L             => FALSE,
         R_SUCC_COMPL_CNTR_H             => FALSE,
         R_UNSUCC_COMPL_CNTR_L           => FALSE,
         R_UNSUCC_COMPL_CNTR_H           => FALSE,
-        R_CPL_ERR_MASK_L                => FALSE,
-        R_CPL_ERR_MASK_H                => FALSE,
         R_RDBUFF_PCIE_RDS_CNTR_L        => FALSE,
         R_RDBUFF_PCIE_RDS_CNTR_H        => FALSE,
         R_RDBUFF_PCIE_RD_BYTES_CNTR_L   => FALSE,
@@ -473,8 +384,6 @@ architecture FULL of NVME_SW_MANAGER is
         R_WRBUFF_PCIE_WRS_CNTR_H        => FALSE,
         R_WRBUFF_PCIE_WR_BYTES_CNTR_L   => FALSE,
         R_WRBUFF_PCIE_WR_BYTES_CNTR_H   => FALSE,
-        R_LBA_SPACE_SIZE_L              => TRUE,
-        R_LBA_SPACE_SIZE_H              => TRUE,
         R_CQ_PCIE_WRS_CNTR_L            => FALSE,
         R_CQ_PCIE_WRS_CNTR_H            => FALSE,
         R_CQ_PCIE_WR_BYTES_CNTR_L       => FALSE,
@@ -487,8 +396,6 @@ architecture FULL of NVME_SW_MANAGER is
         R_SQTDBL_REG_UPDS_CNTR_H        => FALSE,
         R_SQTDBL_RPT_UPDS_CNTR_L        => FALSE,
         R_SQTDBL_RPT_UPDS_CNTR_H        => FALSE,
-        R_META_PTR_L                    => TRUE,
-        R_META_PTR_H                    => TRUE,
         R_NVME_RD_BYTES_CNTR_L          => FALSE,
         R_NVME_RD_BYTES_CNTR_H          => FALSE,
         R_NVME_WR_BYTES_CNTR_L          => FALSE,
@@ -505,24 +412,13 @@ architecture FULL of NVME_SW_MANAGER is
         R_SQ_DISP_RDS_CNTR_H            => FALSE,
         R_SQ_DISP_RD_BYTES_CNTR_L       => FALSE,
         R_SQ_DISP_RD_BYTES_CNTR_H       => FALSE,
-        R_TAG_FIFO_STATUS               => FALSE,
         R_NVME_FLUSH_CMD_DISP_CNTR_L    => FALSE,
         R_NVME_FLUSH_CMD_DISP_CNTR_H    => FALSE
     );
 
-    constant WR_EN : b_array_t(0 to REGS-1) := extend_b_array(WR_EN_BASE, NUM_QUEUES, TRUE);
-
-    constant STROBE_EN_BASE : b_array_t(0 to BASE_REGS-1) := (
+    constant STROBE_EN_COMMON : b_array_t(0 to COMMON_REGS-1) := (
         R_CONTROL                       => FALSE,
         R_STATUS                        => FALSE,
-        R_SQTDBL                        => FALSE,
-        R_SQHDBL                        => FALSE,
-        R_CQHDBL                        => FALSE,
-        R_DBL_MASK                      => FALSE,
-        R_SQTDBL_BADDR_L                => FALSE,
-        R_SQTDBL_BADDR_H                => FALSE,
-        R_CQHDBL_BADDR_L                => FALSE,
-        R_CQHDBL_BADDR_H                => FALSE,
         R_RDBUFF_BADDR_L                => FALSE,
         R_RDBUFF_BADDR_H                => FALSE,
         R_RDBUFF_PRP_LIST_PTR_L         => FALSE,
@@ -531,10 +427,15 @@ architecture FULL of NVME_SW_MANAGER is
         R_WRBUFF_BADDR_H                => FALSE,
         R_WRBUFF_PRP_LIST_PTR_L         => FALSE,
         R_WRBUFF_PRP_LIST_PTR_H         => FALSE,
+        R_META_PTR_L                    => FALSE,
+        R_META_PTR_H                    => FALSE,
         R_LAST_CQ_ENTRY_0               => TRUE,
         R_LAST_CQ_ENTRY_1               => TRUE,
         R_LAST_CQ_ENTRY_2               => TRUE,
         R_LAST_CQ_ENTRY_3               => TRUE,
+        R_CPL_ERR_MASK_L                => FALSE,
+        R_CPL_ERR_MASK_H                => FALSE,
+        R_TAG_FIFO_STATUS               => FALSE,
         R_SQE_DISP_CNTR_L               => TRUE,
         R_SQE_DISP_CNTR_H               => TRUE,
         R_CQE_PROC_CNTR_L               => TRUE,
@@ -551,13 +452,10 @@ architecture FULL of NVME_SW_MANAGER is
         R_SQ_PCIE_RDS_CNTR_H            => TRUE,
         R_SQ_PCIE_RD_BYTES_CNTR_L       => TRUE,
         R_SQ_PCIE_RD_BYTES_CNTR_H       => TRUE,
-        R_LBA_NUM_MASK                  => FALSE,
         R_SUCC_COMPL_CNTR_L             => TRUE,
         R_SUCC_COMPL_CNTR_H             => TRUE,
         R_UNSUCC_COMPL_CNTR_L           => TRUE,
         R_UNSUCC_COMPL_CNTR_H           => TRUE,
-        R_CPL_ERR_MASK_L                => FALSE,
-        R_CPL_ERR_MASK_H                => FALSE,
         R_RDBUFF_PCIE_RDS_CNTR_L        => TRUE,
         R_RDBUFF_PCIE_RDS_CNTR_H        => TRUE,
         R_RDBUFF_PCIE_RD_BYTES_CNTR_L   => TRUE,
@@ -566,8 +464,6 @@ architecture FULL of NVME_SW_MANAGER is
         R_WRBUFF_PCIE_WRS_CNTR_H        => TRUE,
         R_WRBUFF_PCIE_WR_BYTES_CNTR_L   => TRUE,
         R_WRBUFF_PCIE_WR_BYTES_CNTR_H   => TRUE,
-        R_LBA_SPACE_SIZE_L              => FALSE,
-        R_LBA_SPACE_SIZE_H              => FALSE,
         R_CQ_PCIE_WRS_CNTR_L            => TRUE,
         R_CQ_PCIE_WRS_CNTR_H            => TRUE,
         R_CQ_PCIE_WR_BYTES_CNTR_L       => TRUE,
@@ -580,8 +476,6 @@ architecture FULL of NVME_SW_MANAGER is
         R_SQTDBL_REG_UPDS_CNTR_H        => TRUE,
         R_SQTDBL_RPT_UPDS_CNTR_L        => TRUE,
         R_SQTDBL_RPT_UPDS_CNTR_H        => TRUE,
-        R_META_PTR_L                    => FALSE,
-        R_META_PTR_H                    => FALSE,
         R_NVME_RD_BYTES_CNTR_L          => TRUE,
         R_NVME_RD_BYTES_CNTR_H          => TRUE,
         R_NVME_WR_BYTES_CNTR_L          => TRUE,
@@ -598,24 +492,13 @@ architecture FULL of NVME_SW_MANAGER is
         R_SQ_DISP_RDS_CNTR_H            => TRUE,
         R_SQ_DISP_RD_BYTES_CNTR_L       => TRUE,
         R_SQ_DISP_RD_BYTES_CNTR_H       => TRUE,
-        R_TAG_FIFO_STATUS               => FALSE,
         R_NVME_FLUSH_CMD_DISP_CNTR_L    => TRUE,
         R_NVME_FLUSH_CMD_DISP_CNTR_H    => TRUE
     );
 
-    constant STROBE_EN : b_array_t(0 to REGS-1) := extend_b_array(STROBE_EN_BASE, NUM_QUEUES, FALSE);
-
-    constant REG_IS_CNTR_BASE : b_array_t(0 to BASE_REGS-1) := (
+    constant REG_IS_CNTR_COMMON : b_array_t(0 to COMMON_REGS-1) := (
         R_CONTROL                       => FALSE,
         R_STATUS                        => FALSE,
-        R_SQTDBL                        => FALSE,
-        R_SQHDBL                        => FALSE,
-        R_CQHDBL                        => FALSE,
-        R_DBL_MASK                      => FALSE,
-        R_SQTDBL_BADDR_L                => FALSE,
-        R_SQTDBL_BADDR_H                => FALSE,
-        R_CQHDBL_BADDR_L                => FALSE,
-        R_CQHDBL_BADDR_H                => FALSE,
         R_RDBUFF_BADDR_L                => FALSE,
         R_RDBUFF_BADDR_H                => FALSE,
         R_RDBUFF_PRP_LIST_PTR_L         => FALSE,
@@ -624,10 +507,15 @@ architecture FULL of NVME_SW_MANAGER is
         R_WRBUFF_BADDR_H                => FALSE,
         R_WRBUFF_PRP_LIST_PTR_L         => FALSE,
         R_WRBUFF_PRP_LIST_PTR_H         => FALSE,
+        R_META_PTR_L                    => FALSE,
+        R_META_PTR_H                    => FALSE,
         R_LAST_CQ_ENTRY_0               => FALSE,
         R_LAST_CQ_ENTRY_1               => FALSE,
         R_LAST_CQ_ENTRY_2               => FALSE,
         R_LAST_CQ_ENTRY_3               => FALSE,
+        R_CPL_ERR_MASK_L                => FALSE,
+        R_CPL_ERR_MASK_H                => FALSE,
+        R_TAG_FIFO_STATUS               => FALSE,
         R_SQE_DISP_CNTR_L               => TRUE,
         R_SQE_DISP_CNTR_H               => FALSE,
         R_CQE_PROC_CNTR_L               => TRUE,
@@ -644,13 +532,10 @@ architecture FULL of NVME_SW_MANAGER is
         R_SQ_PCIE_RDS_CNTR_H            => FALSE,
         R_SQ_PCIE_RD_BYTES_CNTR_L       => TRUE,
         R_SQ_PCIE_RD_BYTES_CNTR_H       => FALSE,
-        R_LBA_NUM_MASK                  => FALSE,
         R_SUCC_COMPL_CNTR_L             => TRUE,
         R_SUCC_COMPL_CNTR_H             => FALSE,
         R_UNSUCC_COMPL_CNTR_L           => TRUE,
         R_UNSUCC_COMPL_CNTR_H           => FALSE,
-        R_CPL_ERR_MASK_L                => FALSE,
-        R_CPL_ERR_MASK_H                => FALSE,
         R_RDBUFF_PCIE_RDS_CNTR_L        => TRUE,
         R_RDBUFF_PCIE_RDS_CNTR_H        => FALSE,
         R_RDBUFF_PCIE_RD_BYTES_CNTR_L   => TRUE,
@@ -659,8 +544,6 @@ architecture FULL of NVME_SW_MANAGER is
         R_WRBUFF_PCIE_WRS_CNTR_H        => FALSE,
         R_WRBUFF_PCIE_WR_BYTES_CNTR_L   => TRUE,
         R_WRBUFF_PCIE_WR_BYTES_CNTR_H   => FALSE,
-        R_LBA_SPACE_SIZE_L              => FALSE,
-        R_LBA_SPACE_SIZE_H              => FALSE,
         R_CQ_PCIE_WRS_CNTR_L            => TRUE,
         R_CQ_PCIE_WRS_CNTR_H            => FALSE,
         R_CQ_PCIE_WR_BYTES_CNTR_L       => TRUE,
@@ -673,8 +556,6 @@ architecture FULL of NVME_SW_MANAGER is
         R_SQTDBL_REG_UPDS_CNTR_H        => FALSE,
         R_SQTDBL_RPT_UPDS_CNTR_L        => TRUE,
         R_SQTDBL_RPT_UPDS_CNTR_H        => FALSE,
-        R_META_PTR_L                    => FALSE,
-        R_META_PTR_H                    => FALSE,
         R_NVME_RD_BYTES_CNTR_L          => TRUE,
         R_NVME_RD_BYTES_CNTR_H          => FALSE,
         R_NVME_WR_BYTES_CNTR_L          => TRUE,
@@ -691,24 +572,13 @@ architecture FULL of NVME_SW_MANAGER is
         R_SQ_DISP_RDS_CNTR_H            => FALSE,
         R_SQ_DISP_RD_BYTES_CNTR_L       => TRUE,
         R_SQ_DISP_RD_BYTES_CNTR_H       => FALSE,
-        R_TAG_FIFO_STATUS               => FALSE,
         R_NVME_FLUSH_CMD_DISP_CNTR_L    => TRUE,
         R_NVME_FLUSH_CMD_DISP_CNTR_H    => FALSE
     );
 
-    constant REG_IS_CNTR : b_array_t(0 to REGS-1) := extend_b_array(REG_IS_CNTR_BASE, NUM_QUEUES, FALSE);
-
-    constant REG_WIDTH_BASE : n_array_t(0 to BASE_REGS-1) := (
+    constant REG_WIDTH_COMMON : n_array_t(0 to COMMON_REGS-1) := (
         R_CONTROL                       => 6,
         R_STATUS                        => 3,
-        R_SQTDBL                        => 16,
-        R_SQHDBL                        => 16,
-        R_CQHDBL                        => 16,
-        R_DBL_MASK                      => 16,
-        R_SQTDBL_BADDR_L                => 32,
-        R_SQTDBL_BADDR_H                => 32,
-        R_CQHDBL_BADDR_L                => 32,
-        R_CQHDBL_BADDR_H                => 32,
         R_RDBUFF_BADDR_L                => 32,
         R_RDBUFF_BADDR_H                => 32,
         R_RDBUFF_PRP_LIST_PTR_L         => 32,
@@ -717,10 +587,15 @@ architecture FULL of NVME_SW_MANAGER is
         R_WRBUFF_BADDR_H                => 32,
         R_WRBUFF_PRP_LIST_PTR_L         => 32,
         R_WRBUFF_PRP_LIST_PTR_H         => 32,
+        R_META_PTR_L                    => 32,
+        R_META_PTR_H                    => 32,
         R_LAST_CQ_ENTRY_0               => 32,
         R_LAST_CQ_ENTRY_1               => 32,
         R_LAST_CQ_ENTRY_2               => 32,
         R_LAST_CQ_ENTRY_3               => 32,
+        R_CPL_ERR_MASK_L                => 32,
+        R_CPL_ERR_MASK_H                => 32,
+        R_TAG_FIFO_STATUS               => 12,
         R_SQE_DISP_CNTR_L               => 32,
         R_SQE_DISP_CNTR_H               => 32,
         R_CQE_PROC_CNTR_L               => 32,
@@ -737,13 +612,10 @@ architecture FULL of NVME_SW_MANAGER is
         R_SQ_PCIE_RDS_CNTR_H            => 32,
         R_SQ_PCIE_RD_BYTES_CNTR_L       => 32,
         R_SQ_PCIE_RD_BYTES_CNTR_H       => 32,
-        R_LBA_NUM_MASK                  => 16,
         R_SUCC_COMPL_CNTR_L             => 32,
         R_SUCC_COMPL_CNTR_H             => 32,
         R_UNSUCC_COMPL_CNTR_L           => 32,
         R_UNSUCC_COMPL_CNTR_H           => 32,
-        R_CPL_ERR_MASK_L                => 32,
-        R_CPL_ERR_MASK_H                => 32,
         R_RDBUFF_PCIE_RDS_CNTR_L        => 32,
         R_RDBUFF_PCIE_RDS_CNTR_H        => 32,
         R_RDBUFF_PCIE_RD_BYTES_CNTR_L   => 32,
@@ -752,8 +624,6 @@ architecture FULL of NVME_SW_MANAGER is
         R_WRBUFF_PCIE_WRS_CNTR_H        => 32,
         R_WRBUFF_PCIE_WR_BYTES_CNTR_L   => 32,
         R_WRBUFF_PCIE_WR_BYTES_CNTR_H   => 32,
-        R_LBA_SPACE_SIZE_L              => 32,
-        R_LBA_SPACE_SIZE_H              => 32,
         R_CQ_PCIE_WRS_CNTR_L            => 32,
         R_CQ_PCIE_WRS_CNTR_H            => 32,
         R_CQ_PCIE_WR_BYTES_CNTR_L       => 32,
@@ -766,8 +636,6 @@ architecture FULL of NVME_SW_MANAGER is
         R_SQTDBL_REG_UPDS_CNTR_H        => 32,
         R_SQTDBL_RPT_UPDS_CNTR_L        => 32,
         R_SQTDBL_RPT_UPDS_CNTR_H        => 32,
-        R_META_PTR_L                    => 32,
-        R_META_PTR_H                    => 32,
         R_NVME_RD_BYTES_CNTR_L          => 32,
         R_NVME_RD_BYTES_CNTR_H          => 32,
         R_NVME_WR_BYTES_CNTR_L          => 32,
@@ -784,20 +652,147 @@ architecture FULL of NVME_SW_MANAGER is
         R_SQ_DISP_RDS_CNTR_H            => 32,
         R_SQ_DISP_RD_BYTES_CNTR_L       => 32,
         R_SQ_DISP_RD_BYTES_CNTR_H       => 32,
-        R_TAG_FIFO_STATUS               => 12,
         R_NVME_FLUSH_CMD_DISP_CNTR_L    => 32,
         R_NVME_FLUSH_CMD_DISP_CNTR_H    => 32
     );
 
-    constant REG_WIDTH : n_array_t(0 to REGS-1) := extend_n_array(REG_WIDTH_BASE, NUM_QUEUES, 32);
+    -- =============================================================================================
+    -- PER-QUEUE 2D register block: base PER_Q_BASE, one PER_Q_STRIDE-byte slot per queue
+    -- q = 0..NUM_QUEUES-1 (queue 0 is just q=0 of this block -- no special-casing, unlike the
+    -- prior "legacy scalar registers for queue 0 + appended EXTRA_Q block for queues 1+" scheme,
+    -- which passed simulation but was physically unwritable for q>0 on real hardware). Each slot
+    -- holds PQ_REGS registers, at PQ_OFFSETS(i) relative to PER_Q_BASE + q*PER_Q_STRIDE.
+    -- =============================================================================================
+    constant PER_Q_BASE   : natural := 16#200#;
+    constant PER_Q_STRIDE : natural := 16#040#;
+
+    constant PQ_SQTDBL           : natural := 0;
+    constant PQ_SQHDBL           : natural := 1;
+    constant PQ_CQHDBL           : natural := 2;
+    constant PQ_DBL_MASK         : natural := 3;
+    constant PQ_SQTDBL_BADDR_L   : natural := 4;
+    constant PQ_SQTDBL_BADDR_H   : natural := 5;
+    constant PQ_CQHDBL_BADDR_L   : natural := 6;
+    constant PQ_CQHDBL_BADDR_H   : natural := 7;
+    constant PQ_LBA_SPACE_SIZE_L : natural := 8;
+    constant PQ_LBA_SPACE_SIZE_H : natural := 9;
+    constant PQ_NAMESPACE_ID     : natural := 10;
+    constant PQ_LBA_NUM_MASK     : natural := 11;
+    constant PQ_REGS             : natural := 12;
+
+    constant PQ_OFFSETS : n_array_t(0 to PQ_REGS-1) := (
+        PQ_SQTDBL           => 16#00#,
+        PQ_SQHDBL           => 16#04#,
+        PQ_CQHDBL           => 16#08#,
+        PQ_DBL_MASK         => 16#0C#,
+        PQ_SQTDBL_BADDR_L   => 16#10#,
+        PQ_SQTDBL_BADDR_H   => 16#14#,
+        PQ_CQHDBL_BADDR_L   => 16#18#,
+        PQ_CQHDBL_BADDR_H   => 16#1C#,
+        PQ_LBA_SPACE_SIZE_L => 16#20#,
+        PQ_LBA_SPACE_SIZE_H => 16#24#,
+        PQ_NAMESPACE_ID     => 16#28#,
+        PQ_LBA_NUM_MASK     => 16#2C#
+    );
+
+    -- Doorbell VALUE registers (SQTDBL/SQHDBL/CQHDBL) are read-only observation mirrors, driven
+    -- from sqtdbl_reg_arr/sqhdbl_reg_arr/cqhdbl_reg_arr (see pq_readback_g below); everything else
+    -- in a queue's slot is host-writable configuration. NAMESPACE_ID is now a real writable
+    -- register (previously hardcoded to x"00000001") -- software must program it after reset.
+    constant PQ_WR_EN : b_array_t(0 to PQ_REGS-1) := (
+        PQ_SQTDBL           => FALSE,
+        PQ_SQHDBL           => FALSE,
+        PQ_CQHDBL           => FALSE,
+        PQ_DBL_MASK         => TRUE,
+        PQ_SQTDBL_BADDR_L   => TRUE,
+        PQ_SQTDBL_BADDR_H   => TRUE,
+        PQ_CQHDBL_BADDR_L   => TRUE,
+        PQ_CQHDBL_BADDR_H   => TRUE,
+        PQ_LBA_SPACE_SIZE_L => TRUE,
+        PQ_LBA_SPACE_SIZE_H => TRUE,
+        PQ_NAMESPACE_ID     => TRUE,
+        PQ_LBA_NUM_MASK     => TRUE
+    );
+
+    -- None of the per-queue registers are sampled (STROBE_EN) or STAT_CNTR-backed (REG_IS_CNTR).
+    constant PQ_STROBE_EN   : b_array_t(0 to PQ_REGS-1) := (others => FALSE);
+    constant PQ_REG_IS_CNTR : b_array_t(0 to PQ_REGS-1) := (others => FALSE);
+
+    constant PQ_REG_WIDTH : n_array_t(0 to PQ_REGS-1) := (
+        PQ_SQTDBL           => 16,
+        PQ_SQHDBL           => 16,
+        PQ_CQHDBL           => 16,
+        PQ_DBL_MASK         => 16,
+        PQ_SQTDBL_BADDR_L   => 32,
+        PQ_SQTDBL_BADDR_H   => 32,
+        PQ_CQHDBL_BADDR_L   => 32,
+        PQ_CQHDBL_BADDR_H   => 32,
+        PQ_LBA_SPACE_SIZE_L => 32,
+        PQ_LBA_SPACE_SIZE_H => 32,
+        PQ_NAMESPACE_ID     => 32,
+        PQ_LBA_NUM_MASK     => 16
+    );
+
+    -- Total register count: the COMMON block, plus one PQ_REGS-sized slot per queue.
+    constant REGS : natural := COMMON_REGS + NUM_QUEUES*PQ_REGS;
+
+    -- Index into regs_arr/R_ADDRS/etc of per-queue register pq_reg for queue q.
+    function pq_reg_idx(q : natural; pq_reg : natural) return natural is
+    begin
+        return COMMON_REGS + q*PQ_REGS + pq_reg;
+    end function;
+
+    -- Appends, for each queue q = 0..nq-1, one copy of pq_offsets (relative slot offsets),
+    -- rebased to pq_base + q*pq_stride, after the COMMON addresses.
+    function build_r_addrs(common_addrs : n_array_t; nq : positive; pq_base : natural; pq_stride : natural; pq_offsets : n_array_t) return n_array_t is
+        variable arr : n_array_t(0 to common_addrs'length + nq*pq_offsets'length -1);
+    begin
+        arr(0 to common_addrs'length -1) := common_addrs;
+        for q in 0 to nq -1 loop
+            for i in 0 to pq_offsets'length -1 loop
+                arr(common_addrs'length + q*pq_offsets'length + i) := pq_base + q*pq_stride + pq_offsets(i);
+            end loop;
+        end loop;
+        return arr;
+    end function;
+
+    -- Appends nq copies of pq_pattern (one per queue's slot) after common_arr.
+    function extend_b_array(common_arr : b_array_t; nq : positive; pq_pattern : b_array_t) return b_array_t is
+        variable arr : b_array_t(0 to common_arr'length + nq*pq_pattern'length -1);
+    begin
+        arr(0 to common_arr'length -1) := common_arr;
+        for q in 0 to nq -1 loop
+            arr(common_arr'length + q*pq_pattern'length to common_arr'length + (q+1)*pq_pattern'length -1) := pq_pattern;
+        end loop;
+        return arr;
+    end function;
+
+    function extend_n_array(common_arr : n_array_t; nq : positive; pq_pattern : n_array_t) return n_array_t is
+        variable arr : n_array_t(0 to common_arr'length + nq*pq_pattern'length -1);
+    begin
+        arr(0 to common_arr'length -1) := common_arr;
+        for q in 0 to nq -1 loop
+            arr(common_arr'length + q*pq_pattern'length to common_arr'length + (q+1)*pq_pattern'length -1) := pq_pattern;
+        end loop;
+        return arr;
+    end function;
+
+    constant R_ADDRS     : n_array_t(0 to REGS-1) := build_r_addrs(R_ADDRS_COMMON, NUM_QUEUES, PER_Q_BASE, PER_Q_STRIDE, PQ_OFFSETS);
+    constant WR_EN       : b_array_t(0 to REGS-1) := extend_b_array(WR_EN_COMMON, NUM_QUEUES, PQ_WR_EN);
+    constant STROBE_EN   : b_array_t(0 to REGS-1) := extend_b_array(STROBE_EN_COMMON, NUM_QUEUES, PQ_STROBE_EN);
+    constant REG_IS_CNTR : b_array_t(0 to REGS-1) := extend_b_array(REG_IS_CNTR_COMMON, NUM_QUEUES, PQ_REG_IS_CNTR);
+    constant REG_WIDTH   : n_array_t(0 to REGS-1) := extend_n_array(REG_WIDTH_COMMON, NUM_QUEUES, PQ_REG_WIDTH);
 
     -- =============================================================================================
     -- Input registers
     -- =============================================================================================
-    signal sqtdbl_reg                  : std_logic_vector(15 downto 0);
-    signal sqhdbl_reg                  : std_logic_vector(15 downto 0);
-    signal cqhdbl_reg                  : std_logic_vector(15 downto 0);
-    -- Input register that gets updated only when STATUS_UPD_VLD is set
+    -- Per-queue doorbell VALUE observation registers -- see SQTDBL_QID/CQHDBL_QID above and
+    -- pq_readback_g below.
+    signal sqtdbl_reg_arr : slv_array_t(NUM_QUEUES -1 downto 0)(15 downto 0);
+    signal sqhdbl_reg_arr : slv_array_t(NUM_QUEUES -1 downto 0)(15 downto 0);
+    signal cqhdbl_reg_arr : slv_array_t(NUM_QUEUES -1 downto 0)(15 downto 0);
+    -- COMMON: a single system-wide "last completion" snapshot (whichever queue's CQE was
+    -- processed most recently), used only to feed the aggregate CQE_ERROR_TRACKER below.
     signal last_cq_entry_inp_reg     : std_logic_vector(CQ_ENTRY_RANGE);
 
     -- =============================================================================================
@@ -845,9 +840,11 @@ architecture FULL of NVME_SW_MANAGER is
     signal unsucc_compl_cntr_incr    : std_logic;
     -- The error mask of the previously captured errors with regards to the completion status
     signal cpl_err_mask              : std_logic_vector(ERR_MASK_W -1 downto 0);
-    -- The next value of the SQTDBL pointer (the value has to anticipate the possible doorbell
-    -- pointer rollover and is therefore masked)
-    signal sqtdbl_next_val           : std_logic_vector(15 downto 0);
+    -- Per-queue next value of the SQTDBL pointer (anticipates the possible doorbell pointer
+    -- rollover and is therefore masked); OR-reduced into the single COMMON sq_write_blocking
+    -- perf-counter input below -- not yet made per-queue.
+    signal sqtdbl_next_val_arr       : slv_array_t(NUM_QUEUES -1 downto 0)(15 downto 0);
+    signal sq_write_blocking_arr     : std_logic_vector(NUM_QUEUES -1 downto 0);
 
     -- =============================================================================================
     -- Data Logger related signals
@@ -869,9 +866,11 @@ architecture FULL of NVME_SW_MANAGER is
     signal sqiops_evctr_total_cycles : std_logic_vector(log2(EVCR_MAX_INTERVAL_CYCLES+1) -1 downto 0);
     signal sqiops_evctr_update       : std_logic;
 
-    -- Per-queue doorbell base-address registers (see EXTRA_Q_BASE_ADDR/EXTRA_Q_STRIDE above).
-    -- Index 0 is driven from the legacy R_SQTDBL_BADDR_*/R_CQHDBL_BADDR_* registers; indices
-    -- 1..NUM_QUEUES-1 are driven by extra_q_baddr_g below (regs_arr-backed, see there).
+    -- Per-queue configuration/doorbell-address output arrays -- see pq_output_g below.
+    signal dbl_mask_arr         : slv_array_t(NUM_QUEUES -1 downto 0)(15 downto 0);
+    signal namespace_id_arr     : slv_array_t(NUM_QUEUES -1 downto 0)(31 downto 0);
+    signal lba_num_mask_arr     : slv_array_t(NUM_QUEUES -1 downto 0)(15 downto 0);
+    signal lba_space_size_arr   : slv_array_t(NUM_QUEUES -1 downto 0)(63 downto 0);
     signal sqtdbl_base_addr_arr : slv_array_t(NUM_QUEUES -1 downto 0)(63 downto 0);
     signal cqhdbl_base_addr_arr : slv_array_t(NUM_QUEUES -1 downto 0)(63 downto 0);
 
@@ -903,13 +902,20 @@ begin
         to_string(MRRS) & ")"
         severity FAILURE;
 
-    -- The status information gets sampled only when the status update is actually done
+    assert (PER_Q_BASE + NUM_QUEUES*PER_Q_STRIDE <= 2**ADDR_LENGTH)
+        report "NVME_SW_MANAGER: PER_Q_BASE + NUM_QUEUES*PER_Q_STRIDE exceeds the ADDR_LENGTH-bit MI register address space"
+        severity FAILURE;
+
+    -- The status information gets sampled only when the status update is actually done. Single
+    -- process, dynamically indexed by CQHDBL_QID -- a single, unambiguous driver of the whole
+    -- sqhdbl_reg_arr/cqhdbl_reg_arr arrays (see the note near dbl_reg_wr_g in dbl_updater.vhd for
+    -- why this must stay one process, not several).
     inp_reg_p : process (CLK) is
     begin
         if (rising_edge(CLK)) then
             if (RST = '1' or dlogger_sw_rst = '1' or CQP_START_REQ_VLD = '1') then
-                sqhdbl_reg             <= (others => '0');
-                cqhdbl_reg             <= (others => '0');
+                sqhdbl_reg_arr         <= (others => (others => '0'));
+                cqhdbl_reg_arr         <= (others => (others => '0'));
                 last_cq_entry_inp_reg  <= (others => '0');
                 succ_compl_cntr_incr   <= '0';
                 unsucc_compl_cntr_incr <= '0';
@@ -918,8 +924,8 @@ begin
                 unsucc_compl_cntr_incr <= '0';
 
                 if (STATUS_UPD_VLD = '1') then
-                    sqhdbl_reg            <= SQHDBL_DATA;
-                    cqhdbl_reg            <= CQHDBL_DATA;
+                    sqhdbl_reg_arr(to_integer(unsigned(CQHDBL_QID))) <= SQHDBL_DATA;
+                    cqhdbl_reg_arr(to_integer(unsigned(CQHDBL_QID))) <= CQHDBL_DATA;
                     last_cq_entry_inp_reg <= LAST_CQ_ENTRY;
 
                     if (LAST_CQ_ENTRY(CQ_ENTRY_SC_TYPE) = SCT_GENERIC_CMD and LAST_CQ_ENTRY(CQ_ENTRY_STAT_CODE) = SC_SUCCESS) then
@@ -932,13 +938,15 @@ begin
         end if;
     end process;
 
+    -- Single process, dynamically indexed by SQTDBL_QID -- same single-driver rule as inp_reg_p
+    -- above.
     sqtdbl_reg_p: process (CLK) is
     begin
         if (rising_edge(CLK)) then
             if (RST = '1' or dlogger_sw_rst = '1' or CQP_START_REQ_VLD = '1') then
-                sqtdbl_reg <= (others => '0');
+                sqtdbl_reg_arr <= (others => (others => '0'));
             elsif (SQES_DISP_INCR = '1') then
-                sqtdbl_reg <= SQTDBL_DATA;
+                sqtdbl_reg_arr(to_integer(unsigned(SQTDBL_QID))) <= SQTDBL_DATA;
             end if;
         end if;
     end process;
@@ -1055,12 +1063,19 @@ begin
         STAT_TAG_INIT_DONE     => TAG_INIT_DONE,
         others => '0');
 
-    regs_arr(R_SQTDBL)(REG_WIDTH(R_SQTDBL) -1 downto 0) <= sqtdbl_reg;
-    regs_arr(R_SQHDBL)(REG_WIDTH(R_SQHDBL) -1 downto 0) <= sqhdbl_reg;
-    regs_arr(R_CQHDBL)(REG_WIDTH(R_CQHDBL) -1 downto 0) <= cqhdbl_reg;
-
     (regs_arr(R_CPL_ERR_MASK_H), regs_arr(R_CPL_ERR_MASK_L))              <= cpl_err_mask;
-    regs_arr(R_TAG_FIFO_STATUS)(REG_WIDTH(R_TAG_FIFO_STATUS) -1 downto 0) <= tag_fifo_status;
+    regs_arr(R_TAG_FIFO_STATUS)(REG_WIDTH(R_TAG_FIFO_STATUS) -1 downto 0) <= TAG_FIFO_STATUS;
+
+    -- Per-queue doorbell VALUE observation registers (q is a generate-time constant, so each
+    -- instance's regs_arr(pq_reg_idx(q,...)) target is a static name -- a single, unambiguous
+    -- driver per element, alongside regs_g's write processes for the OTHER registers in the same
+    -- queue's slot, since PQ_WR_EN is FALSE for these three -- see the note near dbl_reg_wr_g in
+    -- dbl_updater.vhd for the general rule this follows).
+    pq_readback_g : for q in 0 to NUM_QUEUES -1 generate
+        regs_arr(pq_reg_idx(q, PQ_SQTDBL))(PQ_REG_WIDTH(PQ_SQTDBL) -1 downto 0) <= sqtdbl_reg_arr(q);
+        regs_arr(pq_reg_idx(q, PQ_SQHDBL))(PQ_REG_WIDTH(PQ_SQHDBL) -1 downto 0) <= sqhdbl_reg_arr(q);
+        regs_arr(pq_reg_idx(q, PQ_CQHDBL))(PQ_REG_WIDTH(PQ_CQHDBL) -1 downto 0) <= cqhdbl_reg_arr(q);
+    end generate;
 
     -- =============================================================================================
     -- Connecting counter increment inputs to system inputs
@@ -1174,38 +1189,26 @@ begin
     RDBUFF_PRP_LIST_PTR  <= regs_arr(R_RDBUFF_PRP_LIST_PTR_H) & regs_arr(R_RDBUFF_PRP_LIST_PTR_L);
     WRBUFF_BADDR         <= regs_arr(R_WRBUFF_BADDR_H) & regs_arr(R_WRBUFF_BADDR_L);
     WRBUFF_PRP_LIST_PTR  <= regs_arr(R_WRBUFF_PRP_LIST_PTR_H) & regs_arr(R_WRBUFF_PRP_LIST_PTR_L);
+    METADATA_PTR         <= regs_arr(R_META_PTR_H) & regs_arr(R_META_PTR_L);
 
-    DBL_MASK         <= regs_arr(R_DBL_MASK)(REG_WIDTH(R_DBL_MASK)-1 downto 0);
-    NAMESPACE_ID     <= x"00000001";
-    METADATA_PTR     <= regs_arr(R_META_PTR_H) & regs_arr(R_META_PTR_L);
-    LBA_SPACE_SIZE   <= regs_arr(R_LBA_SPACE_SIZE_H) & regs_arr(R_LBA_SPACE_SIZE_L);
-    LBA_NUM_MASK     <= regs_arr(R_LBA_NUM_MASK)(REG_WIDTH(R_LBA_NUM_MASK)-1 downto 0);
+    -- Per-queue outputs, driven from queue q's slot of the PER_Q_BASE 2D block (q is a
+    -- generate-time constant, so each target is a static name -- a single, unambiguous driver per
+    -- element).
+    pq_output_g : for q in 0 to NUM_QUEUES -1 generate
+        dbl_mask_arr(q)         <= regs_arr(pq_reg_idx(q, PQ_DBL_MASK))(PQ_REG_WIDTH(PQ_DBL_MASK) -1 downto 0);
+        namespace_id_arr(q)     <= regs_arr(pq_reg_idx(q, PQ_NAMESPACE_ID))(PQ_REG_WIDTH(PQ_NAMESPACE_ID) -1 downto 0);
+        lba_num_mask_arr(q)     <= regs_arr(pq_reg_idx(q, PQ_LBA_NUM_MASK))(PQ_REG_WIDTH(PQ_LBA_NUM_MASK) -1 downto 0);
+        lba_space_size_arr(q)   <= regs_arr(pq_reg_idx(q, PQ_LBA_SPACE_SIZE_H)) & regs_arr(pq_reg_idx(q, PQ_LBA_SPACE_SIZE_L));
+        sqtdbl_base_addr_arr(q) <= regs_arr(pq_reg_idx(q, PQ_SQTDBL_BADDR_H)) & regs_arr(pq_reg_idx(q, PQ_SQTDBL_BADDR_L));
+        cqhdbl_base_addr_arr(q) <= regs_arr(pq_reg_idx(q, PQ_CQHDBL_BADDR_H)) & regs_arr(pq_reg_idx(q, PQ_CQHDBL_BADDR_L));
+    end generate;
 
-    -- Queue 0's doorbell base addresses come from the legacy registers, unchanged.
-    sqtdbl_base_addr_arr(0) <= regs_arr(R_SQTDBL_BADDR_H) & regs_arr(R_SQTDBL_BADDR_L);
-    cqhdbl_base_addr_arr(0) <= regs_arr(R_CQHDBL_BADDR_H) & regs_arr(R_CQHDBL_BADDR_L);
-
+    DBL_MASK         <= dbl_mask_arr;
+    NAMESPACE_ID     <= namespace_id_arr;
+    LBA_NUM_MASK     <= lba_num_mask_arr;
+    LBA_SPACE_SIZE   <= lba_space_size_arr;
     SQTDBL_BASE_ADDR <= sqtdbl_base_addr_arr;
     CQHDBL_BASE_ADDR <= cqhdbl_base_addr_arr;
-
-    -- =============================================================================================
-    -- Per-queue doorbell base-address registers (queues 1..NUM_QUEUES-1) -- see
-    -- EXTRA_Q_BASE_ADDR/EXTRA_Q_STRIDE above. These 4*(NUM_QUEUES-1) registers
-    -- (BASE_REGS..REGS-1 in R_ADDRS/regs_arr) are now written/read by the SAME regs_g generate
-    -- and read_from_regs_p loop as every other (hardware-proven) register in this file -- see
-    -- R_ADDRS/WR_EN/REG_WIDTH's build_r_addrs/extend_* construction above -- rather than the
-    -- separate generate + dedicated read mux this used to have (which passed simulation but was
-    -- physically unwritable on real hardware). regs_arr(reg_idx) for these indices is already
-    -- the correctly-written 32-bit L/H half; concatenate H&L here, one concurrent assignment per
-    -- queue (q is a generate-time constant, so each instance's sqtdbl_base_addr_arr(q)/
-    -- cqhdbl_base_addr_arr(q) target is a static name -- a single, unambiguous driver per
-    -- element, the same rule as the element-0 concurrent assignment above). At NUM_QUEUES=1 this
-    -- generate has zero instances (null range), so it does nothing.
-    -- =============================================================================================
-    extra_q_baddr_g : for q in 1 to NUM_QUEUES -1 generate
-        sqtdbl_base_addr_arr(q) <= regs_arr(BASE_REGS + (q-1)*4 + 1) & regs_arr(BASE_REGS + (q-1)*4 + 0);
-        cqhdbl_base_addr_arr(q) <= regs_arr(BASE_REGS + (q-1)*4 + 3) & regs_arr(BASE_REGS + (q-1)*4 + 2);
-    end generate;
 
     -- =============================================================================================
     -- Selecting registers to READ
@@ -1218,8 +1221,7 @@ begin
 
             reg_sel_addr := mi_split_addr(0)(ADDR_LENGTH - 1 downto 0);
 
-            -- Covers every register, including the per-queue doorbell base-address ones
-            -- (BASE_REGS..REGS-1) -- see the comment above extra_q_baddr_g.
+            -- Covers every register, both COMMON and every queue's PER_Q_BASE slot.
             for reg_idx in 0 to (REGS-1) loop
                 if (reg_sel_addr = std_logic_vector(to_unsigned(R_ADDRS(reg_idx), ADDR_LENGTH))) then
                     mi_split_drd(0)(REG_WIDTH(reg_idx)-1 downto 0) <= regs_arr(reg_idx)(REG_WIDTH(reg_idx)-1 downto 0);
@@ -1318,10 +1320,15 @@ begin
     -- =============================================================================================
     -- Performance counters
     -- =============================================================================================
-    sqtdbl_next_val <= std_logic_vector(unsigned(sqtdbl_reg) + 1) and regs_arr(R_DBL_MASK)(REG_WIDTH(R_DBL_MASK)-1 downto 0);
-    -- The blocking when Submission Queue is full (measured over the whole time when TRIGG_DISPATCH
-    -- is set in the contiguous mode)
-    sq_write_blocking          <= '1' when (sqtdbl_next_val = sqhdbl_reg) else '0';
+    -- Per-queue "SQ write blocking" (queue q's SQTDBL would collide with its own SQHDBL);
+    -- OR-reduced into the single COMMON sq_write_blocking perf-counter input below -- not yet made
+    -- per-queue. At NUM_QUEUES=1 this is exactly the original single-bit check.
+    sq_write_blocking_g : for q in 0 to NUM_QUEUES -1 generate
+        sqtdbl_next_val_arr(q)   <= std_logic_vector((unsigned(sqtdbl_reg_arr(q)) + 1) and unsigned(dbl_mask_arr(q)));
+        sq_write_blocking_arr(q) <= '1' when (sqtdbl_next_val_arr(q) = sqhdbl_reg_arr(q)) else '0';
+    end generate;
+    sq_write_blocking <= or sq_write_blocking_arr;
+
     -- The amount of clocks when the trigger is active
     cmd_disp_trigg_active_incr <= OPC_TRIGG_DISP;
 

@@ -307,10 +307,11 @@ class NVMEControllerModel:
 
         # Multiple per-queue NVMEControllerModel instances register this callback on the SAME
         # physical PCIE_RQ_MFB monitor (one bus, N queues, each with its own SQTDBL/CQHDBL
-        # doorbell base address programmed via the MI map -- see EXTRA_Q_BASE_ADDR in
-        # misc_const.py). A doorbell write whose address matches neither of THIS instance's own
-        # two addresses belongs to another queue -- ignore it here rather than asserting. At
-        # NUM_QUEUES=1 there is only one queue's addresses to match, so this is unchanged.
+        # doorbell base address programmed via the MI map's PER_Q_BASE-based per-queue register
+        # block -- see cocotbext.ofm.dma.iuventus.iuventus_reg_map). A doorbell write whose
+        # address matches neither of THIS instance's own two addresses belongs to another queue
+        # -- ignore it here rather than asserting. At NUM_QUEUES=1 there is only one queue's
+        # addresses to match, so this is unchanged.
         if hdr_deser.addr != (self._sqtdbl_baddr >> 2) and hdr_deser.addr != (self._cqhdbl_baddr >> 2):
             return
 

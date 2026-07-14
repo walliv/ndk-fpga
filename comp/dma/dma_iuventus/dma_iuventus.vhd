@@ -250,11 +250,14 @@ architecture FULL of DMA_IUVENTUS is
     signal swm_wrbuff_baddr         : std_logic_vector(63 downto 0);
     signal swm_wrbuff_prp_list_ptr  : std_logic_vector(63 downto 0);
 
-    signal swm_dbl_mask       : std_logic_vector(15 downto 0);
-    signal swm_namespace_id   : std_logic_vector(31 downto 0);
+    -- Per-queue configuration (one element per queue -- see NVME_SW_MANAGER's PER_Q_BASE register
+    -- block).
+    signal swm_dbl_mask       : slv_array_t(NUM_QUEUES -1 downto 0)(15 downto 0);
+    signal swm_namespace_id   : slv_array_t(NUM_QUEUES -1 downto 0)(31 downto 0);
+    signal swm_lba_num_mask   : slv_array_t(NUM_QUEUES -1 downto 0)(15 downto 0);
+    signal swm_lba_space_size : slv_array_t(NUM_QUEUES -1 downto 0)(63 downto 0);
+    -- COMMON: a single shared metadata pointer for every queue.
     signal swm_metadata_ptr   : std_logic_vector(63 downto 0);
-    signal swm_lba_num_mask   : std_logic_vector(15 downto 0);
-    signal swm_lba_space_size : std_logic_vector(63 downto 0);
 
     signal swm_cqhdbl_base_addr : slv_array_t(NUM_QUEUES -1 downto 0)(63 downto 0);
     signal swm_sqtdbl_base_addr : slv_array_t(NUM_QUEUES -1 downto 0)(63 downto 0);
@@ -608,6 +611,7 @@ begin
         WRBUFF_PRP_LIST_PTR  => swm_wrbuff_prp_list_ptr,
 
         SQTDBL_DATA     => c2n_sqtdbl_data,
+        SQTDBL_QID      => c2n_sqtdbl_qid,
         TAG_FIFO_STATUS => c2n_tag_fifo_status,
         TAG_INIT_DONE   => c2n_tag_init_done,
 
@@ -623,6 +627,7 @@ begin
 
         SQHDBL_DATA    => cqp_sqhdbl,
         CQHDBL_DATA    => cqp_cqhdbl,
+        CQHDBL_QID     => cqp_cqe_qid,
         LAST_CQ_ENTRY  => cqp_last_cqe,
         STATUS_UPD_VLD => cqp_status_upd,
 

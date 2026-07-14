@@ -36,12 +36,13 @@ from dataclasses import dataclass
 
 from misc_const import BUFF_SIZE_PAGES, SECT_SIZE, STORAGE_CAP_LBAS, PAGE_SIZE, BUFF_SIZE, \
     BUFF_SIZE_LBAS, IuventusBuffers, QUEUE_DEPTH, DATA_PAGES, FIRST_DATA_PAGE, MAX_CMD_LBAS, \
-    NUM_QUEUES, EXTRA_Q_BASE_ADDR, EXTRA_Q_STRIDE, SQE_LBA_PTR_W, FLUSH_DELAY_CNTR_WIDTH
+    NUM_QUEUES, SQE_LBA_PTR_W, FLUSH_DELAY_CNTR_WIDTH
 from iuventus_model import IuventusModel
 from nvme_ctrl_model import NVMEControllerModel
 from read_req_driver import ReadReqDriver
 from op_stat_monitor import OpStatMonitor
-from cocotbext.ofm.dma.iuventus import IuventusMiRegMap, CtrlRegBits
+from cocotbext.ofm.dma.iuventus import (IuventusMiRegMap, IuventusPerQueueRegMap, CtrlRegBits,
+                                         per_queue_reg_addr)
 
 root_logger = logging.getLogger()
 file_handler = RotatingFileHandler("rotating.log", maxBytes=(10 * 1024 * 1024), backupCount=2)
@@ -556,14 +557,16 @@ class Testbench:
             f"Mismatch in NVME_RD_BYTES_CNTR: DUT={int.from_bytes(cntr, 'little')}, Iuventus Model={self.iuventus_model.c_sqe_rd_cmd_size}"
 
     async def check_doorbels(self):
+        # This design only has one RTL queue (slot 0 of the PER_Q_BASE block -- see
+        # Testbench.nvme_rd/nvme_wr's self.queues[qid] list-index semantics).
         # Check CQHDBL doorbell
-        cqhdbl_dut = int.from_bytes(await self.m_mi_driver.read(IuventusMiRegMap.CQHDBL, 2), 'little')
+        cqhdbl_dut = int.from_bytes(await self.m_mi_driver.read(per_queue_reg_addr(IuventusPerQueueRegMap.CQHDBL, 0), 2), 'little')
         assert cqhdbl_dut == self.iuventus_model.cqhdbl,\
             f"Mismatch in CQHDBL doorbell: DUT=0x{cqhdbl_dut:04X}, Iuventus Model=0x{self.iuventus_model.cqhdbl:04X}"
         assert cqhdbl_dut == self.nvme_ctrl_model._cqhdbl, \
             f"Mismatch in CQHDBL doorbell: DUT=0x{cqhdbl_dut:04X}, NVME Ctrl Model=0x{self.nvme_ctrl_model._cqhdbl:04X}"
         # Check SQTDBL doorbell
-        sqtdbl_dut = int.from_bytes(await self.m_mi_driver.read(IuventusMiRegMap.SQTDBL, 2), 'little')
+        sqtdbl_dut = int.from_bytes(await self.m_mi_driver.read(per_queue_reg_addr(IuventusPerQueueRegMap.SQTDBL, 0), 2), 'little')
         assert sqtdbl_dut == self.iuventus_model.sqtdbl, \
             f"Mismatch in SQTDBL doorbell: DUT=0x{sqtdbl_dut:04X}, Iuventus Model=0x{self.iuventus_model.sqtdbl:04X}"
         assert sqtdbl_dut == self.nvme_ctrl_model._sqtdbl, \
@@ -945,16 +948,22 @@ async def prepare(dut, qsize=16, strict_rq=True):
                 strict_rq=strict_rq)
 
     await tb_instance.reset()
-    await tb_instance.m_mi_driver.write(IuventusMiRegMap.DBL_MASK, int(qsize-1).to_bytes(2, 'little'))
-    await tb_instance.m_mi_driver.write(IuventusMiRegMap.SQTDBL_BADDR_L, sqtdbl_baddr.to_bytes(8, 'little'))
-    await tb_instance.m_mi_driver.write(IuventusMiRegMap.CQHDBL_BADDR_L, cqhdbl_baddr.to_bytes(8, 'little'))
+    # COMMON block (shared registers).
     await tb_instance.m_mi_driver.write(IuventusMiRegMap.RDBUFF_BADDR_L, rdbuff_prpl_data[0].to_bytes(8, 'little'))
     await tb_instance.m_mi_driver.write(IuventusMiRegMap.RDBUFF_PRP_LIST_PTR_L, rdbuff_prpl_baddr.to_bytes(8, 'little'))
     await tb_instance.m_mi_driver.write(IuventusMiRegMap.WRBUFF_BADDR_L, wrbuff_prpl_data[0].to_bytes(8, 'little'))
     await tb_instance.m_mi_driver.write(IuventusMiRegMap.WRBUFF_PRP_LIST_PTR_L, wrbuff_prpl_baddr.to_bytes(8, 'little'))
     await tb_instance.m_mi_driver.write(IuventusMiRegMap.META_PTR_L, mptr.to_bytes(8, 'little'))
-    await tb_instance.m_mi_driver.write(IuventusMiRegMap.LBA_SPACE_SIZE_L, STORAGE_CAP_LBAS.to_bytes(8, 'little'))
-    await tb_instance.m_mi_driver.write(IuventusMiRegMap.LBA_NUM_MASK, lba_num_mask.to_bytes(2, 'little'))
+
+    # PER-QUEUE block, slot 0 (this design only has one RTL queue -- see Testbench.nvme_rd/nvme_wr's
+    # self.queues[qid] list-index semantics; the `qid=1` label above is a model-internal NVMe
+    # protocol sq_id only, unrelated to the RTL routing QID/register slot, which is always 0 here).
+    await tb_instance.m_mi_driver.write(per_queue_reg_addr(IuventusPerQueueRegMap.DBL_MASK, 0), int(qsize-1).to_bytes(2, 'little'))
+    await tb_instance.m_mi_driver.write(per_queue_reg_addr(IuventusPerQueueRegMap.SQTDBL_BADDR_L, 0), sqtdbl_baddr.to_bytes(8, 'little'))
+    await tb_instance.m_mi_driver.write(per_queue_reg_addr(IuventusPerQueueRegMap.CQHDBL_BADDR_L, 0), cqhdbl_baddr.to_bytes(8, 'little'))
+    await tb_instance.m_mi_driver.write(per_queue_reg_addr(IuventusPerQueueRegMap.LBA_SPACE_SIZE_L, 0), STORAGE_CAP_LBAS.to_bytes(8, 'little'))
+    await tb_instance.m_mi_driver.write(per_queue_reg_addr(IuventusPerQueueRegMap.LBA_NUM_MASK, 0), lba_num_mask.to_bytes(2, 'little'))
+    await tb_instance.m_mi_driver.write(per_queue_reg_addr(IuventusPerQueueRegMap.NAMESPACE_ID, 0), int(1).to_bytes(4, 'little'))
 
     tb_instance.bpsr_start()
 
@@ -966,9 +975,9 @@ async def prepare(dut, qsize=16, strict_rq=True):
 async def prepare_multi(dut, num_queues=None, qsize=16, strict_rq=False):
     """Multi-queue variant of prepare(): builds a Testbench with `num_queues` (default:
     misc_const.NUM_QUEUES, i.e. whatever the elaborated RTL generic is) SQ[q]/CQ[q] queues
-    sharing one RDBUFF/WRBUFF data pool, MI-programs each queue's doorbell base addresses per the
-    contract (queue 0 = legacy SQTDBL_BADDR/CQHDBL_BADDR registers; queues 1..N-1 =
-    EXTRA_Q_BASE_ADDR block -- see misc_const.py), and enables the DUT.
+    sharing one RDBUFF/WRBUFF data pool, MI-programs each queue's own PER_Q_BASE-based register
+    slot (queue 0 is just q=0 of that block -- see cocotbext.ofm.dma.iuventus.iuventus_reg_map),
+    and enables the DUT.
 
     Each queue's model pair uses qid=q (0-based) both as the NVMe protocol-level sq_id (a
     model-internal cross-check between IuventusModel/NVMEControllerModel; the RTL does not
@@ -1051,26 +1060,23 @@ async def prepare_multi(dut, num_queues=None, qsize=16, strict_rq=False):
             buffs=per_queue_buffs[q], tag_range=tag_ranges[q])
 
     await tb_instance.reset()
-    await tb_instance.m_mi_driver.write(IuventusMiRegMap.DBL_MASK, int(qsize-1).to_bytes(2, 'little'))
+    # COMMON block (shared registers).
     await tb_instance.m_mi_driver.write(IuventusMiRegMap.RDBUFF_BADDR_L, rdbuff_prpl_data[0].to_bytes(8, 'little'))
     await tb_instance.m_mi_driver.write(IuventusMiRegMap.RDBUFF_PRP_LIST_PTR_L, rdbuff_prpl_baddr.to_bytes(8, 'little'))
     await tb_instance.m_mi_driver.write(IuventusMiRegMap.WRBUFF_BADDR_L, wrbuff_prpl_data[0].to_bytes(8, 'little'))
     await tb_instance.m_mi_driver.write(IuventusMiRegMap.WRBUFF_PRP_LIST_PTR_L, wrbuff_prpl_baddr.to_bytes(8, 'little'))
     await tb_instance.m_mi_driver.write(IuventusMiRegMap.META_PTR_L, mptr.to_bytes(8, 'little'))
-    await tb_instance.m_mi_driver.write(IuventusMiRegMap.LBA_SPACE_SIZE_L, STORAGE_CAP_LBAS.to_bytes(8, 'little'))
-    await tb_instance.m_mi_driver.write(IuventusMiRegMap.LBA_NUM_MASK, lba_num_mask.to_bytes(2, 'little'))
 
-    # Queue 0's doorbell base addresses: the legacy registers, unchanged offsets.
-    await tb_instance.m_mi_driver.write(IuventusMiRegMap.SQTDBL_BADDR_L, sqtdbl_baddrs[0].to_bytes(8, 'little'))
-    await tb_instance.m_mi_driver.write(IuventusMiRegMap.CQHDBL_BADDR_L, cqhdbl_baddrs[0].to_bytes(8, 'little'))
-
-    # Queues 1..N-1: EXTRA_Q_BASE_ADDR block, one EXTRA_Q_STRIDE-sized (16 B) slot per queue.
-    for q in range(1, N):
-        base = EXTRA_Q_BASE_ADDR + (q - 1) * EXTRA_Q_STRIDE
-        await tb_instance.m_mi_driver.write(base + 0x0, (sqtdbl_baddrs[q] & 0xFFFFFFFF).to_bytes(4, 'little'))
-        await tb_instance.m_mi_driver.write(base + 0x4, (sqtdbl_baddrs[q] >> 32).to_bytes(4, 'little'))
-        await tb_instance.m_mi_driver.write(base + 0x8, (cqhdbl_baddrs[q] & 0xFFFFFFFF).to_bytes(4, 'little'))
-        await tb_instance.m_mi_driver.write(base + 0xC, (cqhdbl_baddrs[q] >> 32).to_bytes(4, 'little'))
+    # PER-QUEUE block: one slot per queue q = 0..N-1 (queue 0 is just q=0 of this block -- no
+    # special-casing). Every queue shares the same (homogeneous) LBA space/namespace/DBL_MASK
+    # here, but each is programmed through its own per-queue registers.
+    for q in range(N):
+        await tb_instance.m_mi_driver.write(per_queue_reg_addr(IuventusPerQueueRegMap.DBL_MASK, q), int(qsize-1).to_bytes(2, 'little'))
+        await tb_instance.m_mi_driver.write(per_queue_reg_addr(IuventusPerQueueRegMap.SQTDBL_BADDR_L, q), sqtdbl_baddrs[q].to_bytes(8, 'little'))
+        await tb_instance.m_mi_driver.write(per_queue_reg_addr(IuventusPerQueueRegMap.CQHDBL_BADDR_L, q), cqhdbl_baddrs[q].to_bytes(8, 'little'))
+        await tb_instance.m_mi_driver.write(per_queue_reg_addr(IuventusPerQueueRegMap.LBA_SPACE_SIZE_L, q), STORAGE_CAP_LBAS.to_bytes(8, 'little'))
+        await tb_instance.m_mi_driver.write(per_queue_reg_addr(IuventusPerQueueRegMap.LBA_NUM_MASK, q), lba_num_mask.to_bytes(2, 'little'))
+        await tb_instance.m_mi_driver.write(per_queue_reg_addr(IuventusPerQueueRegMap.NAMESPACE_ID, q), int(1).to_bytes(4, 'little'))
 
     tb_instance.bpsr_start()
 

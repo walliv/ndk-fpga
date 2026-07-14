@@ -60,7 +60,10 @@ entity N2C_CONTROLLER is
         CQP_START_REQ_ACK : out std_logic;
         CQP_STOP_REQ_VLD  : in  std_logic;
         CQP_STOP_REQ_ACK  : out std_logic;
-        DBL_MASK          : in std_logic_vector(15 downto 0);
+        -- Per-queue doorbell wrap mask (one element per queue -- see NVME_SW_MANAGER's
+        -- PER_Q_BASE register block); passed through unchanged to CQE_PROCESSOR, which indexes it
+        -- by the queue whose CQ read response is arriving (resp_qidx).
+        DBL_MASK          : in slv_array_t(NUM_QUEUES -1 downto 0)(15 downto 0);
 
         -- The requested data that should be read from the write buffer. One bit wider than
         -- BUFF_PTR_WIDTH: the buffer is flat-addressed (MEM_PARTITIONING => FALSE), so this
