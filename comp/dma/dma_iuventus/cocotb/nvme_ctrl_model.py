@@ -320,16 +320,78 @@ class NVMEControllerModel:
         assert hdr_deser.req_type == 0b0001, "Invalid request type for DBL pointer update command"
         assert hdr_deser.dword_count == 1, "Invalid address for DBL pointer update command"
 
-        # Update internal pointer values
+        v = data & 0xFFFF
+        qsize = self._qsize
+
+        # Update internal pointer values, hardened against every documented NVMe base-spec cause
+        # of an "Invalid Doorbell Write Value" AEN (info=0x01/0x02/0x03) -- this is both
+        # verification hardening and the fastest available repro of the HW AEN seen with a real
+        # SSD: if the dbl_updater LUTRAM restructure (FIFO-carried doorbell index resolved to a
+        # base address at dispatch time) ever emits a bogus doorbell value, one of these fires
+        # here in sim well before it reaches real HW.
         if hdr_deser.addr == (self._sqtdbl_baddr >> 2):
+            old = self._sqtdbl
             if self.log.isEnabledFor(logging.INFO):
-                self.log.info(f"Updating SQTDBL to {data}")
-            self._sqtdbl = data & 0xFFFF
+                self.log.info(f"Updating SQTDBL to {v}")
+
+            # C1: out-of-range -- doorbell value must address a valid SQ slot.
+            assert 0 <= v < qsize, (
+                f"[qid={self._sq_id}] SQTDBL Invalid Doorbell Write Value (out-of-range): "
+                f"v={v} old={old} qsize={qsize}"
+            )
+            # C2: no-advance/same-value -- the classic info=0x01 "same value as previous".
+            assert v != old, (
+                f"[qid={self._sq_id}] SQTDBL Invalid Doorbell Write Value (no-advance/same-value): "
+                f"v={v} old={old} qsize={qsize}"
+            )
+            # C3: overrun past the controller's own SQ head -- the ring can hold at most
+            # qsize-1 outstanding entries (one slot reserved to disambiguate full/empty, the
+            # same convention this model's own CQ-full wait in _complete_sqe already assumes);
+            # advancing the tail further than that overruns entries the controller hasn't
+            # consumed yet. self._sqhdbl is this model's OWN, always-current consumption
+            # pointer (ground truth, not something read back from the host), so this bound is
+            # non-racy: whatever (possibly stale) SQ-head knowledge the host/RTL is working
+            # from can only be less advanced than the model's true self._sqhdbl, which makes
+            # this check strictly stricter than -- never looser than -- reality.
+            free_before = (qsize - 1) - ((old - self._sqhdbl) % qsize)
+            added = (v - old) % qsize
+            assert added <= free_before, (
+                f"[qid={self._sq_id}] SQTDBL Invalid Doorbell Write Value (overrun past SQ head): "
+                f"v={v} old={old} sqhdbl={self._sqhdbl} added={added} free_before={free_before} qsize={qsize}"
+            )
+
+            self._sqtdbl = v
             self.c_sqtdbl_reg_upds += 1
         elif hdr_deser.addr == (self._cqhdbl_baddr >> 2):
+            old = self._cqhdbl
             if self.log.isEnabledFor(logging.INFO):
-                self.log.info(f"Updating CQHDBL to {data}")
-            self._cqhdbl = data & 0xFFFF
+                self.log.info(f"Updating CQHDBL to {v}")
+
+            # C1: out-of-range -- doorbell value must address a valid CQ slot.
+            assert 0 <= v < qsize, (
+                f"[qid={self._sq_id}] CQHDBL Invalid Doorbell Write Value (out-of-range): "
+                f"v={v} old={old} qsize={qsize}"
+            )
+            # C2: no-advance/same-value -- the classic info=0x01 "same value as previous".
+            assert v != old, (
+                f"[qid={self._sq_id}] CQHDBL Invalid Doorbell Write Value (no-advance/same-value): "
+                f"v={v} old={old} qsize={qsize}"
+            )
+            # C4: head-past-tail -- the host cannot free more CQEs than the controller has
+            # actually posted. self._cqtdbl is this model's OWN posted-tail pointer, advanced
+            # synchronously the instant a CQE write is dispatched in _complete_sqe (i.e. before
+            # the TLP is even transported) -- so by the time the RTL's CQHDBL write for that CQE
+            # can possibly arrive here, self._cqtdbl already accounts for it. This bound is
+            # therefore non-racy in the safe direction too: it can only ever be an
+            # over-estimate of what the RTL has truly observed, never an under-estimate.
+            posted_unacked = (self._cqtdbl - old) % qsize
+            freed = (v - old) % qsize
+            assert freed <= posted_unacked, (
+                f"[qid={self._sq_id}] CQHDBL Invalid Doorbell Write Value (head-past-tail): "
+                f"v={v} old={old} cqtdbl={self._cqtdbl} freed={freed} posted_unacked={posted_unacked} qsize={qsize}"
+            )
+
+            self._cqhdbl = v
             self.c_cqhdbl_reg_upds += 1
 
     def _dispatch_wr_req(self, base_addr, data,
