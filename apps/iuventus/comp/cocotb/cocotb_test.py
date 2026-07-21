@@ -243,50 +243,23 @@ async def _case_small_read_burst(dut, dev, test):
     match, at whatever NUM_QUEUES the design was elaborated with (collapses to q0 at NUM_QUEUES=1,
     full round-robin at NUM_QUEUES=4). Also probes the EVCR/EVENT_COUNTER event count.
 
-    CONFIRMED RTL BUG #1 -- read-QID round-robin does not advance at NUM_QUEUES>1 (`make test
-    NUM_QUEUES=4`): user_core_test_arch.vhd's rd_qid_rr_p (~L458) is supposed to advance
-    rd_qid_cntr on every accepted request when rd_burst_reg=1 (its default). Verified with a
-    cycle-by-cycle, ReadOnly-synced waveform dump of NVME_RD_REQ_VLD/RDY, rd_qid_cntr,
-    rd_burst_cntr, rd_burst_reg, rd_ch_min_reg, rd_ch_max_reg around the first two accepted
-    requests (see the `n_queues > 1` diagnostic block below):
-      - rd_burst_reg reads back 1 (its default; confirmed directly from the DUT signal, not
-        assumed).
-      - rd_ch_min_reg=0 / rd_ch_max_reg=3 (correctly configured by set_queue_range(4)).
-      - Request #1 accepted at cycle 12 with rd_qid_cntr=0, rd_burst_cntr=0 (as expected for the
-        first request after reset).
-      - rd_qid_cntr reads 0 on EVERY cycle from 13 through 23 (11 more cycles, including request
-        #2's own acceptance at cycle 23) -- it never becomes 1, even though
-        rd_burst_cntr+1=1>=rd_burst_reg=1 is exactly the condition rd_qid_rr_p uses to advance.
-      - This directly answers the "sample on the same VLD&RDY cycle" concern: the model/monitor
-        DOES sample NVME_RD_REQ_QID in the same ReadOnly window as VLD&RDY (see
-        dma_iuventus_model.py's _rd_req_loop), so this is not a model timing-convention bug --
-        the counter itself provably never leaves 0 in the RTL.
-    `make test` (default NUM_QUEUES=1) is unaffected (gen_rd_req_qid forces QID 0 unconditionally
-    there) and stays green; only `make test NUM_QUEUES=4` fails this scoreboard (at item #2,
-    expected qid=1 got qid=0) -- intentionally, since that is this scoreboard doing its job.
-
-    CONFIRMED RTL BUG #2 -- EVENT_COUNTER's eve_cnt_reg never increments (NOT a TB/interval
-    misconfiguration -- see below): configures EVCR_INTERVAL_CYCLES to a small, sim-appropriate
-    value (2000, not the production ~2^28-cycle default) up front, specifically to rule out "the
-    interval is bigger than the sim" as an explanation, then directly probes iops_cntr_i's
-    int_cyc_reg_vld/int_pr_cnt_reg/int_cyc_reg/int_reached/eve_cnt_reg/EVENT_VLD cycle-by-cycle
-    (ReadOnly-synced) over 4500 cycles (> 2 full 2000-cycle intervals):
-      - int_cyc_reg_vld=1 throughout (the interval config latched correctly).
-      - int_pr_cnt_reg counts up and wraps every ~2000 cycles as expected (observed 125/126/127
-        near cycles 1999-2001 and 124/125/126 near cycles 3999-4001, i.e. it visibly wrapped
-        between those two windows).
-      - int_reached fired 2 confirmed times over the 4500-cycle window -- the interval mechanism
-        genuinely completes in this sim; "interval too large" is ruled out.
-      - EVENT_VLD pulsed 408 times over the same window (hundreds of genuinely-accepted read
-        requests, cross-checked against the scoreboard's own accept count) with NEITHER
-        int_reached NOR INTERVAL_SET active at the same cycle in every case checked.
-      - Yet eve_cnt_reg reads back 0 at every single sampled cycle, and the final MI readback of
-        EVCR_TOTAL_EVENTS is 0 despite 2 confirmed complete intervals each containing hundreds of
-        EVENT_VLD pulses.
-    So IuventusTest.iops()/EVCR_TOTAL_EVENTS never reports anything but 0, on any sim-length
-    interval, regardless of configuration -- this is not downgradable to a TB-config note.
-    Downgraded to a non-fatal, evidence-quoting print (not an assert) so this already-diagnosed,
-    separately-reported bug doesn't redden `make test`'s default gate on top of reporting it.
+    History note (both since resolved as ONE testbench bug, not RTL bugs): an earlier version of
+    dma_iuventus_model.py's _rd_req_loop drove NVME_RD_REQ_RDY reactively out of the
+    ReadOnly/NextTimeStep phase instead of as a synchronous level decided fresh at each RisingEdge.
+    That produced RDY transitions the DUT's own DMA_CLK-registered processes never actually
+    registered as clean, edge-aligned handshakes, even though this test's own ReadOnly-synced
+    monitor sampled VLD&RDY=1 at two distinct cycles. Two symptoms were consequently (and
+    incorrectly) reported as "confirmed RTL bugs": rd_qid_cntr never advancing at NUM_QUEUES>1,
+    and EVENT_COUNTER's eve_cnt_reg never incrementing (EVENT_VLD = NVME_RD_REQ_VLD and
+    NVME_RD_REQ_RDY is correctly 0 at the DUT's own clock edge if the DUT never really registered
+    the accept). See dma_iuventus_model.py's _rd_req_loop docstring for the fix. Neither
+    user_core_test_arch.vhd's rd_qid_rr_p nor comp/base/misc/event_counter/event_counter.vhd was
+    ever at fault; both are exercised elsewhere too (event_counter has its own passing
+    testbench.vhd) and were correct all along. QID/address advancement across NUM_QUEUES is
+    already positively confirmed by the reference-model scoreboard below (it would fail the
+    instant a real DUT qid/lba_ptr diverged from the model's prediction); an EVCR event-count
+    cross-check against this test's own accepted-request tally is kept below to positively confirm
+    TOTAL_EVENTS now increments correctly too.
     """
     n_queues = NUM_QUEUES
     await e(test.set_queue_range)(n_queues)
@@ -296,22 +269,36 @@ async def _case_small_read_burst(dut, dev, test):
     model.configure_range(0, n_queues - 1, 1)  # rd_burst=1: advance queue every request
 
     lba_ptr = 0x2000
-    lba_num = 0  # 1 sector/request: simplest deterministic seq-address step (+1 LBA/request)
+    # 4 sectors/request (0-based size=3), a NONZERO seq-address step -- see user_core_model.py's
+    # ReadReqModel.on_completion() docstring: the RTL's seq_addr_cntr advances by lba_num
+    # directly, so lba_num=0 would (as observed) read the same address every request and not
+    # actually exercise the step arithmetic at all.
+    lba_num = 3
     iterations = 1000  # IuventusTest.tst_iterations enforces >= 1000
 
-    # Deliberately small vs. the ~2^28-cycle production default -- see "CONFIRMED RTL BUG #2"
-    # above for why this rules out "the interval never completes in this sim" as an explanation.
-    await aset(test, "evcr_interval_cycles", 2000)
+    # Small vs. the ~2^28-cycle production default, so an interval genuinely completes early in
+    # this burst -- lets the check below cross-check TOTAL_EVENTS against this test's own tally.
+    await aset(test, "evcr_interval_cycles", 200)
+
+    accepted_since_reached = 0
 
     def on_accept(got_lba_ptr, got_lba_num, got_qid):
+        nonlocal accepted_since_reached
+        # Compute the expectation lazily, right at accept time: next_burst_request() reads the
+        # model's CURRENT (not-yet-advanced) seq_addr/QID state, exactly mirroring what the RTL's
+        # own registered address/QID counters hold going into this accept. Precomputing all
+        # `iterations` expectations up front (before the burst is even triggered, with no
+        # interleaved on_completion() calls) would freeze every entry at the same initial
+        # lba_ptr/qid, since only on_completion() (called below, after each real accept) advances
+        # that state.
+        sb.expect(model.next_burst_request())
         sb.check(ExpectedReadReq(lba_ptr=got_lba_ptr, lba_num=got_lba_num, qid=got_qid))
         model.on_completion()
+        accepted_since_reached += 1
 
     dev.dma_model.rd_req_accept_cb = on_accept
 
     model.start_burst(lba_ptr, lba_num, addressing="seq", contig=False)
-    for _ in range(iterations):
-        sb.expect(model.next_burst_request())
 
     await aset(test, "rd_req_lba_ptr", lba_ptr)
     await aset(test, "rd_req_lba_num", lba_num)
@@ -320,58 +307,37 @@ async def _case_small_read_burst(dut, dev, test):
     await aset(test, "contig_test", False)
     await aset(test, "tst_iterations", iterations)  # fires tst_trigg -- must be written LAST
 
-    if n_queues > 1:
-        # Cycle-accurate evidence for "CONFIRMED RTL BUG #1" above.
-        for i in range(30):
-            await RisingEdge(dut.DMA_CLK)
-            await ReadOnly()
-            if i in (11, 12, 13, 22, 23):
-                print(
-                    f"DIAG rd_qid cycle {i}: VLD={bool(dut.NVME_RD_REQ_VLD.value)} "
-                    f"RDY={bool(dut.NVME_RD_REQ_RDY.value)} rd_qid_cntr={int(dut.rd_qid_cntr.value)} "
-                    f"rd_burst_cntr={int(dut.rd_burst_cntr.value)} rd_burst_reg={int(dut.rd_burst_reg.value)} "
-                    f"rd_ch_min_reg={int(dut.rd_ch_min_reg.value)} rd_ch_max_reg={int(dut.rd_ch_max_reg.value)}"
-                )
-
-    # Evidence for "CONFIRMED RTL BUG #2" above.
+    # EVCR/EVENT_COUNTER cross-check: wait for the first interval to complete (internal
+    # iops_cntr_i.int_reached rising edge) and confirm the MI-visible TOTAL_EVENTS exactly matches
+    # this test's own tally of read requests accepted since the previous interval boundary (there
+    # is none yet, so since the burst started). Read the MI registers back immediately after
+    # detecting the edge, before any further interval can complete underneath us.
     internal = dut.iops_cntr_i
-    diag_cycles = 4500  # > 2 * the 2000-cycle interval configured above
-    int_reached_count = 0
-    event_vld_count = 0
-    for i in range(diag_cycles):
+    prev_int_reached = False
+    first_interval_events = None
+    for _ in range(1000):
         await RisingEdge(dut.DMA_CLK)
         await ReadOnly()
-        if bool(internal.int_reached.value):
-            int_reached_count += 1
-        if bool(internal.EVENT_VLD.value):
-            event_vld_count += 1
-        if i in (1999, 2000, 2001, 3999, 4000, 4001):
-            print(
-                f"DIAG evcr cycle {i}: int_cyc_reg_vld={int(internal.int_cyc_reg_vld.value)} "
-                f"int_pr_cnt_reg={int(internal.int_pr_cnt_reg.value)} int_cyc_reg={int(internal.int_cyc_reg.value)} "
-                f"eve_cnt_reg={int(internal.eve_cnt_reg.value)}"
-            )
+        reached = bool(internal.int_reached.value)
+        if reached and not prev_int_reached:
+            first_interval_events = accepted_since_reached
+            accepted_since_reached = 0
+            break
+        prev_int_reached = reached
+
+    assert first_interval_events is not None, (
+        "no EVCR interval (evcr_interval_cycles=200) completed within 1000 DMA_CLK cycles of the "
+        "burst starting -- can't cross-check TOTAL_EVENTS"
+    )
+    assert first_interval_events > 0, "no read request was accepted during the first EVCR interval"
+
     got_events = await aget(test, "evcr_total_events")
     got_cycles = await aget(test, "evcr_total_cycles")
-    print(
-        f"DIAG evcr summary: int_reached fired {int_reached_count} times, EVENT_VLD pulsed "
-        f"{event_vld_count} times, over {diag_cycles} DMA_CLK cycles (interval=2000 -- confirmed "
-        f"completing, ruling out the 'interval too large for the sim' hypothesis); MI readback: "
-        f"evcr_total_events={got_events} evcr_total_cycles={got_cycles}"
+    assert got_events == first_interval_events, (
+        f"EVCR TOTAL_EVENTS ({got_events}) does not match this test's own tally of read requests "
+        f"accepted during the first completed interval ({first_interval_events})"
     )
-    if int_reached_count > 0 and got_events == 0:
-        print(
-            "WARNING: CONFIRMED RTL bug -- EVENT_COUNTER's eve_cnt_reg never increments despite "
-            f"{event_vld_count} EVENT_VLD pulses across {int_reached_count} completed intervals. "
-            "See this function's docstring for the full evidence chain. Not treated as a test "
-            "failure (already diagnosed and reported separately); does not affect the read-request "
-            "stream validation above, which is unaffected and fully bit-exact."
-        )
-    elif got_events > 0:
-        assert got_events <= got_cycles, (
-            f"EVCR event count ({got_events}) exceeds interval cycle count ({got_cycles}) -- "
-            "more than one accepted read/write per cycle isn't possible on this bus"
-        )
+    assert got_cycles > 0, "EVCR TOTAL_CYCLES read back as 0 after a completed interval"
 
     ok = await _wait_until(lambda: sb.checked >= iterations, dut, max_cycles=iterations * 50)
     assert ok, f"timed out: only {sb.checked}/{iterations} burst read requests were accepted (short stream)"
