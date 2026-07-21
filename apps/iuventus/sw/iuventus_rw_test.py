@@ -9,7 +9,6 @@ from time import sleep
 import nfb
 from ofm.comp.debug.data_logger.data_logger import DataLogger
 from ofm.comp.mfb_tools.debug.generator import MfbGenerator
-from ofm.comp.mfb_tools.logic.speed_meter import SpeedMeter
 import ofm.comp.dma.latency_meas.calam_graph
 from ofm.utils import convert_units
 
@@ -610,10 +609,6 @@ if __name__ == "__main__":
     test = IuventusTest(dev=args.device, index=0)
     lmeter = LatencyMeter(test, dev=args.device, index=0)
     lm_output = LatencyMeterOutput(clk_period=4)
-    nvme_rd_sm = SpeedMeter(dev=args.device, index=0)
-    nvme_wr_sm = SpeedMeter(dev=args.device, index=1)
-    print(f"{nvme_rd_sm._node.path=}, {nvme_rd_sm._node.name=}")
-    print(f"{nvme_wr_sm._node.path=}, {nvme_wr_sm._node.name=}")
 
     if args.rst:
         lmeter.rst()
@@ -668,8 +663,6 @@ if __name__ == "__main__":
 
         warmup_key, (warmup_mode, warmup_addressing, warmup_size) = next(iter(tst_comb.items()))
         print(f"Running warmup throughput measurement: {warmup_key} (queues={args.queues})")
-        nvme_rd_sm.clear_data()
-        nvme_wr_sm.clear_data()
         test.tst_addressing = warmup_addressing
         test.tst_mode = warmup_mode
 
@@ -680,9 +673,6 @@ if __name__ == "__main__":
         else:
             test.rd_req_lba_num = warmup_size
             test.contig_test = True
-
-        nvme_rd_sm.measure()
-        nvme_wr_sm.measure()
 
         if warmup_mode == "wr":
             test.gen.enabled = False
@@ -699,8 +689,6 @@ if __name__ == "__main__":
         print("Warmup throughput measurement done, collecting results...")
 
         for key, (mode, addressing, size) in tst_comb.items():
-            nvme_rd_sm.clear_data()
-            nvme_wr_sm.clear_data()
             test.tst_addressing = addressing
             test.tst_mode = mode
 
@@ -715,22 +703,20 @@ if __name__ == "__main__":
             # sleep(0.1)
             # sleep(5)
             sleep(3)
-            rd_throughput, _ = nvme_rd_sm.measure()
-            rd_thrp_val, rd_thrp_unit = convert_units(rd_throughput)
-            # print(f"{nvme_rd_sm.frequency=}, {nvme_rd_sm.items=}, {nvme_rd_sm.ticks=}, {nvme_rd_sm.sofs=}, {nvme_rd_sm.eofs=}")
-            wr_throughput, _ = nvme_wr_sm.measure()
-            wr_thrp_val, wr_thrp_unit = convert_units(wr_throughput)
-            # print(f"{nvme_wr_sm.frequency=}, {nvme_wr_sm.items=}, {nvme_wr_sm.ticks=}, {nvme_wr_sm.sofs=}, {nvme_wr_sm.eofs=}")
-            throughput = wr_throughput if mode == "wr" else rd_throughput
             iops = test.iops()
-            print(f"{key} (queues={args.queues}): IOps: {iops:.0f}, RD Thrp: {rd_thrp_val:.2f} {rd_thrp_unit}Bps, "
-                  f"WR Thrp: {wr_thrp_val:.2f} {wr_thrp_unit}Bps")
+            # Throughput is derived from IOPS (the EVENT_COUNTER), not measured with an MFB speed
+            # meter: `sectors` is the request size in 512 B sectors (size is 0-based, matching the
+            # (lba_num+1)*512 formula used in build_throughput_iops_booktabs_table).
+            sectors = size + 1
+            throughput_bps = iops * sectors * 512
+            thrp_val, thrp_unit = convert_units(throughput_bps)
+            print(f"{key} (queues={args.queues}): IOps: {iops:.0f}, Thrp: {thrp_val:.2f} {thrp_unit}Bps")
             results.append({
                 "mode": mode,
                 "addressing": addressing,
                 "lba_num": size,
                 "iops": iops,
-                "throughput_bps": throughput,
+                "throughput_bps": throughput_bps,
                 "num_queues": args.queues,
             })
 
