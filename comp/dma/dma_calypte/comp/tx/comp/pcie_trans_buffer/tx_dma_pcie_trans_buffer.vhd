@@ -63,7 +63,18 @@ entity TX_DMA_PCIE_TRANS_BUFFER is
         -- resolution in the architecture), BRAM otherwise. "BRAM"/"URAM" force the respective
         -- primitive (see :vhdl:entity:`TDP_BRAM_BE`). RAM_TYPE => "URAM" together with an Intel
         -- DEVICE fails elaboration.
-        RAM_TYPE : string := "AUTO"
+        RAM_TYPE : string := "AUTO";
+
+        -- When TRUE (default), the internal memory is partitioned per channel: each channel owns a
+        -- 2**POINTER_WIDTH-byte region and the channel index (write META channel field / RD_CHAN_*)
+        -- selects it. When FALSE the partitioning is disabled: the channel index is ignored on both
+        -- the write and the read side and the whole CHANNELS*2**POINTER_WIDTH-byte array is exposed
+        -- as a single flat address space, addressed only by the address field (write META PCIe
+        -- address / RD_ADDR_*). This lets the user split the array unevenly in its own way. With
+        -- MEM_PARTITIONING => FALSE and CHANNELS > 1 the RD_ADDR_* ports widen by log2(CHANNELS)
+        -- bits so they can reach the whole array (the write META PCIe-address field is already wide
+        -- enough). CHANNELS still sizes the total memory (CHANNELS * 2**POINTER_WIDTH bytes).
+        MEM_PARTITIONING : boolean := TRUE
     );
     port (
         CLK   : in std_logic;
@@ -82,7 +93,7 @@ entity TX_DMA_PCIE_TRANS_BUFFER is
         -- =========================================================================================
         RD_CHAN_A     : in  std_logic_vector(log2(CHANNELS) -1 downto 0);
         RD_DATA_A     : out std_logic_vector(MFB_REGIONS*MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH-1 downto 0);
-        RD_ADDR_A     : in  std_logic_vector(POINTER_WIDTH -1 downto 0);
+        RD_ADDR_A     : in  std_logic_vector(POINTER_WIDTH + tsel(MEM_PARTITIONING, 0, log2(CHANNELS)) -1 downto 0);
         RD_EN_A       : in  std_logic;
         RD_DATA_VLD_A : out std_logic;
 
@@ -93,7 +104,7 @@ entity TX_DMA_PCIE_TRANS_BUFFER is
         -- =========================================================================================
         RD_CHAN_B     : in  std_logic_vector(log2(CHANNELS) -1 downto 0);
         RD_DATA_B     : out std_logic_vector(MFB_REGIONS*MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH-1 downto 0) := (others => '0');
-        RD_ADDR_B     : in  std_logic_vector(POINTER_WIDTH -1 downto 0);
+        RD_ADDR_B     : in  std_logic_vector(POINTER_WIDTH + tsel(MEM_PARTITIONING, 0, log2(CHANNELS)) -1 downto 0);
         RD_EN_B       : in  std_logic;
         RD_DATA_VLD_B : out std_logic := '0'
     );
@@ -142,6 +153,23 @@ architecture FULL of TX_DMA_PCIE_TRANS_BUFFER is
     constant BANK_ADDR_W     : natural := log2(BANK_ITEMS);
     -- Width of the (registered) target-array index; at least 1 bit even when MEM_ARRAYS = 1
     constant ARR_IDX_W       : natural := max(1, log2(MEM_ARRAYS));
+
+    -- =============================================================================================
+    -- Flat (unpartitioned) addressing -- see the MEM_PARTITIONING generic
+    -- =============================================================================================
+    -- When FLAT the channel index (write META channel / RD_CHAN_*) is ignored and the whole array is
+    -- addressed by the address field alone. Since a channel already occupies the contiguous physical
+    -- rows [chan*BUFFER_DEPTH, (chan+1)*BUFFER_DEPTH), "flat" simply means taking the channel-select
+    -- bits (memory-array index + intra-array channel slot) from the address bits sitting directly
+    -- above the intra-channel row address, instead of from the channel field. Only meaningful for
+    -- CHANNELS > 1 (for CHANNELS = 1 the single channel already spans the whole array, so partitioned
+    -- and flat are identical).
+    constant FLAT             : boolean := (not MEM_PARTITIONING) and (CHANNELS > 1);
+    -- LSB, within the write META DWord-address, of the flat channel-select field (the read byte
+    -- address carries it starting at bit POINTER_WIDTH). It sits directly above the intra-channel row.
+    constant FLAT_CHAN_LSB_DW : natural := log2(BUFFER_DEPTH) + log2(MFB_DWORDS);
+    -- LSB of the memory-array-select sub-field within the flat channel-select field
+    constant FLAT_ARR_LSB_DW  : natural := FLAT_CHAN_LSB_DW + log2(CHANS_PER_ARRAY);
 
     -- =============================================================================================
     -- Defining ranges for meta signal
@@ -525,10 +553,22 @@ begin
             if (pcie_mfb_sof_inp_reg(INP_REG_NUM)(0) = '1') then
                 pcie_mfb_meta_addr_v := pcie_mfb_meta_arr(0)(META_PCIE_ADDR);
                 buff_addr_v          := pcie_mfb_meta_addr_v(log2(BUFFER_DEPTH)+log2(MFB_DWORDS) -1 downto log2(MFB_DWORDS));
-                chan_addr_v          := pcie_mfb_meta_arr(0)(log2(CHANS_PER_ARRAY) + META_CHAN_NUM_O -1 downto META_CHAN_NUM_O);
+                -- FLAT: the intra-array channel slot comes from the address just above the row; else
+                -- from the channel field. buff_addr_v (the intra-channel row) is unchanged either way.
+                if (FLAT) then
+                    chan_addr_v := pcie_mfb_meta_addr_v(FLAT_CHAN_LSB_DW + log2(CHANS_PER_ARRAY) -1 downto FLAT_CHAN_LSB_DW);
+                else
+                    chan_addr_v := pcie_mfb_meta_arr(0)(log2(CHANS_PER_ARRAY) + META_CHAN_NUM_O -1 downto META_CHAN_NUM_O);
+                end if;
             else
                 buff_addr_v := std_logic_vector(addr_cntr_pst(log2(BUFFER_DEPTH) + log2(MFB_DWORDS) -1 downto log2(MFB_DWORDS)));
-                chan_addr_v := chan_num_reg(log2(CHANS_PER_ARRAY) -1 downto 0);
+                -- FLAT: track the running address' channel-slot bits so a frame that crosses a
+                -- channel boundary keeps addressing correctly; else hold the frame's channel.
+                if (FLAT) then
+                    chan_addr_v := std_logic_vector(addr_cntr_pst(FLAT_CHAN_LSB_DW + log2(CHANS_PER_ARRAY) -1 downto FLAT_CHAN_LSB_DW));
+                else
+                    chan_addr_v := chan_num_reg(log2(CHANS_PER_ARRAY) -1 downto 0);
+                end if;
             end if;
 
             buff_addr_p1_v := std_logic_vector(unsigned(buff_addr_v) + 1);
@@ -579,7 +619,12 @@ begin
                     -- Pass address to variable
                     pcie_mfb_meta_addr_v := pcie_mfb_meta_arr(1)(META_PCIE_ADDR);
                     buff_addr_v          := pcie_mfb_meta_addr_v(log2(BUFFER_DEPTH)+log2(MFB_DWORDS) -1 downto log2(MFB_DWORDS));
-                    chan_addr_v          := pcie_mfb_meta_arr(1)(log2(CHANS_PER_ARRAY) + META_CHAN_NUM_O -1 downto META_CHAN_NUM_O);
+                    -- FLAT: intra-array channel slot from the address; else from the channel field
+                    if (FLAT) then
+                        chan_addr_v := pcie_mfb_meta_addr_v(FLAT_CHAN_LSB_DW + log2(CHANS_PER_ARRAY) -1 downto FLAT_CHAN_LSB_DW);
+                    else
+                        chan_addr_v := pcie_mfb_meta_arr(1)(log2(CHANS_PER_ARRAY) + META_CHAN_NUM_O -1 downto META_CHAN_NUM_O);
+                    end if;
 
                     buff_addr_p1_v := std_logic_vector(unsigned(buff_addr_v) + 1);
 
@@ -663,17 +708,29 @@ begin
         -- cocotb/cocotb_test.py.
         -- =========================================================================================
         arr_idx_rgn_logic_p : process (all) is
-            variable chan_v : std_logic_vector(META_CHAN_NUM_W -1 downto 0);
+            variable chan_v      : std_logic_vector(META_CHAN_NUM_W -1 downto 0);
+            variable pcie_addr_v : std_logic_vector(META_PCIE_ADDR_W -1 downto 0);
         begin
             arr_idx_rgn <= (others => (others => '0'));
 
             for i in 0 to (MFB_REGIONS - 1) loop
                 if (pcie_mfb_src_rdy_inp_reg(INP_REG_NUM) = '1') then
                     if (pcie_mfb_sof_inp_reg(INP_REG_NUM)(i) = '1') then
-                        chan_v         := pcie_mfb_meta_arr(i)(META_CHAN_NUM);
-                        arr_idx_rgn(i) <= chan_v(log2(MEM_ARRAYS) + log2(CHANS_PER_ARRAY) -1 downto log2(CHANS_PER_ARRAY));
+                        -- FLAT: memory-array select from the address; else from the channel field
+                        if (FLAT) then
+                            pcie_addr_v    := pcie_mfb_meta_arr(i)(META_PCIE_ADDR);
+                            arr_idx_rgn(i) <= pcie_addr_v(FLAT_ARR_LSB_DW + log2(MEM_ARRAYS) -1 downto FLAT_ARR_LSB_DW);
+                        else
+                            chan_v         := pcie_mfb_meta_arr(i)(META_CHAN_NUM);
+                            arr_idx_rgn(i) <= chan_v(log2(MEM_ARRAYS) + log2(CHANS_PER_ARRAY) -1 downto log2(CHANS_PER_ARRAY));
+                        end if;
                     else
-                        arr_idx_rgn(i) <= mem_arr_idx_reg;
+                        -- FLAT: track the running address so a frame may cross array boundaries
+                        if (FLAT) then
+                            arr_idx_rgn(i) <= std_logic_vector(addr_cntr_pst(FLAT_ARR_LSB_DW + log2(MEM_ARRAYS) -1 downto FLAT_ARR_LSB_DW));
+                        else
+                            arr_idx_rgn(i) <= mem_arr_idx_reg;
+                        end if;
                     end if;
                 end if;
             end loop;
@@ -861,15 +918,34 @@ begin
     -- With SPLIT_READ_PORTS, region-slot P maps 1:1 to read port A/B. Without it (or for the
     -- 1-region/SDP configuration), both region-slots are broadcast from port A, so both TDP ports of
     -- a 2-region array are attempted for the same logical read.
+    -- In FLAT mode the wide RD_ADDR_* carries the channel-select in its top log2(CHANNELS) bits and
+    -- the intra-channel byte address in its low POINTER_WIDTH bits; RD_CHAN_* is ignored. In
+    -- partitioned mode RD_ADDR_* is exactly the intra-channel byte address (POINTER_WIDTH wide, so
+    -- the low-bits slice is the whole vector) and RD_CHAN_* selects the channel.
     rd_eff_split_g : if (SPLIT_READ_PORTS and MFB_REGIONS = 2) generate
-        rd_addr_eff(0) <= RD_ADDR_A;
-        rd_chan_eff(0) <= RD_CHAN_A;
-        rd_addr_eff(1) <= RD_ADDR_B;
-        rd_chan_eff(1) <= RD_CHAN_B;
+        rd_addr_eff(0) <= RD_ADDR_A(POINTER_WIDTH -1 downto 0);
+        rd_addr_eff(1) <= RD_ADDR_B(POINTER_WIDTH -1 downto 0);
+
+        rd_chan_split_flat_g : if (FLAT) generate
+            rd_chan_eff(0) <= RD_ADDR_A(POINTER_WIDTH + log2(CHANNELS) -1 downto POINTER_WIDTH);
+            rd_chan_eff(1) <= RD_ADDR_B(POINTER_WIDTH + log2(CHANNELS) -1 downto POINTER_WIDTH);
+        else generate
+            rd_chan_eff(0) <= RD_CHAN_A;
+            rd_chan_eff(1) <= RD_CHAN_B;
+        end generate;
     else generate
-        rd_eff_bcast_g : for p in 0 to (MFB_REGIONS -1) generate
-            rd_addr_eff(p) <= RD_ADDR_A;
-            rd_chan_eff(p) <= RD_CHAN_A;
+        rd_addr_bcast_g : for p in 0 to (MFB_REGIONS -1) generate
+            rd_addr_eff(p) <= RD_ADDR_A(POINTER_WIDTH -1 downto 0);
+        end generate;
+
+        rd_chan_bcast_flat_g : if (FLAT) generate
+            rd_chan_bcast_flat_p_g : for p in 0 to (MFB_REGIONS -1) generate
+                rd_chan_eff(p) <= RD_ADDR_A(POINTER_WIDTH + log2(CHANNELS) -1 downto POINTER_WIDTH);
+            end generate;
+        else generate
+            rd_chan_bcast_part_p_g : for p in 0 to (MFB_REGIONS -1) generate
+                rd_chan_eff(p) <= RD_CHAN_A;
+            end generate;
         end generate;
     end generate;
 
@@ -929,9 +1005,9 @@ begin
 
         bram_demux_p : process (all) is
         begin
-            rd_en_bram_demux                                                                                                               <= (others => (others => '0'));
-            rd_en_bram_demux(to_integer(unsigned(RD_CHAN_A(log2(MEM_ARRAYS) + log2(CHANS_PER_ARRAY) -1 downto log2(CHANS_PER_ARRAY)))))(0) <= RD_EN_A;
-            rd_en_bram_demux(to_integer(unsigned(RD_CHAN_B(log2(MEM_ARRAYS) + log2(CHANS_PER_ARRAY) -1 downto log2(CHANS_PER_ARRAY)))))(1) <= RD_EN_B;
+            rd_en_bram_demux                                                                                                                   <= (others => (others => '0'));
+            rd_en_bram_demux(to_integer(unsigned(rd_chan_eff(0)(log2(MEM_ARRAYS) + log2(CHANS_PER_ARRAY) -1 downto log2(CHANS_PER_ARRAY)))))(0) <= RD_EN_A;
+            rd_en_bram_demux(to_integer(unsigned(rd_chan_eff(1)(log2(MEM_ARRAYS) + log2(CHANS_PER_ARRAY) -1 downto log2(CHANS_PER_ARRAY)))))(1) <= RD_EN_B;
         end process;
 
         RD_DATA_VLD_A <= rd_data_valid_arr(0);
@@ -980,8 +1056,8 @@ begin
     begin
         bram_demux_p : process (all) is
         begin
-            rd_en_bram_demux                                                                                                            <= (others => (others => '0'));
-            rd_en_bram_demux(to_integer(unsigned(RD_CHAN_A(log2(MEM_ARRAYS) + log2(CHANS_PER_ARRAY) -1 downto log2(CHANS_PER_ARRAY))))) <= (others => RD_EN_A);
+            rd_en_bram_demux                                                                                                                <= (others => (others => '0'));
+            rd_en_bram_demux(to_integer(unsigned(rd_chan_eff(0)(log2(MEM_ARRAYS) + log2(CHANS_PER_ARRAY) -1 downto log2(CHANS_PER_ARRAY))))) <= (others => RD_EN_A);
         end process;
 
         rd_data_sel_g : if (MFB_REGIONS = 1) generate
