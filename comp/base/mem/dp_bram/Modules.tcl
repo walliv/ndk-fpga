@@ -12,3 +12,4 @@ set PACKAGES "$PACKAGES $OFM_PATH/comp/base/pkg/math_pack.vhd"
 
 # Set VHDL standard to "VHDL" (98) instead of default "VHDL 2008" for this file
 lappend MOD [list "$ENTITY_BASE/dp_bram_behav.vhd" VIVADO_SET_PROPERTY [list -quiet FILE_TYPE {VHDL}]]
+lappend MOD "$ENTITY_BASE/tdp_bram_be.vhd"
