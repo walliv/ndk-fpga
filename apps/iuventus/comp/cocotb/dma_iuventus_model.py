@@ -68,6 +68,18 @@ class SimplifiedDmaModel:
 
     Completions are serialized through a single internal queue/coroutine so overlapping read/write
     completions never collide on the same DMA_CLK edge.
+
+    Backpressure (Stage 3): call `enable_backpressure()` to make a background loop
+    (`_backpressure_loop`) periodically hold BOTH NVME_RD_REQ_RDY and NVME_WR_MFB_DST_RDY low
+    together for `bp_low_cycles` cycles out of every `bp_period` cycles -- the direct
+    component-level sim analog of a real backend (SSD/DMA_IUVENTUS) that intermittently can't
+    accept new requests or write data (e.g. the HW read-path stall / SSD idle-window wedge).
+    USER_CORE's request/frame generators must hold VLD/SRC_RDY steady and resume (not drop,
+    duplicate, or wedge) once ready is reasserted; that's exactly what the backpressure directed
+    case in cocotb_test.py checks via the reference-model scoreboard. Disabled by default
+    (`enable_backpressure()` not called), in which case behavior is identical to before this knob
+    existed. `disable_backpressure()` cleanly turns it back off (e.g. between directed cases
+    sharing one long-lived model instance).
     """
 
     def __init__(self, dut, clk, rd_latency_cycles: int = 2, wr_latency_cycles: int = 2):
@@ -75,11 +87,15 @@ class SimplifiedDmaModel:
         self._clk = clk
         self.rd_latency_cycles = rd_latency_cycles
         self.wr_latency_cycles = wr_latency_cycles
+        self.bp_period = 10
+        self.bp_low_cycles = 3
 
         self.rd_req_accept_cb = None   # (lba_ptr, lba_num, qid) -> None
         self.wr_frame_accept_cb = None  # (MfbTransactionWithMeta) -> None
 
         self._rd_busy = False
+        self._bp_enabled = False  # backpressure feature armed (toggled by enable/disable_backpressure)
+        self._bp_active = False  # backpressure window currently in effect (RDY/DST_RDY held low)
         self._op_stat_pending = []  # list of (type, code, done_event_or_None) awaiting dispatch, FIFO
 
         dut.NVME_RD_REQ_RDY.value = 1
@@ -100,15 +116,56 @@ class SimplifiedDmaModel:
 
         cocotb.start_soon(self._rd_req_loop())
         cocotb.start_soon(self._op_stat_loop())
+        cocotb.start_soon(self._wr_dst_rdy_loop())
+        cocotb.start_soon(self._backpressure_loop())
 
     def reset(self) -> None:
         """Clears this model's own in-flight/pending state. Call after pulsing a fresh DMA_RST
         mid-simulation (e.g. between directed sub-scenarios sharing one cocotb test) so a stray
         in-flight request/completion from a previous scenario can't leak into the next one."""
         self._rd_busy = False
+        self._bp_active = False
         self._op_stat_pending.clear()
         self._dut.NVME_RD_REQ_RDY.value = 1
         self._dut.NVME_OP_STAT_VLD.value = 0
+
+    def enable_backpressure(self, bp_period: int = 10, bp_low_cycles: int = 3) -> None:
+        """Arms periodic backpressure: RDY/DST_RDY will be held low for `bp_low_cycles` cycles out
+        of every `bp_period` cycles, starting from the next cycle boundary `_backpressure_loop`
+        observes."""
+        self.bp_period = bp_period
+        self.bp_low_cycles = bp_low_cycles
+        self._bp_enabled = True
+
+    def disable_backpressure(self) -> None:
+        """Disarms backpressure; RDY/DST_RDY return to their normal (busy-gated / always-high)
+        behavior from the next cycle."""
+        self._bp_enabled = False
+
+    async def _wr_dst_rdy_loop(self):
+        """Drives NVME_WR_MFB_DST_RDY as a synchronous level every cycle (same discipline as
+        _rd_req_loop's RDY): high unless a backpressure window is active. With backpressure never
+        enabled, `_bp_active` is permanently False, so this reproduces the previous "always high"
+        tie-off exactly."""
+        while True:
+            await RisingEdge(self._clk)
+            self._dut.NVME_WR_MFB_DST_RDY.value = int(not self._bp_active)
+
+    async def _backpressure_loop(self):
+        """Recomputes `_bp_active` fresh every cycle from a free-running `cycle_in_period` counter
+        (reset whenever backpressure is disabled), holding it True for the last `bp_low_cycles` of
+        every `bp_period`-cycle window while `_bp_enabled`. RDY/DST_RDY (via _rd_req_loop /
+        _wr_dst_rdy_loop, which both AND in `not self._bp_active`) are held low together during
+        that window, independent of any in-flight read/write servicing."""
+        cycle_in_period = 0
+        while True:
+            await RisingEdge(self._clk)
+            if not self._bp_enabled:
+                self._bp_active = False
+                cycle_in_period = 0
+                continue
+            self._bp_active = cycle_in_period >= (self.bp_period - self.bp_low_cycles)
+            cycle_in_period = (cycle_in_period + 1) % self.bp_period
 
     async def _rd_req_loop(self):
         """Drives NVME_RD_REQ_RDY as a synchronous level, decided fresh every DMA_CLK edge from
@@ -122,7 +179,7 @@ class SimplifiedDmaModel:
         edge-aligned handshakes (see cocotb_test.py's history for the misdiagnosis this caused)."""
         while True:
             await RisingEdge(self._clk)
-            self._dut.NVME_RD_REQ_RDY.value = int(not self._rd_busy)
+            self._dut.NVME_RD_REQ_RDY.value = int((not self._rd_busy) and (not self._bp_active))
 
             await ReadOnly()
             vld = bool(self._dut.NVME_RD_REQ_VLD.value)
