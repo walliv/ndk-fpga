@@ -712,6 +712,83 @@ async def _case_backpressure_no_wedge(dut, dev, test):
     dev.dma_model.disable_backpressure()
 
 
+async def _case_integrity_checker(dut, dev, test):
+    """(NEW) Drive the IUVENTUS_INTEGRITY_CHECKER end-to-end -- the same MI sequence
+    apps/iuventus/sw/integ_run.py uses on real hardware -- against the DMA model's write/read-back
+    data-integrity store. This is the FIRST *simulation* of the integrity checker (previously
+    HW-only): it exercises the checker FSM, the integ_en WR/RD-MFB steering mux, its address-derived
+    write pattern (ref_beat) and the read-back comparator, all in sim. With integ_en=1 the checker
+    owns NVME_WR_MFB / NVME_RD_REQ / NVME_RD_MFB; the model stores each written sector and returns it
+    on the matching read, so a correct checker reports err_cnt == 0."""
+    STATES = {0: "IDLE", 1: "WR", 2: "WR_WAIT", 3: "RD_REQ", 4: "RD_DATA", 5: "DONE"}
+    dev.dma_model.data_integrity = True
+    dev.dma_model._storage.clear()
+    try:
+        c = dev.nfb.comp_open("ziti,iuventus_test_ctrl")
+        base_byte = 8 * 512   # in-range byte-address LBA (sector 8)
+        count = 4             # sectors written then read back
+
+        # Re-arm if a previous sweep parked the FSM in DONE (DONE->IDLE needs a pulse before IDLE->WR).
+        if (await e(c.read32)(0x40)) & 0x2:
+            await e(c.write32)(0x30, 0x1)
+            await e(c.write32)(0x30, 0x0)
+
+        await e(c.write32)(0x34, base_byte & 0xffffffff)
+        await e(c.write32)(0x38, (base_byte >> 32) & 0xffffffff)
+        await e(c.write32)(0x3C, count)
+        await e(c.write32)(0x30, 0x2)   # integ_en=1
+        await e(c.write32)(0x30, 0x3)   # start pulse (+en)
+        await e(c.write32)(0x30, 0x2)   # deassert start (keep en)
+
+        done = False
+        for _ in range(400):
+            if (await e(c.read32)(0x40)) & 0x2:
+                done = True
+                break
+            for _ in range(20):
+                await RisingEdge(dut.DMA_CLK)
+
+        status = await e(c.read32)(0x40)
+        state = STATES.get((status >> 4) & 7, (status >> 4) & 7)
+        assert done, (f"integrity checker never reached DONE "
+                      f"(status=0x{status:08x} state={state} beat={(status >> 8) & 0xff})")
+        err = await e(c.read32)(0x44)
+        exp = await e(c.read32)(0x50)
+        got = await e(c.read32)(0x54)
+        assert err == 0, f"integrity check found {err} mismatch(es): first exp=0x{exp:08x} got=0x{got:08x}"
+
+        # --- OOR ABORT: a sweep past the namespace must ABORT (STS_OP_ERR set, DONE), not hang ---
+        # The checker WRITEs first, so an out-of-range sweep trips op_ctrl's write-OOR completion;
+        # with the fix, S_WR_WAIT sees OP_STAT_CODE/="00" and aborts to DONE instead of proceeding
+        # to a read that would then wedge S_RD_DATA forever (the pre-fix HW failure mode).
+        dev.dma_model.lba_space_size = 4096   # sectors
+        if (await e(c.read32)(0x40)) & 0x2:   # re-arm from the previous DONE
+            await e(c.write32)(0x30, 0x1)
+            await e(c.write32)(0x30, 0x0)
+        oor_base = 8192   # sector 8192 > 4096 -> out of range
+        await e(c.write32)(0x34, oor_base & 0xffffffff)
+        await e(c.write32)(0x38, (oor_base >> 32) & 0xffffffff)
+        await e(c.write32)(0x3C, 4)
+        await e(c.write32)(0x30, 0x2)
+        await e(c.write32)(0x30, 0x3)
+        await e(c.write32)(0x30, 0x2)
+        done = False
+        for _ in range(200):
+            if (await e(c.read32)(0x40)) & 0x2:
+                done = True
+                break
+            for _ in range(20):
+                await RisingEdge(dut.DMA_CLK)
+        status = await e(c.read32)(0x40)
+        state = STATES.get((status >> 4) & 7, (status >> 4) & 7)
+        assert done, (f"OOR sweep HUNG (the bug this fix targets): status=0x{status:08x} state={state}")
+        assert (status >> 2) & 1 == 1, (f"OOR sweep reached DONE but STS_OP_ERR (bit 2) not set: "
+                                        f"status=0x{status:08x}")
+    finally:
+        dev.dma_model.data_integrity = False
+        dev.dma_model.lba_space_size = None
+
+
 @cocotb.test(timeout_time=2000, timeout_unit='us')
 async def test_user_core_reference_model(dut):
     """Stage 2+3: reference-model-predicted expected output vs a scoreboard comparing against the
@@ -774,3 +851,7 @@ async def test_user_core_reference_model(dut):
     await dev._reset()
     dev.dma_model.reset()
     await _case_backpressure_no_wedge(dut, dev, test)
+
+    await dev._reset()
+    dev.dma_model.reset()
+    await _case_integrity_checker(dut, dev, test)
