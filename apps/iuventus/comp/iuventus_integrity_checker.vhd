@@ -49,6 +49,12 @@ entity IUVENTUS_INTEGRITY_CHECKER is
         STS_ERR_FIRST_EXP : out std_logic_vector(31 downto 0);
         STS_ERR_FIRST_GOT : out std_logic_vector(31 downto 0);
 
+        -- ---- Debug (localise a hang: FSM state / write-stream progress / completion pulses) ----
+        STS_STATE      : out std_logic_vector(2 downto 0);   -- state_t'pos: IDLE=0 WR=1 WR_WAIT=2 RD_REQ=3 RD_DATA=4 DONE=5
+        STS_BEAT_IDX   : out std_logic_vector(7 downto 0);   -- current write/read beat within the sector
+        STS_OPSTAT_CNT : out std_logic_vector(7 downto 0);   -- saturating count of OP_STAT_VLD (write/read CQE) pulses seen
+        STS_OP_ERR     : out std_logic;                      -- '1' if the sweep aborted on a non-success completion (OOR/failure)
+
         -- ---- DMA-Iuventus WRITE data path (host -> SSD) --------------------------------------
         WR_MFB_DATA    : out std_logic_vector(MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH -1 downto 0);
         WR_MFB_META    : out std_logic_vector(LBA_PTR_W -1 downto 0);
@@ -67,6 +73,11 @@ entity IUVENTUS_INTEGRITY_CHECKER is
 
         -- ---- Operation completion (one pulse per finished NVMe command) ----------------------
         OP_STAT_VLD    : in  std_logic;
+        -- op_ctrl's completion code for that pulse: "00"=SUCCESS, "01"=generic failure, "10"=LBA
+        -- Out of Range. Any non-"00" code aborts the current sweep (S_WR_WAIT / S_RD_DATA -> S_DONE
+        -- with STS_OP_ERR set) so an OOR/failed command can never wedge the FSM waiting for a CQE
+        -- that succeeded internally or read-back data that will never drain.
+        OP_STAT_CODE   : in  std_logic_vector(1 downto 0);
 
         -- ---- DMA-Iuventus READ data path (SSD -> host) --------------------------------------
         RD_MFB_DATA    : in  std_logic_vector(MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH -1 downto 0);
@@ -117,6 +128,11 @@ architecture FULL of IUVENTUS_INTEGRITY_CHECKER is
 
     signal last_lba : std_logic;   -- cur_lba is the final sector of the sweep
 
+    signal opstat_cnt : unsigned(7 downto 0);   -- debug: saturating count of OP_STAT_VLD pulses
+    signal op_err     : std_logic;              -- sweep aborted on a non-success completion (OOR/failure)
+
+    constant OP_STAT_SUCCESS : std_logic_vector(1 downto 0) := "00";
+
 begin
 
     last_lba <= '1' when (cur_lba + to_unsigned(SECT_SIZE, LBA_PTR_W)) = end_lba else '0';
@@ -143,18 +159,31 @@ begin
     STS_ERR_FIRST_EXP <= err_exp;
     STS_ERR_FIRST_GOT <= err_got;
 
+    STS_STATE      <= std_logic_vector(to_unsigned(state_t'pos(state), 3));
+    STS_BEAT_IDX   <= std_logic_vector(resize(beat_idx, 8));
+    STS_OPSTAT_CNT <= std_logic_vector(opstat_cnt);
+    STS_OP_ERR     <= op_err;
+
     fsm_p : process (CLK)
         variable exp_beat : std_logic_vector(DATA_W -1 downto 0);
     begin
         if rising_edge(CLK) then
             if (RST = '1') then
-                state     <= S_IDLE;
-                err_cnt   <= (others => '0');
-                err_first <= '0';
-                err_lba   <= (others => '0');
-                err_exp   <= (others => '0');
-                err_got   <= (others => '0');
+                state      <= S_IDLE;
+                err_cnt    <= (others => '0');
+                err_first  <= '0';
+                err_lba    <= (others => '0');
+                err_exp    <= (others => '0');
+                err_got    <= (others => '0');
+                opstat_cnt <= (others => '0');
+                op_err     <= '0';
             else
+                -- Debug: count every completion pulse (write/read CQE) regardless of FSM state, so
+                -- a hang in S_WR_WAIT with opstat_cnt=0 proves the write CQE never arrived.
+                if (OP_STAT_VLD = '1' and opstat_cnt /= X"FF") then
+                    opstat_cnt <= opstat_cnt + 1;
+                end if;
+
                 case state is
 
                     when S_IDLE =>
@@ -166,6 +195,7 @@ begin
                             beat_idx  <= (others => '0');
                             err_cnt   <= (others => '0');
                             err_first <= '0';
+                            op_err    <= '0';
                             -- A zero-length request completes immediately.
                             if (unsigned(CTL_LBA_COUNT) = 0) then
                                 state <= S_DONE;
@@ -188,7 +218,12 @@ begin
                     -- QD1: wait for the write command to complete before issuing the next.
                     when S_WR_WAIT =>
                         if (OP_STAT_VLD = '1') then
-                            if (last_lba = '1') then
+                            if (OP_STAT_CODE /= OP_STAT_SUCCESS) then
+                                -- OOR / device error: the write never committed -- abort the sweep
+                                -- (do NOT proceed to read back data that was never written).
+                                op_err <= '1';
+                                state  <= S_DONE;
+                            elsif (last_lba = '1') then
                                 cur_lba <= base_lba;   -- rewind to start for the read-back sweep
                                 state   <= S_RD_REQ;
                             else
@@ -227,6 +262,13 @@ begin
                             else
                                 beat_idx <= beat_idx + 1;
                             end if;
+                        elsif (OP_STAT_VLD = '1' and OP_STAT_CODE /= OP_STAT_SUCCESS) then
+                            -- OOR / device error read: op_ctrl completes it internally and never
+                            -- drains WRBUFF, so RD_MFB data will NEVER arrive -- abort instead of
+                            -- hanging in S_RD_DATA (a successful read's OP_STAT carries "00" and is
+                            -- ignored here; its data is consumed by the RD_MFB_SRC_RDY branch above).
+                            op_err <= '1';
+                            state  <= S_DONE;
                         end if;
 
                     when S_DONE =>
