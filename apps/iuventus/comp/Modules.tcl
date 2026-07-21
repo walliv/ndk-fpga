@@ -71,6 +71,7 @@ if {$ARCHGRP_ARR(USR_CORE_ARCH) == "FULL"} {
     lappend COMPONENTS [list "MFB_SPEED_METER_MI"      $MFB_SPEED_METER_BASE "FULL" ]
     lappend COMPONENTS [list "EVENT_COUNTER"           $EVENT_CNTR_BASE      "FULL" ]
 
+    lappend MOD "$ENTITY_BASE/iuventus_integrity_checker.vhd"
     lappend MOD "$ENTITY_BASE/user_core_test_arch.vhd"
 }
 
