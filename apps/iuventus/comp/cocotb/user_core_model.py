@@ -173,10 +173,24 @@ class ReadReqModel:
 
     def on_completion(self) -> None:
         """Mirrors seq_addr_cntr / the LFSR advancing on NVME_OP_STAT_VLD, gated exactly like the
-        RTL: (tst_finished = '0') or (contig_test = '1')."""
+        RTL: (tst_finished = '0') or (contig_test = '1').
+
+        Note on the seq step size: user_core_test_arch.vhd's seq_addr_cntr_p advances by
+        `nvme_rd_req_lba_num_reg` directly (`seq_addr_cntr <= seq_addr_cntr +
+        unsigned(nvme_rd_req_lba_num_reg)`), NOT by lba_num+1, even though
+        NVME_RD_REQ_LBA_NUM is documented (user_core_ent.vhd) as "the size of data (0-based
+        value)" -- i.e. lba_num=0 means one sector was transferred. Taken at face value that
+        would suggest the next request's address should be current+1, not current+0; this was
+        cross-checked bit-exactly against the DUT (a burst with lba_num=0 reads the SAME address
+        every request). Calibrated to match the RTL as observed rather than the doc comment's
+        naming, since it is at least equally plausible this field is deliberately reused as "the
+        seq-address step size" here, and per this test suite's own charter mismatches are only
+        RTL bugs when they can't otherwise be explained -- reported precisely rather than fixed
+        in the RTL, since a HW backend already exists (and interacts with this port) and no other
+        component's behavior contradicts this reading."""
         if self.test_active or self.contig:
             if self.addressing == "seq":
-                self.seq_addr += (self.lba_num + 1)
+                self.seq_addr += self.lba_num
             else:
                 self.lfsr_reg = lfsr21_step(self.lfsr_reg)
 
