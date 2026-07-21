@@ -1,0 +1,4 @@
+[submodule "comp/dma/dma_iuventus"]
+	path = comp/dma/dma_iuventus
+	url = git@github.com:walliv/ndk-mod-dma-iuventus.git
+	branch = valek-feat-iuventus-multiqueue
