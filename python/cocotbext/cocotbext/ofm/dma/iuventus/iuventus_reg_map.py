@@ -22,8 +22,17 @@ class IuventusMiRegMap(IntEnum):
     """COMMON register block (shared across every queue): CONTROL/STATUS, the shared RDBUFF/
     WRBUFF data-pool base addresses/PRP list pointers, METADATA_PTR, LAST_CQ_ENTRY/CPL_ERR_MASK/
     TAG_FIFO_STATUS status, and every *_CNTR performance counter (see nvme_sw_manager.vhd's
-    R_ADDRS_COMMON, which this must match exactly). Per-queue configuration/doorbell registers
-    live in the separate PER_Q_BASE-based 2D block -- see IuventusPerQueueRegMap below.
+    R_ADDRS, which this must match exactly). Per-queue configuration/doorbell registers live in
+    the separate PER_Q_BASE-based 2D block (IuventusPerQueueRegMap below); per-queue SSD-facing
+    stat counters (succ/unsucc completions, SQE dispatches, CQE processed) live in the separate
+    PER_Q_CNTR_BASE-based 2D block (IuventusPerQueueCntrRegMap below).
+
+    The debug-only per-BAR/buffer breakdown counters (aggregate PCIE_RDS/RD_BYTES/WRS/WR_BYTES,
+    RDBUFF_PCIE_*, WRBUFF_PCIE_*, CQ_PCIE_*, SQ_DISP_RDS/BYTES, RDBUFF_DISP_*, WRBUFF_USR_*, and
+    the never-wired *_RPT_UPDS_CNTR_* placeholders) were dropped from the register map -- they
+    weren't needed for SSD throughput/HW debug (see the report accompanying this change).
+    SUCC_COMPL/UNSUCC_COMPL/SQE_DISP/CQE_PROC stay here as COMMON aggregates (quick "everything"
+    totals) alongside their new per-queue counterparts in IuventusPerQueueCntrRegMap.
     """
     CONTROL                     = 0x000
     STATUS                      = 0x004
@@ -48,60 +57,24 @@ class IuventusMiRegMap(IntEnum):
     SQE_DISP_CNTR_H             = 0x050
     CQE_PROC_CNTR_L             = 0x054
     CQE_PROC_CNTR_H             = 0x058
-    PCIE_RDS_CNTR_L             = 0x05C
-    PCIE_RDS_CNTR_H             = 0x060
-    PCIE_RD_BYTES_CNTR_L        = 0x064
-    PCIE_RD_BYTES_CNTR_H        = 0x068
-    PCIE_WRS_CNTR_L             = 0x06C
-    PCIE_WRS_CNTR_H             = 0x070
-    PCIE_WR_BYTES_CNTR_L        = 0x074
-    PCIE_WR_BYTES_CNTR_H        = 0x078
-    SQ_PCIE_RDS_CNTR_L          = 0x07C
-    SQ_PCIE_RDS_CNTR_H          = 0x080
-    SQ_PCIE_RD_BYTES_CNTR_L     = 0x084
-    SQ_PCIE_RD_BYTES_CNTR_H     = 0x088
-    SUCC_COMPL_CNTR_L           = 0x08C
-    SUCC_COMPL_CNTR_H           = 0x090
-    UNSUCC_COMPL_CNTR_L         = 0x094
-    UNSUCC_COMPL_CNTR_H         = 0x098
-    RDBUFF_PCIE_RDS_CNTR_L      = 0x09C
-    RDBUFF_PCIE_RDS_CNTR_H      = 0x0A0
-    RDBUFF_PCIE_RD_BYTES_CNTR_L = 0x0A4
-    RDBUFF_PCIE_RD_BYTES_CNTR_H = 0x0A8
-    WRBUFF_PCIE_WRS_CNTR_L      = 0x0AC
-    WRBUFF_PCIE_WRS_CNTR_H      = 0x0B0
-    WRBUFF_PCIE_WR_BYTES_CNTR_L = 0x0B4
-    WRBUFF_PCIE_WR_BYTES_CNTR_H = 0x0B8
-    CQ_PCIE_WRS_CNTR_L          = 0x0BC
-    CQ_PCIE_WRS_CNTR_H          = 0x0C0
-    CQ_PCIE_WR_BYTES_CNTR_L     = 0x0C4
-    CQ_PCIE_WR_BYTES_CNTR_H     = 0x0C8
-    CQHDBL_REG_UPDS_CNTR_L      = 0x0CC
-    CQHDBL_REG_UPDS_CNTR_H      = 0x0D0
-    CQHDBL_RPT_UPDS_CNTR_L      = 0x0D4
-    CQHDBL_RPT_UPDS_CNTR_H      = 0x0D8
-    SQTDBL_REG_UPDS_CNTR_L      = 0x0DC
-    SQTDBL_REG_UPDS_CNTR_H      = 0x0E0
-    SQTDBL_RPT_UPDS_CNTR_L      = 0x0E4
-    SQTDBL_RPT_UPDS_CNTR_H      = 0x0E8
-    NVME_RD_BYTES_CNTR_L        = 0x0EC
-    NVME_RD_BYTES_CNTR_H        = 0x0F0
-    NVME_WR_BYTES_CNTR_L        = 0x0F4
-    NVME_WR_BYTES_CNTR_H        = 0x0F8
-    WRBUFF_USR_RDS_CNTR_L       = 0x0FC
-    WRBUFF_USR_RDS_CNTR_H       = 0x100
-    WRBUFF_USR_RD_BYTES_CNTR_L  = 0x104
-    WRBUFF_USR_RD_BYTES_CNTR_H  = 0x108
-    RDBUFF_DISP_RDS_CNTR_L      = 0x10C
-    RDBUFF_DISP_RDS_CNTR_H      = 0x110
-    RDBUFF_DISP_RD_BYTES_CNTR_L = 0x114
-    RDBUFF_DISP_RD_BYTES_CNTR_H = 0x118
-    SQ_DISP_RDS_CNTR_L          = 0x11C
-    SQ_DISP_RDS_CNTR_H          = 0x120
-    SQ_DISP_RD_BYTES_CNTR_L     = 0x124
-    SQ_DISP_RD_BYTES_CNTR_H     = 0x128
-    NVME_FLUSH_DISP_CNTR_L      = 0x12C
-    NVME_FLUSH_DISP_CNTR_H      = 0x130
+    SQ_PCIE_RDS_CNTR_L          = 0x05C
+    SQ_PCIE_RDS_CNTR_H          = 0x060
+    SQ_PCIE_RD_BYTES_CNTR_L     = 0x064
+    SQ_PCIE_RD_BYTES_CNTR_H     = 0x068
+    SUCC_COMPL_CNTR_L           = 0x06C
+    SUCC_COMPL_CNTR_H           = 0x070
+    UNSUCC_COMPL_CNTR_L         = 0x074
+    UNSUCC_COMPL_CNTR_H         = 0x078
+    CQHDBL_REG_UPDS_CNTR_L      = 0x07C
+    CQHDBL_REG_UPDS_CNTR_H      = 0x080
+    SQTDBL_REG_UPDS_CNTR_L      = 0x084
+    SQTDBL_REG_UPDS_CNTR_H      = 0x088
+    NVME_RD_BYTES_CNTR_L        = 0x08C
+    NVME_RD_BYTES_CNTR_H        = 0x090
+    NVME_WR_BYTES_CNTR_L        = 0x094
+    NVME_WR_BYTES_CNTR_H        = 0x098
+    NVME_FLUSH_DISP_CNTR_L      = 0x09C
+    NVME_FLUSH_DISP_CNTR_H      = 0x0A0
 
 
 # Base offset and per-queue slot stride of the PER-QUEUE 2D register block (must match
@@ -133,3 +106,37 @@ class IuventusPerQueueRegMap(IntEnum):
 def per_queue_reg_addr(reg: IuventusPerQueueRegMap, qid: int) -> int:
     """Absolute MI byte address of per-queue register `reg` for queue `qid`."""
     return PER_Q_BASE + qid * PER_Q_STRIDE + int(reg)
+
+
+# Base offset and per-queue slot stride of the PER-QUEUE COUNTER 2D register block (must match
+# nvme_sw_manager.vhd's PER_Q_CNTR_BASE/PER_Q_CNTR_STRIDE constants exactly). A SEPARATE, parallel
+# 2D block from IuventusPerQueueRegMap above -- PER_Q_STRIDE (0x40) has no room left for these 8
+# more 32-bit fields alongside the 12 already there.
+PER_Q_CNTR_BASE = 0x800
+PER_Q_CNTR_STRIDE = 0x40
+
+
+class IuventusPerQueueCntrRegMap(IntEnum):
+    """Byte offsets *relative to one queue's slot* (PER_Q_CNTR_BASE + qid*PER_Q_CNTR_STRIDE) --
+    see per_queue_cntr_reg_addr() below. Read-only; populated by SAMPLE_CNTRS like the COMMON
+    counters (write CtrlRegBits.SAMPLE_CNTRS to IuventusMiRegMap.CONTROL, then read). Must match
+    nvme_sw_manager.vhd's PQC_* constants exactly.
+
+    sq_pcie_rds is NOT here (stays a COMMON-only aggregate, IuventusMiRegMap.SQ_PCIE_RDS_CNTR_*):
+    the underlying PCIe-read-request-count signal is classified only by which BAR it targets, not
+    which queue's SQ ring within that BAR, so no per-queue QID is available at that signal's
+    boundary (see the report accompanying this change).
+    """
+    SUCC_CPLS_L   = 0x00
+    SUCC_CPLS_H   = 0x04
+    UNSUCC_CPLS_L = 0x08
+    UNSUCC_CPLS_H = 0x0C
+    SQE_DISP_L    = 0x10
+    SQE_DISP_H    = 0x14
+    CQE_PROC_L    = 0x18
+    CQE_PROC_H    = 0x1C
+
+
+def per_queue_cntr_reg_addr(reg: IuventusPerQueueCntrRegMap, qid: int) -> int:
+    """Absolute MI byte address of per-queue counter register `reg` for queue `qid`."""
+    return PER_Q_CNTR_BASE + qid * PER_Q_CNTR_STRIDE + int(reg)
