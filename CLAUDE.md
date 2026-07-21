@@ -1,6 +1,6 @@
 # General rules 
 
-- the primary languages are VHDL (HDL), SystemVerilog (verification), Tcl (build scripts), and Python (tooling/simulation).
+- the primary languages are VHDL 2008, SystemVerilog (verification), Tcl (build scripts), and Python (tooling/simulation).
 - required tools: **Intel Quartus Prime Pro 25.1** (for Intel/Altera cards) or **Xilinx Vivado 2025.1** (for AMD/Xilinx cards), **Questa Sim-64 2025.2** (for UVM verification with System Verilog), **nvc** (for cocotb simulation).
 - each background task running in Claude should be actively monitored so it doesn't stuck
 - results can be deemed successful if the experiment they came from is
@@ -21,8 +21,9 @@ refactor(pcie): simplify handshake logic
 
 - The commits should be atomic, i.e. that they should contain a self containing
   change where checkout before them as well as on them should still allow to
-  compile the sources successfully. This requirement can be ommited during 
-  prototyping before doing the final cleanup. 
+  compile the sources successfully, test that it is working AND contain
+  means to test/verify that it is working. This requirement can be ommited during 
+  prototyping on a separate branch before creating a pull request. 
 - merging into the `devel` branch should be never done
 - use branch `ziti_devel` as this repository's equivalent of a devel branch but
   never merge nor commit to it
@@ -72,6 +73,10 @@ SPDX-License-Identifier: <license_specifier>
       `Apache-2.0` for software sources and `CC-BY-4.0` for documentation. This applies
       for newly created files only and for the files where change of license has
       been explicitly requested.
+- use `all` keyword in sensitivity list of combinatorial processes
+- instantiate `for` loops in processes as little as possible
+- instances of components need to declare all generics and ports even when just
+  assigning them a constant or default value
 
 ## Commands
 
