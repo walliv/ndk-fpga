@@ -45,12 +45,21 @@ CLK_PERIOD_NS = 4
 # See "Environment knobs" above.
 TB_TXN_GAP = os.environ.get("TB_TXN_GAP", "1") != "0"
 
+# TB_FLAT selects which test set runs and how the reference model is built. It MUST match the
+# generic the DUT was elaborated with: TB_FLAT="1" for a MEM_PARTITIONING=FALSE (flat/unpartitioned)
+# elaboration, "0" (default) for the partitioned elaboration. The partitioned directed/random tests
+# are skipped in flat mode and the flat tests are skipped in partitioned mode. Run both:
+#   make sim-elab                                              && make sim-run                # partitioned
+#   make sim-elab NVC_ELAB_ARGS="-g MEM_PARTITIONING=false \
+#       -g CHANNELS=2 -g POINTER_WIDTH=18"                     && TB_FLAT=1 make sim-run       # flat
+TB_FLAT = os.environ.get("TB_FLAT", "0") == "1"
+
 # Read data is only guaranteed valid ~6 cycles after the write word that produced it has been
 # accepted (1 input register + 2 BRAM input registers + the BRAM write itself). Use a generous
 # margin.
 WRITE_SETTLE_MARGIN = 20
 
-# The model/DUT instance persists for the whole simulation run (multiple @cocotb.test()
+# The model/DUT instance persists for the whole simulation run (multiple @cocotb.test(skip=TB_FLAT)
 # functions execute against the *same* elaborated design and the same BRAM content -- RESET only
 # clears pipeline registers, not BRAM contents). Keep a single model object per run so its view of
 # the buffer content stays in sync with the DUT across tests.
@@ -66,8 +75,9 @@ def get_model(dut) -> TransBufferModel:
     if _model is None:
         channels = int(dut.CHANNELS.value)
         pointer_width = int(dut.POINTER_WIDTH.value)
-        _model = TransBufferModel(channels, pointer_width)
-        cocotb.log.info(f"Created TransBufferModel(channels={channels}, pointer_width={pointer_width})")
+        _model = TransBufferModel(channels, pointer_width, partitioned=not TB_FLAT)
+        cocotb.log.info(f"Created TransBufferModel(channels={channels}, pointer_width={pointer_width}, "
+                        f"partitioned={not TB_FLAT})")
     return _model
 
 
@@ -430,7 +440,7 @@ class Testbench:
 # Directed regression tests
 # =================================================================================================
 
-@cocotb.test()
+@cocotb.test(skip=TB_FLAT)
 async def test_smoke(dut):
     random.seed(RANDOM_SEED)
     tb = Testbench(dut)
@@ -451,7 +461,7 @@ async def test_smoke(dut):
     assert got == data
 
 
-@cocotb.test()
+@cocotb.test(skip=TB_FLAT)
 async def test_unaligned_sweep(dut):
     random.seed(RANDOM_SEED + 1)
     tb = Testbench(dut)
@@ -497,7 +507,7 @@ async def test_unaligned_sweep(dut):
         assert got == exp
 
 
-@cocotb.test()
+@cocotb.test(skip=TB_FLAT)
 async def test_dual_sof(dut):
     random.seed(RANDOM_SEED + 2)
     tb = Testbench(dut)
@@ -545,7 +555,7 @@ async def test_dual_sof(dut):
         assert got == data, f"dual_sof mismatch chan={chan} start={start_byte} len={len(data)}"
 
 
-@cocotb.test()
+@cocotb.test(skip=TB_FLAT)
 async def test_wraparound(dut):
     random.seed(RANDOM_SEED + 3)
     tb = Testbench(dut)
@@ -616,7 +626,7 @@ def _gen_random_transaction(tb, chan, length):
         return words, [(chan0, addr0_dw * 4, data0), (chan, addr1_dw * 4, data1)]
 
 
-@cocotb.test()
+@cocotb.test(skip=TB_FLAT)
 async def test_random_soak(dut):
     random.seed(RANDOM_SEED + 4)
     tb = Testbench(dut)
@@ -736,7 +746,7 @@ async def test_random_soak(dut):
     cocotb.log.info(f"test_random_soak: {len(sample)} final read-back checks passed")
 
 
-@cocotb.test()
+@cocotb.test(skip=TB_FLAT)
 async def test_random_read_patterns(dut):
     """Randomized MFB write stimulus (independent from test_random_soak) verified through three
     distinct read-side access patterns on RD_*_A: single retried reads, pipelined back-to-back
@@ -839,7 +849,7 @@ async def test_random_read_patterns(dut):
                      f"{len(concurrent_reqs)} windows during an in-flight write stream")
 
 
-@cocotb.test()
+@cocotb.test(skip=TB_FLAT)
 async def test_byte_overlap_line_rate(dut):
     """Directed worst case for the banked architecture: a 1 B write to byte address X immediately
     followed -- with NO gap word, i.e. true line rate -- by a 64 B write to byte address X+1, so
@@ -902,3 +912,195 @@ async def test_byte_overlap_line_rate(dut):
         await tb.drive_idle(WRITE_SETTLE_MARGIN)
         await check(0, 0x40, d1, "d-cross-chan-t1")
         await check(chan_b, 0x41, d2, "d-cross-chan-t2")
+
+
+# =================================================================================================
+# Flat (unpartitioned) addressing tests -- MEM_PARTITIONING=FALSE (TB_FLAT="1")
+#
+# In this mode the DUT ignores the channel index (write META channel field and RD_CHAN_*) and the
+# whole CHANNELS*2**POINTER_WIDTH-byte array is one contiguous space addressed by the address field
+# alone (write META PCIe DWord address / the widened RD_ADDR_* byte address). The reference model
+# (partitioned=False) mirrors this with a single flat buffer. To positively prove the channel index
+# is ignored, every write/read below drives a deliberately arbitrary ("noise") channel value that
+# does NOT correspond to the physical region the address selects.
+# =================================================================================================
+
+def _noise_chan(channels):
+    return random.randrange(channels) if channels > 1 else 0
+
+
+@cocotb.test(skip=not TB_FLAT)
+async def test_flat_smoke(dut):
+    """Write 64 B into the physical region that would be 'channel 1' in partitioned terms, reached by
+    the flat address alone while driving channel-field = 0 (must be ignored). Read it back."""
+    random.seed(RANDOM_SEED + 100)
+    tb = Testbench(dut)
+    await tb.start_clock()
+    await tb.reset()
+
+    per_chan = 1 << tb.model.pointer_width
+    addr_byte = per_chan + 4096          # inside the second channel's physical region
+    addr_dw = addr_byte // 4
+    data = rand_bytes(MFB_BYTES)
+
+    # channel field deliberately 0 (would select the *first* region under partitioning) -- ignored
+    words = gen_words(anchor=0, addr_dw=addr_dw, chan=0, byte_offset=0, data=data)
+    await tb.write_transaction(words)
+    await tb.drive_idle(WRITE_SETTLE_MARGIN)
+
+    got = await tb.read_range(_noise_chan(tb.channels), addr_byte, len(data))
+    exp = tb.model.read(0, addr_byte, len(data))
+    assert got == data, f"flat_smoke mismatch: got={got.hex()} exp={data.hex()}"
+    assert got == exp
+
+
+@cocotb.test(skip=not TB_FLAT)
+async def test_flat_channel_ignored(dut):
+    """Write the SAME flat address three times, each with a different channel-field value; the last
+    write must win (they all target the identical physical location because the channel is ignored)."""
+    random.seed(RANDOM_SEED + 101)
+    tb = Testbench(dut)
+    await tb.start_clock()
+    await tb.reset()
+
+    per_chan = 1 << tb.model.pointer_width
+    addr_byte = 3 * (per_chan // 2)      # straddles into the upper region, arbitrary
+    addr_dw = addr_byte // 4
+
+    last = None
+    for ch in range(tb.channels):
+        data = rand_bytes(MFB_BYTES)
+        words = gen_words(anchor=0, addr_dw=addr_dw, chan=ch, byte_offset=0, data=data)
+        await tb.write_transaction(words)
+        await tb.drive_idle(WRITE_SETTLE_MARGIN)
+        last = data
+
+    got = await tb.read_range(_noise_chan(tb.channels), addr_byte, MFB_BYTES)
+    assert got == last, f"flat_channel_ignored: channel field not ignored (got={got.hex()} exp={last.hex()})"
+
+
+@cocotb.test(skip=not TB_FLAT)
+async def test_flat_cross_boundary(dut):
+    """A single write frame that starts just below a 2**POINTER_WIDTH boundary and streams across it,
+    exercising the flat continuation logic (the running address, not a latched channel, must carry
+    the frame from one physical channel slot into the next). Checked across several boundaries."""
+    random.seed(RANDOM_SEED + 102)
+    tb = Testbench(dut)
+    await tb.start_clock()
+    await tb.reset()
+
+    per_chan = 1 << tb.model.pointer_width
+    # every internal 2**POINTER_WIDTH boundary (there are `channels`-1 of them)
+    for b in range(1, tb.channels):
+        boundary = b * per_chan
+        for pre in (96, 32, 4):
+            start = boundary - pre
+            addr_dw = start // 4
+            data = rand_bytes(256)               # 256 B = 4 words: crosses the boundary mid-frame
+            words = gen_words(anchor=0, addr_dw=addr_dw, chan=_noise_chan(tb.channels),
+                              byte_offset=0, data=data)
+            await tb.write_transaction(words)
+            await tb.drive_idle(WRITE_SETTLE_MARGIN)
+
+            got = await tb.read_range(_noise_chan(tb.channels), start, len(data))
+            exp = tb.model.read(0, start, len(data))
+            assert got == data, (f"flat_cross_boundary mismatch at boundary {hex(boundary)} "
+                                 f"start={hex(start)}: got={got.hex()} exp={data.hex()}")
+            assert got == exp
+
+
+@cocotb.test(skip=not TB_FLAT)
+async def test_flat_random_soak(dut):
+    """Randomized legal write stimulus over the whole flat address space (single bump allocator, no
+    per-channel partition), every transaction driven with an arbitrary noise channel, modeled in
+    lockstep and verified by interleaved-during-write and final read-back passes."""
+    random.seed(RANDOM_SEED + 103)
+    tb = Testbench(dut)
+    await tb.start_clock()
+    await tb.reset()
+
+    flat_size = tb.buf_size              # channels * 2**pointer_width in flat mode
+    budget = int(flat_size * 0.8)
+    next_dw = [0]                        # single flat bump allocator
+
+    def alloc(nbytes):
+        addr_dw = next_dw[0]
+        if addr_dw * 4 + nbytes + 64 > budget:
+            return None
+        next_dw[0] = addr_dw + (nbytes + 3) // 4 + 8
+        return addr_dw
+
+    master_words = []
+    commits = []                         # (last_word_index, start_byte, data)
+
+    TARGET_WORDS = 2000
+    while len(master_words) < TARGET_WORDS:
+        r = random.random()
+        if r < 0.08:
+            master_words.append(None)
+            continue
+        if r < 0.14:
+            master_words.append(gen_noop_word())
+            continue
+
+        length = random.randrange(1, 200)
+        pattern = random.choice(['a', 'a', 'd'])
+        if pattern == 'a':
+            byte_offset = random.randrange(4)
+            addr_dw = alloc(length + byte_offset)
+            if addr_dw is None:
+                break
+            data = rand_bytes(length)
+            words = gen_words(anchor=0, addr_dw=addr_dw, chan=_noise_chan(tb.channels),
+                              byte_offset=byte_offset, data=data)
+            start_byte = addr_dw * 4 + byte_offset
+        else:
+            addr_dw = alloc(length)
+            if addr_dw is None:
+                break
+            data = rand_bytes(length)
+            words = gen_words(anchor=1, addr_dw=addr_dw, chan=_noise_chan(tb.channels),
+                              byte_offset=0, data=data, other=None)
+            start_byte = addr_dw * 4
+
+        master_words.extend(words)
+        commits.append((len(master_words) - 1, start_byte, data))
+
+    cocotb.log.info(f"test_flat_random_soak: driving {len(master_words)} words, "
+                    f"{len(commits)} write transactions over {flat_size} B flat space")
+
+    driven = [0]
+
+    async def writer():
+        for w in master_words:
+            if w is None:
+                await tb.drive_idle(1)
+            else:
+                await tb.drive_word(w)
+            driven[0] += 1
+        tb.dut.PCIE_MFB_SRC_RDY.value = 0
+
+    writer_task = cocotb.start_soon(writer())
+
+    checked = 0
+    attempts = 0
+    while not writer_task.done() and attempts < 4000:
+        attempts += 1
+        eligible = [c for c in commits if c[0] + WRITE_SETTLE_MARGIN < driven[0]]
+        if not eligible:
+            await RisingEdge(dut.CLK)
+            continue
+        _, start_byte, data = random.choice(eligible)
+        got = await tb.read_range(_noise_chan(tb.channels), start_byte, len(data))
+        assert got == data, f"flat soak interleaved mismatch start={start_byte} len={len(data)}"
+        checked += 1
+
+    await writer_task
+    await tb.drive_idle(WRITE_SETTLE_MARGIN)
+    cocotb.log.info(f"test_flat_random_soak: {checked} interleaved reads verified during write stream")
+
+    sample = random.sample(commits, min(300, len(commits)))
+    for _, start_byte, data in sample:
+        got = await tb.read_range(_noise_chan(tb.channels), start_byte, len(data))
+        assert got == data, f"flat soak final mismatch start={start_byte} len={len(data)}"
+    cocotb.log.info(f"test_flat_random_soak: {len(sample)} final read-back checks passed")
