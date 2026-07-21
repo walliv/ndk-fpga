@@ -964,7 +964,11 @@ begin
             if (DMA_RST = '1' or data_logger_rst = '1' or tst_trigg = '1') then
                 seq_addr_cntr <= resize(unsigned(nvme_rd_req_lba_ptr_reg), seq_addr_cntr'length);
             elsif (NVME_OP_STAT_VLD = '1' and (tst_finished = '0' or contig_test = '1')) then
-                seq_addr_cntr <= seq_addr_cntr + resize(unsigned(nvme_rd_req_lba_num_reg), seq_addr_cntr'length);
+                -- NVME_RD_REQ_LBA_NUM is a 0-based LBA count (0 => 1 LBA), so the number of LBAs
+                -- actually accessed is lba_num + 1. Advance the sequential address by that full
+                -- count so successive reads/writes are contiguous and never overlap (the SQE's own
+                -- NLB field stays 0-based; only the address step is corrected here).
+                seq_addr_cntr <= seq_addr_cntr + resize(unsigned(nvme_rd_req_lba_num_reg), seq_addr_cntr'length) + 1;
             end if;
         end if;
     end process;
