@@ -8,37 +8,147 @@ Transaction buffer
 Implementation notes
 --------------------
 
-There has been an attempt by a fellow creator of this component to replace the internal RAM array
-with URAM for AMD devices. Using URAMs provides a significant resource saving with RAM block
-consumption reduced by the factor of 8. This means using 8 URAMs or 4 URAMs for 2-region and
-1-region variant of the component respectively instead of the 64 or 32 BRAMs . This is because both
-the URAM blocks are actually dual-port (Not as *true* dual-port since the ports do not support
-independent clocking or different data width, but suitable for a use in this entity) and can be used
-for the 2-region variant as well, and the port has a fixed width of 8 bytes. Secondly, although
-URAMs have fixed data width for each port, they still provide byte enable feature for writing that
-allows byte level writes which conforms to the present FirstBE and LastBE signals used by the PCIe.
+Even/odd row banking
+^^^^^^^^^^^^^^^^^^^^^
 
-Inspite the biggest saving in resources, one major flaw remains of this approach renders this
-implementation unusable. The elementary unit addressable by the PCIe is one DWord and there can be a
-situation where two DWords next to each other (This counts first DWord of a bus beat and the last
-one as the neighboring. This is because the barrel shifter is used internally which, by rotation,
-causes these two DWs appear next to each other.) need to be addressed to different locations. This
-is shown in figure ":ref:`uram_impl_note`". The internal buffer is organized as an array of RAM
-blocks that form a buffer able to write data on line rate from both regions of the MFB bus beat. The
-problem with two neighboring DWords addressed to two different locations appears in the URAM-based
-buffer when these two appear on one port (one URAM port has a fixed width of 8 bytes without
-parity). One URAM port cannot handle this situation and with current address handling, the
-conflicting DWord (meaning the one that should be located on a higher address) overwrites previously
-stored data. This problem does not appear with the BRAM-based array that uses BRAMs with 1-byte ports
-and therefore allows for fine grained addressing of each individual byte.
+The buffer array is organized as two **row-interleaved banks**: rows (each one whole MFB word wide,
+i.e. 64 B for the 2,1,8,32 MFB configuration) with an even index live in bank 0, rows with an odd
+index live in bank 1. A barrel-rotated, unaligned write (or read) only ever spans two *neighboring*
+rows -- ``row`` and ``row + 1`` -- to bring the wrapped-around bytes back into position, and because
+``row`` and ``row + 1`` always fall into different banks, each bank only ever needs a *single* shared
+address per access, plus ordinary per-byte write enables. This is what removes the historical
+per-DWord/per-byte address plumbing (one address per one of the 64 individual byte lanes) and is also
+what makes URAM a legal target for this component (see below).
+
+Each bank is implemented by :ref:`tdp_bram_be` (2-region/TDP configuration, one shared address bus per
+port) or by :ref:`sdp_bram` in ``SDP_BRAM_BE`` mode (1-region configuration, independent read/write
+address buses, so reads never stall on a concurrent write). Both banks receive the *same* rotated
+write data; only the write-enable and the address differ between them. On the read side, both banks
+are always fetched for the requested channel/row and the two 512 b words are recombined byte-by-byte
+(picking, per byte, whichever bank holds that byte's actual row) before -- optionally -- being
+byte-rotated by the read-side barrel shifter to the requested intra-word offset.
+
+Memory primitive selection (:vhdl:genconstant:`RAM_TYPE`)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+:vhdl:genconstant:`RAM_TYPE` selects the memory primitive used for each bank:
+
+* ``"AUTO"`` (default) resolves to URAM on an AMD UltraScale+/Versal device (:vhdl:genconstant:`DEVICE`)
+  when the configuration uses 2 MFB regions and the resulting bank is at least 2048 rows deep
+  (avoiding grossly underfilled URAM288 columns); BRAM otherwise.
+* ``"BRAM"`` / ``"URAM"`` force the respective primitive; ``"URAM"`` together with an Intel
+  :vhdl:genconstant:`DEVICE` fails elaboration (Intel devices always use the structural, per-byte-column
+  mapping described in :ref:`tdp_bram_be`).
+
+The maximum usable depth of one memory array (and therefore how many channels share one array,
+:vhdl:genconstant:`CHANS_PER_ARRAY`) also depends on the resolved primitive: URAM cascades cheaply to
+16384 rows, while BRAM keeps the historical 4096 (AMD) / 2048 (Intel) row limit.
+
+For the default configuration (``CHANNELS => 8``, ``POINTER_WIDTH => 16``, 2 regions, AMD
+UltraScale+) this means all 8 channels fit into a *single* URAM-backed array (16 URAM288, 0 BRAM);
+forcing ``RAM_TYPE => "BRAM"`` for the same configuration instead splits the channels across 2
+BRAM-backed arrays (matching the pre-optimization channel/array split), still fully eliminating the
+former per-byte BRAM organization on the control/addressing side.
+
+The historical URAM write-conflict flaw
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+There had been an earlier attempt by a fellow creator of this component to replace the internal RAM
+array with URAM for AMD devices, in the previous (per-byte-BRAM) architecture. That attempt failed for
+a structural reason: the elementary unit addressable by the PCIe is one DWord, and because of the
+internal barrel shifter, a bus beat can contain two DWords -- the first DWord of the beat and the last
+DWord of the *previous* row -- that must be written to two *different* rows (this pair is shown in
+figure ":ref:`uram_impl_note`", kept for historical reference). A single URAM port has a fixed 8 B
+width with no support for splitting one port's access across two different addresses within one
+cycle, so one URAM port alone could not serve both rows in the same cycle; with the addressing scheme
+used at the time, the DWord meant for the higher address silently overwrote data already stored at the
+lower one.
+
+The even/odd row banking implemented here solves this exact problem: the two DWords that need
+different row addresses are, by construction, always split across the two banks (``row`` in one bank,
+``row + 1`` in the other), so each bank's single shared address is unambiguous and every URAM port only
+ever serves one row per cycle. This removed the flaw and is what allows :vhdl:genconstant:`RAM_TYPE`
+to legally resolve to URAM.
 
 .. figure:: doc/uram_impl_note.svg
    :width: 100%
    :align: center
 
-   Depiction of a write conflict when using URAM-based buffer
+   Depiction of the write conflict of the (obsolete) single-bank, per-byte-BRAM URAM attempt
+
+Byte-level access semantics
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Byte-level *alignment* never requires byte-level *addressing*: PCIe cannot address a lone byte.
+:vhdl:portsignal:`PCIE_MFB_META`'s address field is a DWord address and sub-DWord accesses are
+expressed exclusively through the per-byte enables (FirstBE/LastBE), e.g. a 64 B write to byte
+address ``0x1`` arrives as a 17-DWord transaction at DWord 0 with FBE = ``1110`` and LBE = ``0001``.
+Because both write barrel shifters rotate at DWord granularity, a byte never moves between DWord
+lanes -- its target row (and therefore its bank) is fully determined by its DWord lane, and the
+sub-DWord part is carried purely by the byte-enable bits, which the wide banks natively support.
+Consequently a single bus word's write covers at most rows ``row``/``row + 1`` (one address per
+bank), for any byte alignment, at line rate.
+
+Two transactions may touch the *same DWord of the same row* in the same cycle (e.g. a 1 B write to
+byte ``X`` packed together with a following write starting at byte ``X + 1``): the first arrives on
+port A (region 0) and the second on port B (region 1) with **disjoint** byte enables, which is
+well-defined on both primitives. Should the two ports ever write the *same byte* (the host rewriting
+one location twice within one bus word), URAM resolves it deterministically -- its ports execute
+sequentially (A first, then B) within a cycle, so region 1, the later transaction in PCIe order,
+wins -- while BRAM leaves that byte undefined, exactly as in the previous per-byte-BRAM
+architecture (the simulation-only collision-detect signals flag this case).
+
+Verification
+^^^^^^^^^^^^^
+
+The component has a standalone cocotb testbench in ``cocotb/`` (nvc simulator, byte-accurate
+reference model in ``trans_buffer_model.py``). It covers aligned/unaligned writes at every DWord
+offset with FBE/LBE patterns, dual-SOF words (two frames per bus word to same/different
+channels/arrays), channel-buffer wraparound, randomized soak traffic with reads racing the write
+stream, and a directed worst case: a 1 B write immediately followed -- with no gap cycle -- by a
+64 B write to the next byte address (same DWord touched by both ports, packed dual-SOF and
+back-to-back, including a row-straddling base). Run it with::
+
+    cd cocotb
+    make                                                    # default generics (AUTO -> URAM)
+    NVC_ELAB_ARGS="-gRAM_TYPE=BRAM" make                    # banked-BRAM branch (MEM_ARRAYS > 1)
+    NVC_ELAB_ARGS="-gDEVICE=STRATIX10" make                 # Intel structural branch
+    NVC_ELAB_ARGS="-gCHANNELS=32 -gPOINTER_WIDTH=13" make   # production DMA Calypte geometry
+
+The ``TB_TXN_GAP`` environment variable (default ``1``) inserts one no-op word between generated
+transactions to sidestep a *simulator* artifact of nvc 1.21.0 that affects only the **previous**
+(per-byte-BRAM) architecture; set ``TB_TXN_GAP=0`` to drive transactions truly back-to-back at
+line rate (the current architecture passes either way).
+
+Resource comparison
+^^^^^^^^^^^^^^^^^^^^
+
+Out-of-context synthesis of this entity alone (Vivado 2025.1, xcvu7p, 250 MHz, all timing met):
+
++----------------------------------------+------------------------------+------------------------------+
+| Configuration                          | Previous architecture        | Banked architecture          |
++========================================+==============================+==============================+
+| CHANNELS=8, POINTER_WIDTH=16 (default) | 7974 LUT / 3880 FF /         | 7093 LUT / 3299 FF /         |
+|                                        | 128 RAMB36                   | 16 URAM, 0 RAMB              |
++----------------------------------------+------------------------------+------------------------------+
+| CHANNELS=32, POINTER_WIDTH=13          | 5659 LUT / 3433 FF /         | 6993 LUT / 3277 FF /         |
+| (production DMA Calypte)               | 64 RAMB36                    | 16 URAM, 0 RAMB              |
++----------------------------------------+------------------------------+------------------------------+
+| default, RAM_TYPE => "BRAM"            | --                           | 8638 LUT / 3320 FF /         |
+|                                        |                              | 128 RAMB36                   |
++----------------------------------------+------------------------------+------------------------------+
+
+At the production geometry the URAM variant trades roughly 1.3 k LUTs for freeing all 64 RAMB36
+(the URAM columns are then only half-filled); choose per design via :vhdl:genconstant:`RAM_TYPE`.
 
 General subcomponents
 ---------------------
 * :ref:`barrel_shifter`
 * :ref:`sdp_bram`
+
+.. _tdp_bram_be:
+
+TDP_BRAM_BE
+-----------
+
+.. vhdl:autoentity:: TDP_BRAM_BE
