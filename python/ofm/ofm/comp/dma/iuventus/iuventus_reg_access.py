@@ -11,6 +11,7 @@ from typing import Optional, List
 import nfb
 from cocotbext.ofm.dma.iuventus import CQEntry
 from cocotbext.ofm.dma.iuventus import IuventusMiRegMap, CtrlRegBits, StatRegBits
+from cocotbext.ofm.dma.iuventus import IuventusPerQueueCntrRegMap, per_queue_cntr_reg_addr
 
 @dataclass
 class DMAIuventusConfig:
@@ -29,36 +30,18 @@ class DMAIuventusConfig:
     last_cq_entry           : CQEntry
     sqes_dispatched         : int
     cqes_processed          : int
-    pcie_rds                : int
-    pcie_rds_bytes          : int
-    pcie_wrs                : int
-    pcie_wrs_bytes          : int
     sq_pcie_rds             : int
     sq_pcie_rds_bytes       : int
     lba_mask                : int
     succ_cpls               : int
     unsucc_cpls             : int
     err_mask                : int
-    rdbuff_pcie_rds         : int
-    rdbuff_pcie_rds_bytes   : int
-    wrbuff_pcie_wrs         : int
-    wrbuff_pcie_wrs_bytes   : int
     lba_space_size          : int
-    cq_pcie_wrs             : int
-    cq_pcie_wrs_bytes       : int
     cqhdbl_reg_upd          : int
-    cqhdbl_rpt_upd          : int
     sqtdbl_reg_upd          : int
-    sqtdbl_rpt_upd          : int
     meta_ptr                : int
     nvme_rd_cmd_bytes       : int
     nvme_wr_cmd_bytes       : int
-    wrbuff_usr_rds          : int
-    wrbuff_usr_rds_bytes    : int
-    rdbuff_disp_rds         : int
-    rdbuff_disp_rds_bytes   : int
-    sq_disp_rds             : int
-    sq_disp_rds_bytes       : int
     tag_fifo_status         : int
     nvme_flush_disp         : int
 
@@ -275,20 +258,10 @@ class DMAIuventusRegAccess(nfb.BaseComp):
     @property
     def cqes_processed(self) -> int:
         return self._comp.read64(IuventusMiRegMap.CQE_PROC_CNTR_L.value)
-    @property
-    def pcie_rds(self) -> int:
-        return self._comp.read64(IuventusMiRegMap.PCIE_RDS_CNTR_L.value)
 
-    @property
-    def pcie_rds_bytes(self) -> int:
-        return self._comp.read64(IuventusMiRegMap.PCIE_RD_BYTES_CNTR_L.value)
-    @property
-    def pcie_wrs(self) -> int:
-        return self._comp.read64(IuventusMiRegMap.PCIE_WRS_CNTR_L.value)
-
-    @property
-    def pcie_wrs_bytes(self) -> int:
-        return self._comp.read64(IuventusMiRegMap.PCIE_WR_BYTES_CNTR_L.value)
+    # sq_pcie_rds/sq_pcie_rds_bytes stay aggregate-only: PCIE_RD_REQ_INCRS classifies PCIe read
+    # requests by which BAR they target, not which queue's SQ ring within that BAR -- no per-queue
+    # QID is available at this signal's boundary (see the report accompanying this change).
     @property
     def sq_pcie_rds(self) -> int:
         return self._comp.read64(IuventusMiRegMap.SQ_PCIE_RDS_CNTR_L.value)
@@ -303,6 +276,10 @@ class DMAIuventusRegAccess(nfb.BaseComp):
     @lba_mask.setter
     def lba_mask(self, value: int) -> None:
         self._comp.write16(IuventusMiRegMap.LBA_NUM_MASK.value, value)
+
+    # succ_cpls/unsucc_cpls (below) are COMMON aggregates (all queues summed); pq_succ_cpls(qid)/
+    # pq_unsucc_cpls(qid)/pq_sqe_disp(qid)/pq_cqe_proc(qid) further down expose the per-queue
+    # breakdown (PER_Q_CNTR_BASE block) for HW debug (e.g. localizing a per-queue stall/wedge).
     @property
     def succ_cpls(self) -> int:
         return self._comp.read64(IuventusMiRegMap.SUCC_COMPL_CNTR_L.value)
@@ -314,46 +291,19 @@ class DMAIuventusRegAccess(nfb.BaseComp):
     def err_mask(self) -> int:
         return self._comp.read64(IuventusMiRegMap.CPL_ERR_MASK_L.value)
     @property
-    def rdbuff_pcie_rds(self) -> int:
-        return self._comp.read64(IuventusMiRegMap.RDBUFF_PCIE_RDS_CNTR_L.value)
-
-    @property
-    def rdbuff_pcie_rds_bytes(self) -> int:
-        return self._comp.read64(IuventusMiRegMap.RDBUFF_PCIE_RD_BYTES_CNTR_L.value)
-    @property
-    def wrbuff_pcie_wrs(self) -> int:
-        return self._comp.read64(IuventusMiRegMap.WRBUFF_PCIE_WRS_CNTR_L.value)
-
-    @property
-    def wrbuff_pcie_wrs_bytes(self) -> int:
-        return self._comp.read64(IuventusMiRegMap.WRBUFF_PCIE_WR_BYTES_CNTR_L.value)
-    @property
     def lba_space_size(self) -> int:
         return self._comp.read64(IuventusMiRegMap.LBA_SPACE_SIZE_L.value)
 
     @lba_space_size.setter
     def lba_space_size(self, value: int) -> None:
         self._comp.write64(IuventusMiRegMap.LBA_SPACE_SIZE_L.value, value)
-    @property
-    def cq_pcie_wrs(self) -> int:
-        return self._comp.read64(IuventusMiRegMap.CQ_PCIE_WRS_CNTR_L.value)
-    @property
-    def cq_pcie_wrs_bytes(self) -> int:
-        return self._comp.read64(IuventusMiRegMap.CQ_PCIE_WR_BYTES_CNTR_L.value)
 
     @property
     def cqhdbl_reg_upd (self) -> int:
         return self._comp.read64(IuventusMiRegMap.CQHDBL_REG_UPDS_CNTR_L.value)
     @property
-    def cqhdbl_rpt_upd (self) -> int:
-        return self._comp.read64(IuventusMiRegMap.CQHDBL_RPT_UPDS_CNTR_L.value)
-
-    @property
     def sqtdbl_reg_upd (self) -> int:
         return self._comp.read64(IuventusMiRegMap.SQTDBL_REG_UPDS_CNTR_L.value)
-    @property
-    def sqtdbl_rpt_upd (self) -> int:
-        return self._comp.read64(IuventusMiRegMap.SQTDBL_RPT_UPDS_CNTR_L.value)
 
     @property
     def meta_ptr(self) -> int:
@@ -370,29 +320,24 @@ class DMAIuventusRegAccess(nfb.BaseComp):
         return self._comp.read64(IuventusMiRegMap.NVME_WR_BYTES_CNTR_L.value)
 
     @property
-    def wrbuff_usr_rds(self) -> int:
-        return self._comp.read64(IuventusMiRegMap.WRBUFF_USR_RDS_CNTR_L.value)
-    @property
-    def wrbuff_usr_rds_bytes(self) -> int:
-        return self._comp.read64(IuventusMiRegMap.WRBUFF_USR_RD_BYTES_CNTR_L.value)
-
-    @property
-    def rdbuff_disp_rds(self) -> int:
-        return self._comp.read64(IuventusMiRegMap.RDBUFF_DISP_RDS_CNTR_L.value)
-    @property
-    def rdbuff_disp_rds_bytes(self) -> int:
-        return self._comp.read64(IuventusMiRegMap.RDBUFF_DISP_RD_BYTES_CNTR_L.value)
-
-    @property
-    def sq_disp_rds(self) -> int:
-        return self._comp.read64(IuventusMiRegMap.SQ_DISP_RDS_CNTR_L.value)
-    @property
-    def sq_disp_rds_bytes(self) -> int:
-        return self._comp.read64(IuventusMiRegMap.SQ_DISP_RD_BYTES_CNTR_L.value)
-
-    @property
     def tag_fifo_status(self) -> int:
         return self._comp.read16(IuventusMiRegMap.TAG_FIFO_STATUS.value)
+
+    # --- Per-queue SSD-facing stat counters (PER_Q_CNTR_BASE block) ---------------------------
+    # Read-only, populated by sample_cntrs() like every other counter here. `qid` is the queue
+    # index (0..NUM_QUEUES-1) -- see IuventusPerQueueCntrRegMap's own docstring for why sq_pcie_rds
+    # has no per-queue counterpart.
+    def pq_succ_cpls(self, qid: int) -> int:
+        return self._comp.read64(per_queue_cntr_reg_addr(IuventusPerQueueCntrRegMap.SUCC_CPLS_L, qid))
+
+    def pq_unsucc_cpls(self, qid: int) -> int:
+        return self._comp.read64(per_queue_cntr_reg_addr(IuventusPerQueueCntrRegMap.UNSUCC_CPLS_L, qid))
+
+    def pq_sqe_disp(self, qid: int) -> int:
+        return self._comp.read64(per_queue_cntr_reg_addr(IuventusPerQueueCntrRegMap.SQE_DISP_L, qid))
+
+    def pq_cqe_proc(self, qid: int) -> int:
+        return self._comp.read64(per_queue_cntr_reg_addr(IuventusPerQueueCntrRegMap.CQE_PROC_L, qid))
 
     @property
     def nvme_flush_disp(self) -> int:
