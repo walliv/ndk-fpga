@@ -12,6 +12,14 @@ use work.math_pack.all;
 use work.type_pack.all;
 
 architecture TEST of USER_CORE is
+    -- Queue-Identifier width for round-robin distribution across DMA queues. At NUM_QUEUES = 1,
+    -- QID_W collapses to 1 bit but every QID-related signal below is explicitly forced to 0,
+    -- reproducing today's single-queue behaviour bit-for-bit.
+    constant QID_W              : natural := maximum(1, log2(NUM_QUEUES));
+    -- LENGTH_WIDTH used by the write-side throughput generator (mirrors the value passed to
+    -- MFB_GENERATOR_MI32 below); needed only to size/slice the raw generator TX_MFB_META.
+    constant GEN_LENGTH_WIDTH   : natural := 18;
+
     constant ADDR_LENGTH        : natural := 7;   -- decode 0x00..0x7C (integrity regs live at 0x30..0x54)
     constant MI_SPLIT_PORTS     : natural := 5;
     constant MI_SPLIT_BASES     : slv_array_t(MI_SPLIT_PORTS-1 downto 0)(MI_WIDTH-1 downto 0) := (
@@ -53,6 +61,9 @@ architecture TEST of USER_CORE is
     signal tst_iterations_reg_sel           : std_logic;
     signal tst_sel_reg_sel                  : std_logic;
     signal evcr_interval_reg_sel            : std_logic;
+    -- Read-side QID round-robin registers: min/max queue and burst size (0x58/0x5C).
+    signal rd_ch_minmax_reg_sel             : std_logic;
+    signal rd_burst_reg_sel                 : std_logic;
 
     -- Registers
     signal nvme_rd_req_lba_ptr_reg : std_logic_vector(SQE_LBA_PTR_W -1 downto 0);
@@ -62,6 +73,20 @@ architecture TEST of USER_CORE is
     signal wr_mfb_pkt_cnt_reg      : unsigned(15 downto 0);
     signal wr_mfb_word_cnt_reg     : unsigned(15 downto 0);
 
+    -- Read-side QID round-robin: min/max queue for the range and burst (number of read requests
+    -- sent to a queue before advancing to the next one), mirroring MFB_GENERATOR_MI32 semantics.
+    -- Default (0,0) keeps every read request on queue 0 until software configures the range.
+    signal rd_ch_min_reg  : std_logic_vector(QID_W -1 downto 0);
+    signal rd_ch_max_reg  : std_logic_vector(QID_W -1 downto 0);
+    signal rd_burst_reg   : std_logic_vector(15 downto 0);
+    signal rd_qid_cntr    : unsigned(QID_W -1 downto 0);
+    signal rd_burst_cntr  : unsigned(15 downto 0);
+    -- Round-robin QID for the read-request submit interface; forced to 0 when NUM_QUEUES = 1.
+    signal gen_rd_req_qid : std_logic_vector(QID_W -1 downto 0);
+    -- QID that the integrity checker's write/read requests are tagged with (queue 0 / rd_ch_min);
+    -- forced to 0 when NUM_QUEUES = 1.
+    signal checker_qid    : std_logic_vector(QID_W -1 downto 0);
+
     -- MFB Generator outputs
     signal gen_mfb_sof     : std_logic_vector(NVME_WR_MFB_SOF'range);
     signal gen_mfb_eof     : std_logic_vector(NVME_WR_MFB_EOF'range);
@@ -69,6 +94,18 @@ architecture TEST of USER_CORE is
     signal gen_mfb_eof_pos : std_logic_vector(NVME_WR_MFB_EOF_POS'range);
     signal gen_mfb_src_rdy : std_logic;
     signal gen_mfb_dst_rdy : std_logic;
+
+    -- Write-side QID pipeline: MFB_GENERATOR_MI32's built-in round-robin channel (CHANNELS_WIDTH
+    -- set to QID_W) is used directly as the target QID. Its raw per-region meta ([channel|length])
+    -- is threaded through MFB_RECONFIGURATOR alongside the data/SOF/EOF so that the channel value
+    -- stays aligned with the (possibly re-timed/FIFO-buffered) frame it belongs to.
+    signal gen_mfb_meta          : std_logic_vector(DMA_MFB_REGIONS*(QID_W + GEN_LENGTH_WIDTH) -1 downto 0);
+    signal gen_mfb_qid           : std_logic_vector(DMA_MFB_REGIONS*QID_W -1 downto 0);
+    signal gen_nvme_wr_qid       : std_logic_vector(DMA_MFB_REGIONS*QID_W -1 downto 0);
+    -- Same as gen_nvme_wr_qid but forced to 0 when NUM_QUEUES = 1.
+    signal gen_nvme_wr_qid_mskd  : std_logic_vector(DMA_MFB_REGIONS*QID_W -1 downto 0);
+    -- LBA-pointer part of the write meta (unchanged generator/checker addressing logic).
+    signal gen_wr_meta_lba       : std_logic_vector(SQE_LBA_PTR_W -1 downto 0);
 
     function gen_wr_mfb_data (
         pkt_cnt : unsigned(15 downto 0);
@@ -178,7 +215,9 @@ architecture TEST of USER_CORE is
 
     -- Checker datapath (write side) and read request.
     signal chk_wr_data        : std_logic_vector(NVME_WR_MFB_DATA'range);
-    signal chk_wr_meta        : std_logic_vector(NVME_WR_MFB_META'range);
+    -- LBA-only meta (matches IUVENTUS_INTEGRITY_CHECKER's fixed LBA_PTR_W=64 WR_MFB_META port);
+    -- the QID (checker_qid) is appended separately when assembling NVME_WR_MFB_META below.
+    signal chk_wr_meta        : std_logic_vector(63 downto 0);
     signal chk_wr_sof         : std_logic_vector(NVME_WR_MFB_SOF'range);
     signal chk_wr_eof         : std_logic_vector(NVME_WR_MFB_EOF'range);
     signal chk_wr_sof_pos     : std_logic_vector(NVME_WR_MFB_SOF_POS'range);
@@ -289,19 +328,21 @@ begin
         variable reg_sel_addr : std_logic_vector(7 downto 0);
     begin
         -- Default selections
-        nvme_rd_req_vld_reg_sel                <= '0';
-        nvme_rd_req_lba_ptr_low_reg_sel        <= '0';
-        nvme_rd_req_lba_ptr_high_reg_sel       <= '0';
-        nvme_rd_req_lba_num_reg_sel            <= '0';
-        nvme_wr_req_lba_ptr_low_reg_sel        <= '0';
-        nvme_wr_req_lba_ptr_high_reg_sel       <= '0';
-        tst_iterations_reg_sel                 <= '0';
-        tst_sel_reg_sel                        <= '0';
-        evcr_interval_reg_sel                  <= '0';
-        integ_ctrl_reg_sel                     <= '0';
-        integ_base_l_reg_sel                   <= '0';
-        integ_base_h_reg_sel                   <= '0';
-        integ_count_reg_sel                    <= '0';
+        nvme_rd_req_vld_reg_sel                 <= '0';
+        nvme_rd_req_lba_ptr_low_reg_sel         <= '0';
+        nvme_rd_req_lba_ptr_high_reg_sel        <= '0';
+        nvme_rd_req_lba_num_reg_sel             <= '0';
+        nvme_wr_req_lba_ptr_low_reg_sel         <= '0';
+        nvme_wr_req_lba_ptr_high_reg_sel        <= '0';
+        tst_iterations_reg_sel                  <= '0';
+        tst_sel_reg_sel                         <= '0';
+        evcr_interval_reg_sel                   <= '0';
+        integ_ctrl_reg_sel                      <= '0';
+        integ_base_l_reg_sel                    <= '0';
+        integ_base_h_reg_sel                    <= '0';
+        integ_count_reg_sel                     <= '0';
+        rd_ch_minmax_reg_sel                    <= '0';
+        rd_burst_reg_sel                        <= '0';
 
         -- Zero-extend to 12 bits to match x"000" style
         reg_sel_addr                          := (others => '0');
@@ -321,6 +362,8 @@ begin
             when x"34" => integ_base_l_reg_sel               <= '1';
             when x"38" => integ_base_h_reg_sel               <= '1';
             when x"3C" => integ_count_reg_sel                <= '1';
+            when x"58" => rd_ch_minmax_reg_sel               <= '1';
+            when x"5C" => rd_burst_reg_sel                   <= '1';
             when others => null;
         end case;
     end process;
@@ -383,6 +426,62 @@ begin
             end if;
         end if;
     end process;
+
+    -- Read-side QID round-robin range and burst registers.
+    -- 0x58 RD_CH_MINMAX: [QID_W-1:0] = rd_ch_min, [16+QID_W-1:16] = rd_ch_max (mirrors the write
+    --                    side's MFB_GENERATOR_MI32 ch_min/ch_max register format at 0x0C).
+    -- 0x5C RD_BURST:     [15:0] = number of read requests sent to a queue before advancing to the
+    --                    next one (default 1). Both reset to (0,0)/1 => queue 0 only until
+    --                    software configures the range.
+    rd_ch_minmax_reg_p : process (DMA_CLK)
+    begin
+        if (rising_edge(DMA_CLK)) then
+            if (DMA_RST = '1') then
+                rd_ch_min_reg <= (others => '0');
+                rd_ch_max_reg <= (others => '0');
+            elsif (rd_ch_minmax_reg_sel = '1' and mi_split_wr(0) = '1') then
+                rd_ch_min_reg <= mi_split_dwr(0)(QID_W -1 downto 0);
+                rd_ch_max_reg <= mi_split_dwr(0)(16 + QID_W -1 downto 16);
+            end if;
+        end if;
+    end process;
+
+    rd_burst_reg_p : process (DMA_CLK)
+    begin
+        if (rising_edge(DMA_CLK)) then
+            if (DMA_RST = '1') then
+                rd_burst_reg <= std_logic_vector(to_unsigned(1, rd_burst_reg'length));
+            elsif (rd_burst_reg_sel = '1' and mi_split_wr(0) = '1') then
+                rd_burst_reg <= mi_split_dwr(0)(15 downto 0);
+            end if;
+        end if;
+    end process;
+
+    -- Round-robin QID counter for read requests: advances by one queue every rd_burst accepted
+    -- requests, wrapping from rd_ch_max back to rd_ch_min.
+    rd_qid_rr_p : process (DMA_CLK)
+    begin
+        if (rising_edge(DMA_CLK)) then
+            if (DMA_RST = '1') then
+                rd_qid_cntr   <= (others => '0');
+                rd_burst_cntr <= (others => '0');
+            elsif (NVME_RD_REQ_VLD = '1' and NVME_RD_REQ_RDY = '1') then
+                if (rd_burst_cntr + 1 >= unsigned(rd_burst_reg)) then
+                    rd_burst_cntr <= (others => '0');
+                    if (rd_qid_cntr >= unsigned(rd_ch_max_reg)) then
+                        rd_qid_cntr <= resize(unsigned(rd_ch_min_reg), rd_qid_cntr'length);
+                    else
+                        rd_qid_cntr <= rd_qid_cntr + 1;
+                    end if;
+                else
+                    rd_burst_cntr <= rd_burst_cntr + 1;
+                end if;
+            end if;
+        end if;
+    end process;
+
+    gen_rd_req_qid <= (others => '0') when (NUM_QUEUES = 1) else std_logic_vector(rd_qid_cntr);
+    checker_qid    <= (others => '0') when (NUM_QUEUES = 1) else rd_ch_min_reg;
 
     rd_req_lba_num_reg_p : process (DMA_CLK)
     begin
@@ -486,10 +585,23 @@ begin
                            std_logic_vector(resize(std_logic_vector(tst_addr), NVME_RD_REQ_LBA_PTR'length));
     NVME_RD_REQ_LBA_NUM <= chk_rd_req_lba_num when (integ_en = '1') else nvme_rd_req_lba_num_reg;
     NVME_RD_REQ_VLD     <= chk_rd_req_vld     when (integ_en = '1') else gen_nvme_rd_req_vld;
+    -- Read-request QID: round-robin counter for the throughput generator, queue 0 / rd_ch_min for
+    -- the checker; both are forced to 0 above when NUM_QUEUES = 1.
+    NVME_RD_REQ_QID     <= checker_qid        when (integ_en = '1') else gen_rd_req_qid;
 
-    NVME_WR_MFB_META    <= chk_wr_meta when (integ_en = '1') else
-                           nvme_wr_req_lba_ptr_reg when (tst_finished = '1' and contig_test = '0') else
-                           std_logic_vector(resize(std_logic_vector(tst_addr), NVME_RD_REQ_LBA_PTR'length));
+    gen_wr_meta_lba <= nvme_wr_req_lba_ptr_reg when (tst_finished = '1' and contig_test = '0') else
+                       std_logic_vector(resize(std_logic_vector(tst_addr), NVME_RD_REQ_LBA_PTR'length));
+
+    -- Assemble the widened write meta per region: [QID (high QID_W bits) | LBA_PTR (low
+    -- SQE_LBA_PTR_W bits)]. The LBA content itself is not region-indexed (single active address
+    -- counter/register), matching this test architecture's existing single-active-target design;
+    -- only the QID differs per region, taken from the throughput generator's round-robin channel.
+    nvme_wr_mfb_meta_g : for r in 0 to DMA_MFB_REGIONS -1 generate
+        NVME_WR_MFB_META((r+1)*(SQE_LBA_PTR_W + QID_W) -1 downto r*(SQE_LBA_PTR_W + QID_W)) <=
+            (checker_qid & chk_wr_meta) when (integ_en = '1') else
+            (gen_nvme_wr_qid_mskd((r+1)*QID_W -1 downto r*QID_W) & gen_wr_meta_lba);
+    end generate;
+
     NVME_WR_MFB_DATA    <= chk_wr_data when (integ_en = '1') else
                            gen_wr_mfb_data(wr_mfb_pkt_cnt_reg, wr_mfb_word_cnt_reg, gen_nvme_wr_sof, gen_nvme_wr_eof);
     NVME_WR_MFB_SOF     <= chk_wr_sof     when (integ_en = '1') else gen_nvme_wr_sof;
@@ -597,6 +709,9 @@ begin
                 when x"4C" => mi_split_drd(0)                                                <= chk_err_lba(63 downto 32);
                 when x"50" => mi_split_drd(0)                                                <= chk_err_exp;
                 when x"54" => mi_split_drd(0)                                                <= chk_err_got;
+                when x"58" => mi_split_drd(0)(QID_W -1 downto 0)                             <= rd_ch_min_reg;
+                    mi_split_drd(0)(16 + QID_W -1 downto 16)                                 <= rd_ch_max_reg;
+                when x"5C" => mi_split_drd(0)(15 downto 0)                                    <= rd_burst_reg;
                 when others => mi_split_drd(0)                                               <= X"CAFEBABE";
             end case;
         end if;
@@ -624,8 +739,8 @@ begin
         BLOCK_SIZE  => DMA_MFB_BLOCK_SIZE/2,
         ITEM_WIDTH  => DMA_MFB_ITEM_WIDTH,
 
-        LENGTH_WIDTH   => 18,
-        CHANNELS_WIDTH => 1,
+        LENGTH_WIDTH   => GEN_LENGTH_WIDTH,
+        CHANNELS_WIDTH => QID_W,
 
         PKT_CNT_WIDTH => 64,
         USE_PACP_ARCH => FALSE,
@@ -645,7 +760,7 @@ begin
         MI_DRDY => mi_split_drdy(1),
 
         TX_MFB_DATA    => open,
-        TX_MFB_META    => open,
+        TX_MFB_META    => gen_mfb_meta,
         TX_MFB_SOF     => gen_mfb_sof,
         TX_MFB_EOF     => gen_mfb_eof,
         TX_MFB_SOF_POS => gen_mfb_sof_pos,
@@ -653,6 +768,13 @@ begin
         TX_MFB_SRC_RDY => gen_mfb_src_rdy,
         TX_MFB_DST_RDY => gen_mfb_dst_rdy
     );
+
+    -- Extract each region's channel field (target QID) from the generator's raw meta
+    -- ([channel(high QID_W bits) | length(low GEN_LENGTH_WIDTH bits)]).
+    gen_mfb_qid_extract_g : for r in 0 to DMA_MFB_REGIONS -1 generate
+        gen_mfb_qid((r+1)*QID_W -1 downto r*QID_W) <=
+                                                      gen_mfb_meta((r+1)*(QID_W + GEN_LENGTH_WIDTH) -1 downto (r+1)*(QID_W + GEN_LENGTH_WIDTH) - QID_W);
+    end generate;
 
     mfb_reconfigurator_i : entity work.MFB_RECONFIGURATOR
     generic map (
@@ -666,7 +788,7 @@ begin
         TX_BLOCK_SIZE         => DMA_MFB_BLOCK_SIZE,
         TX_ITEM_WIDTH         => DMA_MFB_ITEM_WIDTH,
 
-        META_WIDTH            => 0,
+        META_WIDTH            => QID_W,
         META_MODE             => 0,
         FIFO_SIZE             => 32,
         FRAMES_OVER_TX_BLOCK  => 1,
@@ -678,7 +800,7 @@ begin
         RESET      => DMA_RST,
 
         RX_DATA    => (others => '0'),
-        RX_META    => (others => '0'),
+        RX_META    => gen_mfb_qid,
         RX_SOF     => gen_mfb_sof,
         RX_EOF     => gen_mfb_eof,
         RX_SOF_POS => gen_mfb_sof_pos,
@@ -687,7 +809,7 @@ begin
         RX_DST_RDY => gen_mfb_dst_rdy,
 
         TX_DATA    => open,
-        TX_META    => open,
+        TX_META    => gen_nvme_wr_qid,
         TX_SOF     => gen_nvme_wr_sof,
         TX_EOF     => gen_nvme_wr_eof,
         TX_SOF_POS => gen_nvme_wr_sof_pos,
@@ -695,6 +817,11 @@ begin
         TX_SRC_RDY => gen_nvme_wr_src_rdy,
         TX_DST_RDY => gen_nvme_wr_dst_rdy
     );
+
+    -- QID threaded alongside the write frame through the reconfigurator; forced to 0 when
+    -- NUM_QUEUES = 1 so the single-queue behaviour is unchanged regardless of the generator's
+    -- (unconfigured) channel default.
+    gen_nvme_wr_qid_mskd <= (others => '0') when (NUM_QUEUES = 1) else gen_nvme_wr_qid;
 
     -- =============================================================================
     -- Latency measurement
