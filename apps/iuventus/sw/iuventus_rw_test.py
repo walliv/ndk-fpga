@@ -40,17 +40,17 @@ def build_throughput_iops_booktabs_table(results):
         grouped_results.setdefault((mode, addressing), []).append(item)
 
     for key in grouped_results:
-        grouped_results[key].sort(key=lambda row: int(row["lba_num"]))
+        grouped_results[key].sort(key=lambda row: (int(row.get("num_queues", 1)), int(row["lba_num"])))
 
     lines = [
         r"\begin{table}[!ht]",
         r"    \centering",
         r"    \caption{Results of throughput measurement for different operations, request sizes and access pattern}",
         r"    \label{tab:thrp_results}",
-        r"    \begin{tabular}{llSSS}",
+        r"    \begin{tabular}{llSSSS}",
         r"        \toprule",
-        r"        \textbf{Mode} & \textbf{Addressing} & \textbf{LBAs} & \textbf{IOps} & \textbf{Throughput} \\",
-        r"                    & & & & \textbf{[GBps]} \\",
+        r"        \textbf{Mode} & \textbf{Addressing} & \textbf{Queues} & \textbf{LBAs} & \textbf{IOps} & \textbf{Throughput} \\",
+        r"                    & & & & & \textbf{[GBps]} \\",
         r"        \midrule",
     ]
 
@@ -77,12 +77,14 @@ def build_throughput_iops_booktabs_table(results):
             for item in rows:
                 mode_col = mode_labels[mode] if not mode_written else ""
                 addressing_col = addressing_labels[addressing] if not addressing_written else ""
+                num_queues = int(item.get("num_queues", 1))
                 lba_num = int(item["lba_num"]) + 1
                 iops = float(item["iops"])
                 throughput_gbps = float(item["throughput_bps"]) / 1e9
                 thrp_calc_gbps = iops * lba_num * 512 / 1e9
                 lines.append(
-                    f"        {mode_col} & {addressing_col} & {lba_num} & {iops:.0f} & {throughput_gbps:.3f} \\\\"
+                    f"        {mode_col} & {addressing_col} & {num_queues} & {lba_num} & {iops:.0f} & "
+                    f"{throughput_gbps:.3f} \\\\"
                 )
                 mode_written = True
                 addressing_written = True
@@ -95,10 +97,10 @@ def build_throughput_iops_booktabs_table(results):
     return "\n".join(lines)
 
 
-def _mode_label(mode: str, addressing: str) -> str:
+def _mode_label(mode: str, addressing: str, num_queues: int = 1) -> str:
     mode_name = "read" if mode == "rd" else "write"
     addr_name = "sequential" if addressing == "seq" else "random"
-    return f"{mode_name} {addr_name}"
+    return f"{mode_name} {addr_name} (N={num_queues})"
 
 
 def _collect_series(results, selector, metric_key):
@@ -108,7 +110,8 @@ def _collect_series(results, selector, metric_key):
         addressing = item["addressing"]
         if not selector(mode, addressing):
             continue
-        label = _mode_label(mode, addressing)
+        num_queues = int(item.get("num_queues", 1))
+        label = _mode_label(mode, addressing, num_queues)
         lba_count = int(item["lba_num"]) + 1
         metric_value = float(item[metric_key])
         series.setdefault(label, []).append((lba_count, metric_value))
@@ -299,6 +302,8 @@ class IuventusTestRegMap(IntEnum):
     EVCR_INTERVAL_CYCLES = 0x24
     ECVR_TOTAL_EVENTS    = 0x28
     EVCR_TOTAL_CYCLES    = 0x2C
+    RD_CH_MINMAX         = 0x58
+    RD_BURST             = 0x5C
 
 
 class LatencyMeterOutput(ofm.comp.dma.latency_meas.calam_graph.LatencyMeterOutput):
@@ -439,6 +444,52 @@ class IuventusTest(nfb.BaseComp):
     def evcr_total_cycles(self):
         return self._comp.read32(IuventusTestRegMap.EVCR_TOTAL_CYCLES.value)
 
+    @property
+    def rd_ch_min(self):
+        return self._comp.read16(IuventusTestRegMap.RD_CH_MINMAX.value)
+
+    @rd_ch_min.setter
+    def rd_ch_min(self, val: int):
+        # Reg layout: [15:0] = min channel (QID), [31:16] = max channel (QID)
+        val &= 0xFFFF
+        self._comp.write32(IuventusTestRegMap.RD_CH_MINMAX.value, (self.rd_ch_max << 16) | val)
+
+    @property
+    def rd_ch_max(self):
+        return self._comp.read16(IuventusTestRegMap.RD_CH_MINMAX.value + 2)
+
+    @rd_ch_max.setter
+    def rd_ch_max(self, val: int):
+        # Reg layout: [15:0] = min channel (QID), [31:16] = max channel (QID)
+        val &= 0xFFFF
+        self._comp.write32(IuventusTestRegMap.RD_CH_MINMAX.value, (val << 16) | self.rd_ch_min)
+
+    @property
+    def rd_burst(self):
+        return self._comp.read32(IuventusTestRegMap.RD_BURST.value)
+
+    @rd_burst.setter
+    def rd_burst(self, val: int):
+        self._comp.write32(IuventusTestRegMap.RD_BURST.value, val)
+
+    def set_rd_channel_range(self, ch_min: int, ch_max: int):
+        """Set the read-request round-robin channel (QID) range [ch_min, ch_max] with a
+        single 32-bit write to RD_CH_MINMAX (reg 0x58: [15:0] = min, [31:16] = max)."""
+        ch_min &= 0xFFFF
+        ch_max &= 0xFFFF
+        self._comp.write32(IuventusTestRegMap.RD_CH_MINMAX.value, (ch_max << 16) | ch_min)
+
+    def set_wr_channel_range(self, ch_min: int, ch_max: int):
+        """Set the write-side (MFB_GENERATOR_MI32) round-robin channel range [ch_min, ch_max]."""
+        self.gen.minimum_channel = ch_min
+        self.gen.maximum_channel = ch_max
+
+    def set_queue_range(self, num_queues: int):
+        """Confine both read and write request generation to queues 0..num_queues-1."""
+        assert num_queues >= 1, "num_queues must be at least 1"
+        self.set_rd_channel_range(0, num_queues - 1)
+        self.set_wr_channel_range(0, num_queues - 1)
+
     def iops(self):
         total_events = self.evcr_total_events
         total_cycles = self.evcr_total_cycles
@@ -475,6 +526,8 @@ class IuventusTest(nfb.BaseComp):
         print(f"EVCR_INTERVAL:     {self.evcr_interval_cycles} cycles")
         print(f"EVCR_TOTAL_EVENTS: {self.evcr_total_events}")
         print(f"EVCR_TOTAL_CYCLES: {self.evcr_total_cycles}")
+        print(f"RD_CH_MIN/MAX:     {self.rd_ch_min}/{self.rd_ch_max}")
+        print(f"RD_BURST:          {self.rd_burst}")
 
 
 class LatencyMeter(DataLogger):
@@ -540,6 +593,8 @@ def parseParams():
                         help='Path to throughput results JSON file (used for saving and loading)')
     parser.add_argument('--throughput-from-file', action='store_true',
                         help='Load throughput results from --throughput-results-file and generate plots/table')
+    parser.add_argument('--queues', type=int, default=1,
+                        help='Number of SSD-backed queues (0..N-1) to spread throughput traffic across (default: 1)')
 
     return parser.parse_args()
 
@@ -598,7 +653,12 @@ if __name__ == "__main__":
         sys.exit(0)
 
     if args.throughput:
+        assert args.queues >= 1, "--queues must be at least 1"
         test.evcr_interval_cycles = 0xFFFFFFFF
+        # Confine both read and write request generation to queues 0..args.queues-1 so
+        # traffic is spread across exactly this many SSD-backed queues. With --queues 1
+        # (the default) this reproduces the previous single-queue-only behavior exactly.
+        test.set_queue_range(args.queues)
         tst_modes = ["rd", "wr"]
         tst_addr_modes = ["seq", "rand"]
         tst_sizes = [0, 1, 3, 7, 15, 31, 63, 127, 255]
@@ -607,7 +667,7 @@ if __name__ == "__main__":
         # tst_comb = {"rd_seq_0" : ("rd", "seq", 0)}
 
         warmup_key, (warmup_mode, warmup_addressing, warmup_size) = next(iter(tst_comb.items()))
-        print(f"Running warmup throughput measurement: {warmup_key}")
+        print(f"Running warmup throughput measurement: {warmup_key} (queues={args.queues})")
         nvme_rd_sm.clear_data()
         nvme_wr_sm.clear_data()
         test.tst_addressing = warmup_addressing
@@ -663,13 +723,15 @@ if __name__ == "__main__":
             # print(f"{nvme_wr_sm.frequency=}, {nvme_wr_sm.items=}, {nvme_wr_sm.ticks=}, {nvme_wr_sm.sofs=}, {nvme_wr_sm.eofs=}")
             throughput = wr_throughput if mode == "wr" else rd_throughput
             iops = test.iops()
-            print(f"{key}: IOps: {iops:.0f}, RD Thrp: {rd_thrp_val:.2f} {rd_thrp_unit}Bps, WR Thrp: {wr_thrp_val:.2f} {wr_thrp_unit}Bps")
+            print(f"{key} (queues={args.queues}): IOps: {iops:.0f}, RD Thrp: {rd_thrp_val:.2f} {rd_thrp_unit}Bps, "
+                  f"WR Thrp: {wr_thrp_val:.2f} {wr_thrp_unit}Bps")
             results.append({
                 "mode": mode,
                 "addressing": addressing,
                 "lba_num": size,
                 "iops": iops,
                 "throughput_bps": throughput,
+                "num_queues": args.queues,
             })
 
             if mode == "wr":
