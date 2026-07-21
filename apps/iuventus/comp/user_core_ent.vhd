@@ -16,9 +16,12 @@ use work.nvme_meta_pack.all;
 entity USER_CORE is
     generic (
         -- MI parameters: width of data signals
-        MI_WIDTH : integer := 32;
+        MI_WIDTH    : integer := 32;
         -- DMA: number of DMA streams
         DMA_STREAMS : natural := 1;
+        -- DMA: number of independent SQ/CQ queues (one per SSD) that the DMA core is built with.
+        -- Governs the width of NVME_RD_REQ_QID and of the QID field appended to NVME_WR_MFB_META.
+        NUM_QUEUES  : natural := 1;
 
         -- DMA MFB: number of regions in word
         DMA_MFB_REGIONS     : natural := 1;
@@ -75,6 +78,8 @@ entity USER_CORE is
         NVME_RD_REQ_LBA_PTR : out std_logic_vector(63 downto 0);
         NVME_RD_REQ_VLD     : out std_logic;
         NVME_RD_REQ_RDY     : in  std_logic;
+        -- Queue Identifier of the queue this read request targets (round-robin, see architecture)
+        NVME_RD_REQ_QID     : out std_logic_vector(maximum(1, log2(NUM_QUEUES))-1 downto 0);
 
         -- =========================================================================================
         -- Operation status interface
@@ -101,8 +106,9 @@ entity USER_CORE is
         -- Althougn the data size seems unlimited, the maximum is 128 KiB, or 256 LBAs/32 pages
         -- =========================================================================================
         NVME_WR_MFB_DATA    : out std_logic_vector(DMA_MFB_REGIONS*DMA_MFB_REGION_SIZE*DMA_MFB_BLOCK_SIZE*DMA_MFB_ITEM_WIDTH-1 downto 0);
-        -- Contains LBA address to which data should be written
-        NVME_WR_MFB_META    : out std_logic_vector(DMA_MFB_REGIONS*SQE_LBA_PTR_W -1 downto 0);
+        -- Per region: bits [SQE_LBA_PTR_W-1:0] = LBA address to which data should be written;
+        -- bits [SQE_LBA_PTR_W+QID_W-1:SQE_LBA_PTR_W] = Queue Identifier this write request targets
+        NVME_WR_MFB_META    : out std_logic_vector(DMA_MFB_REGIONS*(SQE_LBA_PTR_W + maximum(1, log2(NUM_QUEUES))) -1 downto 0);
         NVME_WR_MFB_SOF     : out std_logic_vector(DMA_MFB_REGIONS-1 downto 0);
         NVME_WR_MFB_EOF     : out std_logic_vector(DMA_MFB_REGIONS-1 downto 0);
         NVME_WR_MFB_SOF_POS : out std_logic_vector(DMA_MFB_REGIONS*maximum(1, log2(DMA_MFB_REGION_SIZE))-1 downto 0);
