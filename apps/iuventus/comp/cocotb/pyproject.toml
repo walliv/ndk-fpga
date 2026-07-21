@@ -1,0 +1,11 @@
+[project]
+name = "cocotb-iuventus-user-core-toplevel"
+version = "0.1.0"
+dependencies = [
+	"cocotbext-ofm[nfb] @ ${NDK_FPGA_COCOTBEXT_OFM_URL}",
+	"ofm[nfb-pypi] @ ${NDK_FPGA_OFM_URL}",
+]
+
+[build-system]
+requires = ["pdm-backend"]
+build-backend = "pdm.backend"
