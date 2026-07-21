@@ -238,10 +238,16 @@ async def _case_one_write_frame(dut, dev, test):
     await aset(test.gen, "enabled", False)
 
 
-async def _case_small_read_burst(dut, dev, test):
+async def _case_small_read_burst(dut, dev, test, lba_num):
     """(c) a small (minimum-sized, 1000-iteration) read throughput burst -> stream order/QID/count
     match, at whatever NUM_QUEUES the design was elaborated with (collapses to q0 at NUM_QUEUES=1,
-    full round-robin at NUM_QUEUES=4). Also probes the EVCR/EVENT_COUNTER event count.
+    full round-robin at NUM_QUEUES=4). Also probes the EVCR/EVENT_COUNTER event count, and
+    explicitly cross-checks the seq-address step size (user_core_test_arch.vhd's seq_addr_cntr_p
+    now advances by lba_num+1 LBAs per completion, fixed from an earlier lba_num-only step that
+    left lba_num=0 bursts reading the same address forever -- see user_core_model.py's
+    ReadReqModel.on_completion() docstring). Called twice by the top-level test, once with
+    lba_num=0 (checks the previously-frozen case now advances by exactly 1) and once with
+    lba_num=3 (checks a >1 step).
 
     History note (both since resolved as ONE testbench bug, not RTL bugs): an earlier version of
     dma_iuventus_model.py's _rd_req_loop drove NVME_RD_REQ_RDY reactively out of the
@@ -264,16 +270,11 @@ async def _case_small_read_burst(dut, dev, test):
     n_queues = NUM_QUEUES
     await e(test.set_queue_range)(n_queues)
 
-    sb = Scoreboard("rd_req[burst]")
+    sb = Scoreboard(f"rd_req[burst,lba_num={lba_num}]")
     model = ReadReqModel(num_queues=n_queues)
     model.configure_range(0, n_queues - 1, 1)  # rd_burst=1: advance queue every request
 
     lba_ptr = 0x2000
-    # 4 sectors/request (0-based size=3), a NONZERO seq-address step -- see user_core_model.py's
-    # ReadReqModel.on_completion() docstring: the RTL's seq_addr_cntr advances by lba_num
-    # directly, so lba_num=0 would (as observed) read the same address every request and not
-    # actually exercise the step arithmetic at all.
-    lba_num = 3
     iterations = 1000  # IuventusTest.tst_iterations enforces >= 1000
 
     # Small vs. the ~2^28-cycle production default, so an interval genuinely completes early in
@@ -281,6 +282,7 @@ async def _case_small_read_burst(dut, dev, test):
     await aset(test, "evcr_interval_cycles", 200)
 
     accepted_since_reached = 0
+    seen_addrs = []  # first few accepted addresses, for the explicit step-size assertion below
 
     def on_accept(got_lba_ptr, got_lba_num, got_qid):
         nonlocal accepted_since_reached
@@ -295,6 +297,8 @@ async def _case_small_read_burst(dut, dev, test):
         sb.check(ExpectedReadReq(lba_ptr=got_lba_ptr, lba_num=got_lba_num, qid=got_qid))
         model.on_completion()
         accepted_since_reached += 1
+        if len(seen_addrs) < 5:
+            seen_addrs.append(got_lba_ptr)
 
     dev.dma_model.rd_req_accept_cb = on_accept
 
@@ -343,6 +347,18 @@ async def _case_small_read_burst(dut, dev, test):
     assert ok, f"timed out: only {sb.checked}/{iterations} burst read requests were accepted (short stream)"
     sb.assert_empty()
 
+    # Explicit step-size cross-check (on top of the scoreboard's own bit-exact per-item match):
+    # confirm the DUT's real, observed address stream advances by exactly lba_num+1 every step --
+    # this is the concrete "lba_num=0 -> +1, contiguous, was frozen before" / "lba_num=3 -> +4"
+    # evidence, not just an indirect pass/fail via the scoreboard.
+    assert len(seen_addrs) >= 2, "not enough accepted requests observed to check the address step"
+    for prev_addr, next_addr in zip(seen_addrs, seen_addrs[1:]):
+        step = next_addr - prev_addr
+        assert step == lba_num + 1, (
+            f"seq address step was {step}, expected lba_num+1={lba_num + 1} "
+            f"(addresses observed: {seen_addrs!r})"
+        )
+
     model.stop_burst()
     dev.dma_model.rd_req_accept_cb = None
 
@@ -351,9 +367,10 @@ async def _case_small_read_burst(dut, dev, test):
 async def test_user_core_reference_model(dut):
     """Stage 2: reference-model-predicted expected output vs a scoreboard comparing against the
     real DUT, driven through a simplified DMA Iuventus environment (SimplifiedDmaModel). Runs the
-    Stage 1 MI smoke checks first, then three directed cases -- all inside ONE cocotb test/one
-    live simulation, since USR_CLK/DMA_CLK/MI_CLK are started exactly once per simulation run
-    (cocotb runs every @cocotb.test in the same simulation session; a second _init_clks() call
+    Stage 1 MI smoke checks first, then directed cases (one read, one write, and two burst runs --
+    lba_num=0 and lba_num=3, cross-checking the seq-address step size) -- all inside ONE cocotb
+    test/one live simulation, since USR_CLK/DMA_CLK/MI_CLK are started exactly once per simulation
+    run (cocotb runs every @cocotb.test in the same simulation session; a second _init_clks() call
     from a second test would start a second, colliding clock driver on the same signals)."""
     dev = IuventusUserCoreNfbDevice(dut)
     await dev.init()
@@ -374,4 +391,8 @@ async def test_user_core_reference_model(dut):
 
     await dev._reset()
     dev.dma_model.reset()
-    await _case_small_read_burst(dut, dev, test)
+    await _case_small_read_burst(dut, dev, test, lba_num=0)
+
+    await dev._reset()
+    dev.dma_model.reset()
+    await _case_small_read_burst(dut, dev, test, lba_num=3)
