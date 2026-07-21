@@ -573,6 +573,147 @@ class LatencyMeter(DataLogger):
             self.rst()
 
 
+# --- Importable run-logic, factored out of main() below --------------------------------------
+# These functions take an ALREADY-OPEN IuventusTest (`test`) / LatencyMeter (`lmeter`) /
+# LatencyMeterOutput (`lm_output`) plus already-parsed parameters -- no argparse, no nfb.open()
+# -- so both main()'s CLI handlers and non-CLI callers (e.g. a cocotb testbench driving these
+# exact same code paths against a simulated USER_CORE DUT) can call them identically. main()'s own
+# behavior (registers poked, prints, files written) is unchanged: it simply calls into these
+# instead of running the equivalent code inline.
+
+def run_read_dispatch(test: IuventusTest, lba_ptr: int, lba_num: int) -> None:
+    """CLI '-r LBA_PTR LBA_NUM': dispatch one manual read request."""
+    test.disp_rd_req(lba_ptr, lba_num)
+
+
+def run_write_dispatch(test: IuventusTest, lba_ptr: int, lba_num: int, burst_size: int = 1) -> None:
+    """CLI '-w LBA_PTR LBA_NUM': dispatch one write frame (or a free-running burst if
+    burst_size > 1, matching IuventusTest.disp_wr_req's own semantics)."""
+    test.disp_wr_req(lba_ptr, lba_num, burst_size)
+
+
+def run_latency(
+    lmeter: "LatencyMeter", lm_output: "LatencyMeterOutput", mode: str, iterations: int,
+    addressing: str, size: int,
+) -> None:
+    """CLI '-l TYPE ITERATIONS ADDRESSING LBA_NUM': measure and report the latency of one
+    mode/addressing/size combination."""
+    tst_comb = {f"{mode}_{addressing}_{size}": (mode, addressing, size)}
+    lmeter.run_test_suite(tst_comb, iterations)
+    lm_output.process_results_by_structure(tst_comb)
+
+
+def _throughput_point_start(test: IuventusTest, mode: str, addressing: str, size: int) -> None:
+    """Arms one throughput measurement point (mode/addressing/size): configures the test-mode
+    registers and, for writes, dispatches the free-running generator via disp_wr_req -- exactly
+    the setup the CLI's -t sweep performs for both its warmup point and every point of the main
+    sweep."""
+    test.tst_addressing = addressing
+    test.tst_mode = mode
+
+    if mode == "wr":
+        test.contig_test = True
+        test.gen.bursting = False
+        test.disp_wr_req(0, size, 64)
+    else:
+        test.rd_req_lba_num = size
+        test.contig_test = True
+
+
+def _throughput_point_stop(test: IuventusTest, mode: str, sleep_fn=sleep) -> None:
+    """Disarms one throughput measurement point and waits for the generator/read-request path to
+    fully quiesce before the next point starts -- exactly the CLI's own between-points teardown."""
+    if mode == "wr":
+        test.gen.enabled = False
+        test.gen.bursting = True
+        test.contig_test = False
+
+        while test.gen.generating:
+            sleep_fn(0.1)
+    else:
+        test.contig_test = False
+        while test.rd_req_vld:
+            sleep_fn(0.1)
+
+
+def run_throughput_point(
+    test: IuventusTest, mode: str, addressing: str, size: int,
+    settle_seconds: float = 3.0, sleep_fn=sleep,
+):
+    """Runs ONE throughput measurement point (start -> settle -> sample -> stop), returning
+    (iops, throughput_bps). This is the exact per-combo body of the CLI's -t sweep (including the
+    warmup point, which calls this with settle_seconds=0), factored out so it can also be driven
+    point-by-point -- e.g. by a testbench substituting a simulated settle wait (advancing DMA_CLK
+    cycles) for the wall-clock sleep_fn used on real hardware."""
+    _throughput_point_start(test, mode, addressing, size)
+    if settle_seconds > 0:
+        sleep_fn(settle_seconds)
+    iops = test.iops()
+    # Throughput is derived from IOPS (the EVENT_COUNTER), not measured with an MFB speed meter:
+    # `sectors` is the request size in 512 B sectors (size is 0-based, matching the
+    # (lba_num+1)*512 formula used in build_throughput_iops_booktabs_table).
+    sectors = size + 1
+    throughput_bps = iops * sectors * 512
+    _throughput_point_stop(test, mode, sleep_fn=sleep_fn)
+    return iops, throughput_bps
+
+
+def run_throughput(
+    test: IuventusTest, queues: int, tst_comb=None, settle_seconds: float = 3.0,
+    sleep_fn=sleep, results_file=None, verbose: bool = True,
+):
+    """CLI '-t [--queues N]': the full throughput sweep across mode x addressing x size (the
+    default combination list, or an explicit tst_comb override), returning the same list-of-dict
+    `results` structure save_throughput_results()/generate_throughput_outputs() expect. Behavior
+    (including the warmup point run first) is unchanged from the previous inline main() body."""
+    assert queues >= 1, "--queues must be at least 1"
+    test.evcr_interval_cycles = 0xFFFFFFFF
+    # Confine both read and write request generation to queues 0..queues-1 so traffic is spread
+    # across exactly this many SSD-backed queues. With queues=1 (the default) this reproduces the
+    # previous single-queue-only behavior exactly.
+    test.set_queue_range(queues)
+
+    if tst_comb is None:
+        tst_modes = ["rd", "wr"]
+        tst_addr_modes = ["seq", "rand"]
+        tst_sizes = [0, 1, 3, 7, 15, 31, 63, 127, 255]
+        tst_comb = {
+            f"{mode}_{addressing}_{size}": (mode, addressing, size)
+            for mode in sorted(tst_modes) for addressing in sorted(tst_addr_modes) for size in sorted(tst_sizes)
+        }
+
+    warmup_key, (warmup_mode, warmup_addressing, warmup_size) = next(iter(tst_comb.items()))
+    if verbose:
+        print(f"Running warmup throughput measurement: {warmup_key} (queues={queues})")
+    run_throughput_point(test, warmup_mode, warmup_addressing, warmup_size, settle_seconds=0, sleep_fn=sleep_fn)
+    if verbose:
+        print("Warmup throughput measurement done, collecting results...")
+
+    results = []
+    for key, (mode, addressing, size) in tst_comb.items():
+        iops, throughput_bps = run_throughput_point(
+            test, mode, addressing, size, settle_seconds=settle_seconds, sleep_fn=sleep_fn
+        )
+        if verbose:
+            thrp_val, thrp_unit = convert_units(throughput_bps)
+            print(f"{key} (queues={queues}): IOps: {iops:.0f}, Thrp: {thrp_val:.2f} {thrp_unit}Bps")
+        results.append({
+            "mode": mode,
+            "addressing": addressing,
+            "lba_num": size,
+            "iops": iops,
+            "throughput_bps": throughput_bps,
+            "num_queues": queues,
+        })
+
+    if results_file:
+        save_throughput_results(results, results_file)
+        if verbose:
+            print(f"Saved throughput results to {results_file}")
+
+    return results
+
+
 def parseParams():
     import argparse
     parser = argparse.ArgumentParser(description="Test script for the Iuventus test component")
@@ -628,9 +769,7 @@ if __name__ == "__main__":
         mode, addressing = args.latency[0].lower(), args.latency[2].lower()
         # This argument has to be the last so the measurement begins (the measurement of write is exception)
         iterations = int(args.latency[1])
-        tst_comb = {f"{mode}_{addressing}_{size}": (mode, addressing, size)}
-        lmeter.run_test_suite(tst_comb, iterations)
-        lm_output.process_results_by_structure(tst_comb)
+        run_latency(lmeter, lm_output, mode, iterations, addressing, size)
         sys.exit(0)
 
     if args.measure or args.process:
@@ -648,104 +787,18 @@ if __name__ == "__main__":
         sys.exit(0)
 
     if args.throughput:
-        assert args.queues >= 1, "--queues must be at least 1"
-        test.evcr_interval_cycles = 0xFFFFFFFF
-        # Confine both read and write request generation to queues 0..args.queues-1 so
-        # traffic is spread across exactly this many SSD-backed queues. With --queues 1
-        # (the default) this reproduces the previous single-queue-only behavior exactly.
-        test.set_queue_range(args.queues)
-        tst_modes = ["rd", "wr"]
-        tst_addr_modes = ["seq", "rand"]
-        tst_sizes = [0, 1, 3, 7, 15, 31, 63, 127, 255]
-        tst_comb = {f"{mode}_{addressing}_{size}": (mode, addressing, size) for mode in sorted(tst_modes) for addressing in sorted(tst_addr_modes) for size in sorted(tst_sizes)}
-        results = []
-        # tst_comb = {"rd_seq_0" : ("rd", "seq", 0)}
-
-        warmup_key, (warmup_mode, warmup_addressing, warmup_size) = next(iter(tst_comb.items()))
-        print(f"Running warmup throughput measurement: {warmup_key} (queues={args.queues})")
-        test.tst_addressing = warmup_addressing
-        test.tst_mode = warmup_mode
-
-        if warmup_mode == "wr":
-            test.contig_test = True
-            test.gen.bursting = False
-            test.disp_wr_req(0, warmup_size, 64)
-        else:
-            test.rd_req_lba_num = warmup_size
-            test.contig_test = True
-
-        if warmup_mode == "wr":
-            test.gen.enabled = False
-            test.gen.bursting = True
-            test.contig_test = False
-
-            while test.gen.generating:
-                sleep(0.1)
-        else:
-            test.contig_test = False
-            while test.rd_req_vld:
-                sleep(0.1)
-
-        print("Warmup throughput measurement done, collecting results...")
-
-        for key, (mode, addressing, size) in tst_comb.items():
-            test.tst_addressing = addressing
-            test.tst_mode = mode
-
-            if mode == "wr":
-                test.contig_test = True
-                test.gen.bursting = False
-                test.disp_wr_req(0, size, 64)
-            else:
-                test.rd_req_lba_num = size
-                test.contig_test = True
-
-            # sleep(0.1)
-            # sleep(5)
-            sleep(3)
-            iops = test.iops()
-            # Throughput is derived from IOPS (the EVENT_COUNTER), not measured with an MFB speed
-            # meter: `sectors` is the request size in 512 B sectors (size is 0-based, matching the
-            # (lba_num+1)*512 formula used in build_throughput_iops_booktabs_table).
-            sectors = size + 1
-            throughput_bps = iops * sectors * 512
-            thrp_val, thrp_unit = convert_units(throughput_bps)
-            print(f"{key} (queues={args.queues}): IOps: {iops:.0f}, Thrp: {thrp_val:.2f} {thrp_unit}Bps")
-            results.append({
-                "mode": mode,
-                "addressing": addressing,
-                "lba_num": size,
-                "iops": iops,
-                "throughput_bps": throughput_bps,
-                "num_queues": args.queues,
-            })
-
-            if mode == "wr":
-                test.gen.enabled = False
-                test.gen.bursting = True
-                test.contig_test = False
-
-                while test.gen.generating:
-                    sleep(0.1)
-            else:
-                test.contig_test = False
-                while test.rd_req_vld:
-                    sleep(0.1)
-
-        save_throughput_results(results, args.throughput_results_file)
-        print(f"Saved throughput results to {args.throughput_results_file}")
+        results = run_throughput(test, args.queues, results_file=args.throughput_results_file)
         output_dir = os.path.dirname(args.throughput_results_file) or "."
         generate_throughput_outputs(results, out_dir=output_dir)
-
         sys.exit(0)
 
     if args.r:
         assert args.r[0].isdigit() and args.r[1].isdigit(), "LBA_PTR and LBA_NUM must be integers"
-        test.disp_rd_req(int(args.r[0]), int(args.r[1]))
+        run_read_dispatch(test, int(args.r[0]), int(args.r[1]))
         sys.exit(0)
     if args.w:
         assert args.w[0].isdigit() and args.w[1].isdigit(), "LBA_PTR and LBA_NUM must be integers"
-        test.disp_wr_req(int(args.w[0]), int(args.w[1]))
+        run_write_dispatch(test, int(args.w[0]), int(args.w[1]))
         sys.exit(0)
 
     if args.verbose >= 1:
