@@ -14,7 +14,7 @@ proc dts_application {DTS base arch_type} {
 
     dts_create_node dts "user_core" {
         dts_create_node dts "iuventus_test_ctrl" {
-            dts_appendprop_comp_node dts $base 0x30 "ziti,iuventus_test_ctrl"
+            dts_appendprop_comp_node dts $base 0x80 "ziti,iuventus_test_ctrl"
         }
         append dts [dts_mfb_generator $mfb_gen_base "nvme_wr_data_gen"]
         append dts [data_logger $data_logger_base 0 "latency_meter"]
