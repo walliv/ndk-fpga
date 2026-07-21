@@ -20,6 +20,7 @@ from cocotbext.ofm.mfb.transaction import MfbTransactionWithMeta
 OP_STAT_TYPE_WRITE = 0
 OP_STAT_TYPE_READ = 1
 OP_STAT_CODE_SUCCESS = 0
+OP_STAT_CODE_OOR = 2   # LBA Out of Range (op_ctrl.vhd's "10"): completed internally, no data transfer
 
 # QID_W, matching user_core_test_arch.vhd's `maximum(1, log2(NUM_QUEUES))` (ceil-log2, log2(1)=0
 # by this codebase's math_pack convention). Needed for NVME_WR_MFB_META's width (SQE_LBA_PTR_W(64)
@@ -97,6 +98,16 @@ class SimplifiedDmaModel:
         self._bp_enabled = False  # backpressure feature armed (toggled by enable/disable_backpressure)
         self._bp_active = False  # backpressure window currently in effect (RDY/DST_RDY held low)
         self._op_stat_pending = []  # list of (type, code, done_event_or_None) awaiting dispatch, FIFO
+        # Optional write/read-back DATA INTEGRITY store (byte-address LBA -> 512-byte sector). When
+        # `data_integrity` is enabled a READ returns the bytes a prior WRITE stored at that LBA
+        # (default zeros), so the IUVENTUS_INTEGRITY_CHECKER's write-pattern / read-back comparison
+        # can be exercised end-to-end. When disabled the READ path returns the legacy fixed pattern.
+        self.data_integrity = False
+        self._storage = {}  # 512-aligned byte offset -> bytes(512)
+        # Optional OOR modelling: when set, any read/write whose (lba_ptr + sectors) exceeds this
+        # SECTOR count completes with OP_STAT_CODE_OOR and NO data transfer (no RD_MFB for reads),
+        # mirroring op_ctrl's internal LBA-Out-of-Range completion. None => never OOR (default).
+        self.lba_space_size = None
 
         dut.NVME_RD_REQ_RDY.value = 1
         dut.NVME_OP_STAT_TYPE.value = 0
@@ -197,14 +208,31 @@ class SimplifiedDmaModel:
             if self.rd_req_accept_cb:
                 self.rd_req_accept_cb(lba_ptr, lba_num, qid)
 
-            cocotb.start_soon(self._service_read(lba_num))
+            cocotb.start_soon(self._service_read(lba_num, lba_ptr))
 
-    async def _service_read(self, lba_num: int):
+    async def _service_read(self, lba_num: int, lba_ptr: int = 0):
         for _ in range(self.rd_latency_cycles):
             await RisingEdge(self._clk)
 
+        if self.lba_space_size is not None and (lba_ptr + lba_num + 1) > self.lba_space_size:
+            # LBA Out of Range: op_ctrl completes it internally, never drains WRBUFF (no RD_MFB).
+            done = Event()
+            self._op_stat_pending.append((OP_STAT_TYPE_READ, OP_STAT_CODE_OOR, done))
+            await done.wait()
+            await RisingEdge(self._clk)
+            self._rd_busy = False
+            return
+
         total_bytes = (lba_num + 1) * 512
-        pattern = bytes([i & 0xFF for i in range(total_bytes)])
+        if self.data_integrity:
+            # Return exactly what a prior WRITE stored at this LBA (zeros if never written), so the
+            # integrity checker's read-back compare against its own write pattern is meaningful.
+            out = bytearray()
+            for off in range(0, total_bytes, 512):
+                out += self._storage.get(lba_ptr + off, bytes(512))
+            pattern = bytes(out)
+        else:
+            pattern = bytes([i & 0xFF for i in range(total_bytes)])
         await self._rd_mfb_driver.send(pattern)
 
         # Wait for THIS completion's own OP_STAT_VLD pulse to actually be dispatched (not just
@@ -228,15 +256,24 @@ class SimplifiedDmaModel:
     def _on_wr_frame(self, trans):
         if self.wr_frame_accept_cb:
             self.wr_frame_accept_cb(trans)
-        cocotb.start_soon(self._service_write())
+        # META = [QID (high QID_W bits) | LBA_PTR (low SQE_LBA_PTR_W bits, a BYTE address)].
+        lba = int(trans.meta) & ((1 << SQE_LBA_PTR_W) - 1)
+        data = bytes(trans.data)
+        sectors = max(1, len(data) // 512)
+        oor = self.lba_space_size is not None and (lba + sectors) > self.lba_space_size
+        if self.data_integrity and not oor:
+            for off in range(0, len(data), 512):
+                self._storage[lba + off] = data[off:off + 512].ljust(512, b'\x00')
+        cocotb.start_soon(self._service_write(oor))
 
-    async def _service_write(self):
+    async def _service_write(self, oor: bool = False):
         for _ in range(self.wr_latency_cycles):
             await RisingEdge(self._clk)
         # No `_rd_busy`-style single-outstanding gate exists on the write side (DST_RDY is held
         # high throughout), so there is no analogous "next accept races the completion" hazard --
         # a completion event is not needed here.
-        self._op_stat_pending.append((OP_STAT_TYPE_WRITE, OP_STAT_CODE_SUCCESS, None))
+        code = OP_STAT_CODE_OOR if oor else OP_STAT_CODE_SUCCESS
+        self._op_stat_pending.append((OP_STAT_TYPE_WRITE, code, None))
 
     async def _op_stat_loop(self):
         while True:

@@ -209,6 +209,11 @@ architecture TEST of USER_CORE is
     signal chk_err_exp : std_logic_vector(31 downto 0);
     signal chk_err_got : std_logic_vector(31 downto 0);
 
+    signal chk_state      : std_logic_vector(2 downto 0);
+    signal chk_beat_idx   : std_logic_vector(7 downto 0);
+    signal chk_opstat_cnt : std_logic_vector(7 downto 0);
+    signal chk_op_err     : std_logic;
+
     -- Checker datapath (write side) and read request.
     signal chk_wr_data        : std_logic_vector(NVME_WR_MFB_DATA'range);
     -- LBA-only meta (matches IUVENTUS_INTEGRITY_CHECKER's fixed LBA_PTR_W=64 WR_MFB_META port);
@@ -633,6 +638,11 @@ begin
         STS_ERR_FIRST_EXP => chk_err_exp,
         STS_ERR_FIRST_GOT => chk_err_got,
 
+        STS_STATE      => chk_state,
+        STS_BEAT_IDX   => chk_beat_idx,
+        STS_OPSTAT_CNT => chk_opstat_cnt,
+        STS_OP_ERR     => chk_op_err,
+
         WR_MFB_DATA    => chk_wr_data,
         WR_MFB_META    => chk_wr_meta,
         WR_MFB_SOF     => chk_wr_sof,
@@ -648,6 +658,7 @@ begin
         RD_REQ_RDY     => NVME_RD_REQ_RDY,
 
         OP_STAT_VLD    => NVME_OP_STAT_VLD,
+        OP_STAT_CODE   => NVME_OP_STAT_CODE,
 
         RD_MFB_DATA    => NVME_RD_MFB_DATA,
         RD_MFB_SOF     => NVME_RD_MFB_SOF,
@@ -699,7 +710,9 @@ begin
                 when x"34" => mi_split_drd(0)                                                <= integ_lba_base_reg(31 downto 0);
                 when x"38" => mi_split_drd(0)                                                <= integ_lba_base_reg(63 downto 32);
                 when x"3C" => mi_split_drd(0)                                                <= integ_lba_count_reg;
-                when x"40" => mi_split_drd(0)(1 downto 0)                                    <= chk_done & chk_busy;
+                -- STATUS: [0]=busy [1]=done [2]=op_err(sweep aborted on OOR/failure) [6:4]=FSM state
+                --         [15:8]=beat_idx [23:16]=OP_STAT_VLD count
+                when x"40" => mi_split_drd(0) <= X"00" & chk_opstat_cnt & chk_beat_idx & '0' & chk_state & '0' & chk_op_err & chk_done & chk_busy;
                 when x"44" => mi_split_drd(0)                                                <= chk_err_cnt;
                 when x"48" => mi_split_drd(0)                                                <= chk_err_lba(31 downto 0);
                 when x"4C" => mi_split_drd(0)                                                <= chk_err_lba(63 downto 32);

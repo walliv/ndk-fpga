@@ -643,6 +643,9 @@ begin
                 -- ~1152 flops at N=4, so QUEUE_DEPTH is raised from 4 to 8 (N=4 x QD8 = 32 total
                 -- outstanding commands); rebuild confirms the LUTRAM area drop closes timing at QD8.
                 QUEUE_DEPTH => 8,
+                -- Production keepalive width (2**28 DMA_CLK cycles, ~1 s); explicitly assigned
+                -- (equals DMA_IUVENTUS's own default) per the "always assign every generic" rule.
+                FLUSH_DELAY_CNTR_WIDTH => 28,
 
                 USR_MFB_REGIONS     => DMA_MFB_REGIONS,
                 USR_MFB_REGION_SIZE => DMA_MFB_REGION_SIZE,
