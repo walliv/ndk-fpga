@@ -9,8 +9,6 @@ proc dts_application {DTS base arch_type} {
 
     set mfb_gen_base     [expr $base + 0x100]
     set data_logger_base [expr $base + 0x200]
-    set rd_mfb_sm_base   [expr $base + 0x300]
-    set wr_mfb_sm_base   [expr $base + 0x400]
 
     dts_create_node dts "user_core" {
         dts_create_node dts "iuventus_test_ctrl" {
@@ -18,8 +16,6 @@ proc dts_application {DTS base arch_type} {
         }
         append dts [dts_mfb_generator $mfb_gen_base "nvme_wr_data_gen"]
         append dts [data_logger $data_logger_base 0 "latency_meter"]
-        append dts [dts_speed_meter $rd_mfb_sm_base "nvme_rd_mfb_speed_meter"]
-        append dts [dts_speed_meter $wr_mfb_sm_base "nvme_wr_mfb_speed_meter"]
     }
 }
 

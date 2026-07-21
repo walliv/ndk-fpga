@@ -21,13 +21,11 @@ architecture TEST of USER_CORE is
     constant GEN_LENGTH_WIDTH   : natural := 18;
 
     constant ADDR_LENGTH        : natural := 7;   -- decode 0x00..0x7C (integrity regs live at 0x30..0x54)
-    constant MI_SPLIT_PORTS     : natural := 5;
+    constant MI_SPLIT_PORTS     : natural := 3;
     constant MI_SPLIT_BASES     : slv_array_t(MI_SPLIT_PORTS-1 downto 0)(MI_WIDTH-1 downto 0) := (
         0 => X"00000000",                         -- Control and Status Registers
         1 => X"00000100",                         -- MFB Generator
-        2 => X"00000200",                         -- Data Logger for latency meter
-        3 => X"00000300",                         -- MFB speed meter for NVME_RD_MFB_*
-        4 => X"00000400"                          -- MFB speed meter for NVME_WR_MFB_*
+        2 => X"00000200"                          -- Data Logger for latency meter
         );
     constant MI_SPLIT_ADDR_MASK : std_logic_vector(MI_WIDTH -1 downto 0) := X"00000700";
 
@@ -159,9 +157,7 @@ architecture TEST of USER_CORE is
     constant LOG_TIMESTAMP_WIDTH      : natural := 22; -- allows little over 16 ms, which should be more than enough for an NVMe read/write operation latency
     constant LAT_PARAL_EVENTS         : natural := 2;
     constant HIST_BOX_CNT             : natural := 2**15;
-    constant SM_CNT_TICKS_WIDTH       : natural := 28;
-    constant SM_CNT_BYTES_WIDTH       : natural := 35;
-    constant EVCR_MAX_INTERVAL_CYCLES : natural := 2**SM_CNT_TICKS_WIDTH;
+    constant EVCR_MAX_INTERVAL_CYCLES : natural := 2**28;
 
     type   lat_meas_fsm_state_t is (S_IDLE, S_COUNT_TESTING_PACKETS);
     signal meas_fsm_pst : lat_meas_fsm_state_t := S_IDLE;
@@ -974,82 +970,6 @@ begin
     end process;
 
     tst_addr <= std_logic_vector(seq_addr_cntr) when tst_sel_reg(0) = '0' else lfsr_rand_addr_out;
-
-    rd_mfb_speed_meter_i : entity work.MFB_SPEED_METER_MI
-    generic map (
-        REGIONS          => DMA_MFB_REGIONS,
-        REGION_SIZE      => DMA_MFB_REGION_SIZE,
-        BLOCK_SIZE       => DMA_MFB_BLOCK_SIZE,
-        ITEM_WIDTH       => DMA_MFB_ITEM_WIDTH,
-        CNT_TICKS_WIDTH  => SM_CNT_TICKS_WIDTH,
-        -- Based on the recommendation from the component declaration
-        CNT_BYTES_WIDTH  => SM_CNT_BYTES_WIDTH,
-        CNT_PKTS_WIDTH   => 32,
-        DISABLE_ON_CLR   => true,
-        COUNT_PACKETS    => true,
-        ADD_ARR_PKTS     => false,
-        FREQUENCY        => 250,
-        MI_DATA_WIDTH    => MI_WIDTH,
-        MI_ADDRESS_WIDTH => MI_WIDTH
-    )
-    port map (
-        CLK        => DMA_CLK,
-        RST        => DMA_RST,
-
-        MI_DWR     => mi_split_dwr(3),
-        MI_ADDR    => mi_split_addr(3),
-        MI_BE      => mi_split_be(3),
-        MI_RD      => mi_split_rd(3),
-        MI_WR      => mi_split_wr(3),
-        MI_ARDY    => mi_split_ardy(3),
-        MI_DRD     => mi_split_drd(3),
-        MI_DRDY    => mi_split_drdy(3),
-
-        RX_SOF_POS => NVME_RD_MFB_SOF_POS,
-        RX_EOF_POS => NVME_RD_MFB_EOF_POS,
-        RX_SOF     => NVME_RD_MFB_SOF,
-        RX_EOF     => NVME_RD_MFB_EOF,
-        RX_SRC_RDY => NVME_RD_MFB_SRC_RDY,
-        RX_DST_RDY => NVME_RD_MFB_DST_RDY
-    );
-
-    wr_mfb_speed_meter_i : entity work.MFB_SPEED_METER_MI
-    generic map (
-        REGIONS          => DMA_MFB_REGIONS,
-        REGION_SIZE      => DMA_MFB_REGION_SIZE,
-        BLOCK_SIZE       => DMA_MFB_BLOCK_SIZE,
-        ITEM_WIDTH       => DMA_MFB_ITEM_WIDTH,
-        CNT_TICKS_WIDTH  => SM_CNT_TICKS_WIDTH,
-        -- Based on the recommendation from the component declaration
-        CNT_BYTES_WIDTH  => SM_CNT_BYTES_WIDTH,
-        CNT_PKTS_WIDTH   => 32,
-        DISABLE_ON_CLR   => true,
-        COUNT_PACKETS    => true,
-        ADD_ARR_PKTS     => false,
-        FREQUENCY        => 250,
-        MI_DATA_WIDTH    => MI_WIDTH,
-        MI_ADDRESS_WIDTH => MI_WIDTH
-    )
-    port map (
-        CLK        => DMA_CLK,
-        RST        => DMA_RST,
-
-        MI_DWR     => mi_split_dwr(4),
-        MI_ADDR    => mi_split_addr(4),
-        MI_BE      => mi_split_be(4),
-        MI_RD      => mi_split_rd(4),
-        MI_WR      => mi_split_wr(4),
-        MI_ARDY    => mi_split_ardy(4),
-        MI_DRD     => mi_split_drd(4),
-        MI_DRDY    => mi_split_drdy(4),
-
-        RX_SOF_POS => NVME_WR_MFB_SOF_POS,
-        RX_EOF_POS => NVME_WR_MFB_EOF_POS,
-        RX_SOF     => NVME_WR_MFB_SOF,
-        RX_EOF     => NVME_WR_MFB_EOF,
-        RX_SRC_RDY => NVME_WR_MFB_SRC_RDY,
-        RX_DST_RDY => NVME_WR_MFB_DST_RDY
-    );
 
     iops_cntr_i : entity work.EVENT_COUNTER
     generic map (
