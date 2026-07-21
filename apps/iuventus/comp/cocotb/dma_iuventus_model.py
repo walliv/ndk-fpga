@@ -10,7 +10,7 @@
 import os
 
 import cocotb
-from cocotb.triggers import RisingEdge, ReadOnly, NextTimeStep
+from cocotb.triggers import Event, RisingEdge, ReadOnly
 
 from cocotbext.ofm.mfb.drivers import MFBDriver
 from cocotbext.ofm.mfb.monitors import MFBMonitor
@@ -80,7 +80,7 @@ class SimplifiedDmaModel:
         self.wr_frame_accept_cb = None  # (MfbTransactionWithMeta) -> None
 
         self._rd_busy = False
-        self._op_stat_pending = []  # list of (type, code) awaiting dispatch, FIFO
+        self._op_stat_pending = []  # list of (type, code, done_event_or_None) awaiting dispatch, FIFO
 
         dut.NVME_RD_REQ_RDY.value = 1
         dut.NVME_OP_STAT_TYPE.value = 0
@@ -111,27 +111,31 @@ class SimplifiedDmaModel:
         self._dut.NVME_OP_STAT_VLD.value = 0
 
     async def _rd_req_loop(self):
+        """Drives NVME_RD_REQ_RDY as a synchronous level, decided fresh every DMA_CLK edge from
+        `self._rd_busy` -- NOT reactively out of the ReadOnly phase. RDY is written immediately
+        after RisingEdge (the Normal/writable phase), so its new value is stable across the WHOLE
+        upcoming cycle and is exactly what the DUT's own registered processes (e.g. this core's
+        rd_qid_rr_p) see at the NEXT edge. Sampling (of VLD/RDY/the request fields) is kept
+        strictly separate, done afterwards in ReadOnly() once all of this edge's deltas have
+        settled. This avoids the previous NextTimeStep()-based reactive drive, which -- though it
+        never raised an error -- produced RDY transitions that the DUT did not register as clean,
+        edge-aligned handshakes (see cocotb_test.py's history for the misdiagnosis this caused)."""
         while True:
             await RisingEdge(self._clk)
+            self._dut.NVME_RD_REQ_RDY.value = int(not self._rd_busy)
+
             await ReadOnly()
-
-            if self._rd_busy:
-                continue
-
             vld = bool(self._dut.NVME_RD_REQ_VLD.value)
             rdy = bool(self._dut.NVME_RD_REQ_RDY.value)
-            if not (vld and rdy):
+
+            if self._rd_busy or not (vld and rdy):
                 continue
 
             lba_ptr = int(self._dut.NVME_RD_REQ_LBA_PTR.value)
             lba_num = int(self._dut.NVME_RD_REQ_LBA_NUM.value)
             qid = int(self._dut.NVME_RD_REQ_QID.value)
 
-            # Signals can't be driven while still in the ReadOnly phase -- step past it first.
-            await NextTimeStep()
-
             self._rd_busy = True
-            self._dut.NVME_RD_REQ_RDY.value = 0
 
             if self.rd_req_accept_cb:
                 self.rd_req_accept_cb(lba_ptr, lba_num, qid)
@@ -146,10 +150,23 @@ class SimplifiedDmaModel:
         pattern = bytes([i & 0xFF for i in range(total_bytes)])
         await self._rd_mfb_driver.send(pattern)
 
-        self._op_stat_pending.append((OP_STAT_TYPE_READ, OP_STAT_CODE_SUCCESS))
+        # Wait for THIS completion's own OP_STAT_VLD pulse to actually be dispatched (not just
+        # queued) before re-arming RDY. The RTL's seq_addr_cntr/QID round-robin advance
+        # synchronously off NVME_OP_STAT_VLD; if RDY were re-driven high on the very same edge
+        # (e.g. by clearing `_rd_busy` right after enqueuing, with `_op_stat_loop` also polling
+        # that same queue on the very next RisingEdge), the NEXT request could get accepted on
+        # that exact same edge -- one cycle before the address/QID counters' own registered
+        # increment has settled, so the next request would observe the STALE pre-increment
+        # value. The extra RisingEdge below (past OP_STAT_VLD's deassertion) gives that increment
+        # a full cycle to settle before RDY is allowed to go high again.
+        done = Event()
+        self._op_stat_pending.append((OP_STAT_TYPE_READ, OP_STAT_CODE_SUCCESS, done))
+        await done.wait()
+        await RisingEdge(self._clk)
 
+        # RDY itself is re-driven by `_rd_req_loop` on the next edge (it recomputes
+        # `not self._rd_busy` every cycle) -- clearing the busy flag here is enough.
         self._rd_busy = False
-        self._dut.NVME_RD_REQ_RDY.value = 1
 
     def _on_wr_frame(self, trans):
         if self.wr_frame_accept_cb:
@@ -159,7 +176,10 @@ class SimplifiedDmaModel:
     async def _service_write(self):
         for _ in range(self.wr_latency_cycles):
             await RisingEdge(self._clk)
-        self._op_stat_pending.append((OP_STAT_TYPE_WRITE, OP_STAT_CODE_SUCCESS))
+        # No `_rd_busy`-style single-outstanding gate exists on the write side (DST_RDY is held
+        # high throughout), so there is no analogous "next accept races the completion" hazard --
+        # a completion event is not needed here.
+        self._op_stat_pending.append((OP_STAT_TYPE_WRITE, OP_STAT_CODE_SUCCESS, None))
 
     async def _op_stat_loop(self):
         while True:
@@ -169,10 +189,13 @@ class SimplifiedDmaModel:
                 self._dut.NVME_OP_STAT_VLD.value = 0
                 continue
 
-            op_type, op_code = self._op_stat_pending.pop(0)
+            op_type, op_code, done = self._op_stat_pending.pop(0)
             self._dut.NVME_OP_STAT_TYPE.value = op_type
             self._dut.NVME_OP_STAT_CODE.value = op_code
             self._dut.NVME_OP_STAT_VLD.value = 1
 
             await RisingEdge(self._clk)
             self._dut.NVME_OP_STAT_VLD.value = 0
+
+            if done is not None:
+                done.set()
