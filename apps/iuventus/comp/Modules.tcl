@@ -26,7 +26,6 @@ set MFB_RECONF_BASE          "$OFM_PATH/comp/mfb_tools/flow/reconfigurator"
 set DATA_LOGGER_BASE         "$OFM_PATH/comp/debug/data_logger"
 set LATENCY_METER_BASE       "$OFM_PATH/comp/debug/latency_meter"
 set LFSR_GEN_BASE            "$OFM_PATH/comp/base/logic/lfsr_simple_random_gen"
-set MFB_SPEED_METER_BASE     "$OFM_PATH/comp/mfb_tools/logic/speed_meter"
 set EVENT_CNTR_BASE          "$OFM_PATH/comp/base/misc/event_counter"
 
 # Packages
@@ -68,7 +67,6 @@ if {$ARCHGRP_ARR(USR_CORE_ARCH) == "FULL"} {
     lappend COMPONENTS [list "DATA_LOGGER"             $DATA_LOGGER_BASE     "FULL" ]
     lappend COMPONENTS [list "LATENCY_METER"           $LATENCY_METER_BASE   "FULL" ]
     lappend COMPONENTS [list "LFSR_SIMPLE_RANDOM_GEN"  $LFSR_GEN_BASE        "FULL" ]
-    lappend COMPONENTS [list "MFB_SPEED_METER_MI"      $MFB_SPEED_METER_BASE "FULL" ]
     lappend COMPONENTS [list "EVENT_COUNTER"           $EVENT_CNTR_BASE      "FULL" ]
 
     lappend MOD "$ENTITY_BASE/iuventus_integrity_checker.vhd"
