@@ -13,6 +13,17 @@ from cocotbext.ofm.dma.iuventus import CQEntry
 from cocotbext.ofm.dma.iuventus import IuventusMiRegMap, CtrlRegBits, StatRegBits
 from cocotbext.ofm.dma.iuventus import IuventusPerQueueCntrRegMap, per_queue_cntr_reg_addr
 
+# WRBUFF peer-write 32B-alignment statistics (empirical HW measurement of how well NVMe
+# peer-writes on the CQ interface fit a 32B-aligned, <=16-beat AXI burst -- see
+# NVME_CQ_META_EXTRACTOR's CQ_WR_*_INCR outputs). Not part of IuventusMiRegMap since that enum
+# only lists the addresses needed for SSD throughput/HW debug (mirroring how the R_PROF_*
+# profiling counters in nvme_sw_manager.vhd are also omitted there); addresses must match
+# nvme_sw_manager.vhd's R_CQ_WR_*_CNTR_L constants exactly.
+CQ_WR_TOTAL_CNTR_L_ADDR         = 0x0CC
+CQ_WR_UNALIGN_START_CNTR_L_ADDR = 0x0D4
+CQ_WR_UNALIGN_SIZE_CNTR_L_ADDR  = 0x0DC
+CQ_WR_OVER16BEATS_CNTR_L_ADDR   = 0x0E4
+
 @dataclass
 class DMAIuventusConfig:
     ctrl_reg                : int
@@ -44,6 +55,10 @@ class DMAIuventusConfig:
     nvme_wr_cmd_bytes       : int
     tag_fifo_status         : int
     nvme_flush_disp         : int
+    cq_wr_total             : int
+    cq_wr_unalign_start     : int
+    cq_wr_unalign_size      : int
+    cq_wr_over16beats       : int
 
     ERROR_CODES = [
         ("000", "01", "Invalid Opcode"),
@@ -135,6 +150,9 @@ class DMAIuventusConfig:
                 formatted_val = pformat(str(val), indent=4, width=80).replace("\n", "\n" + " " * (max_len + 3))
             elif name == "tag_fifo_status":
                 formatted_val = f"{val}/2048"
+            elif name in ["cq_wr_unalign_start", "cq_wr_unalign_size", "cq_wr_over16beats"]:
+                pct = (val / self.cq_wr_total * 100) if self.cq_wr_total else 0.0
+                formatted_val = f"{val}\t({pct:.2f}% of cq_wr_total={self.cq_wr_total})"
             elif isinstance(val, int) and ("addr" in name or "ptr" in name):
                 formatted_val = hex(val)
             else:
@@ -163,6 +181,12 @@ class DMAIuventusRegAccess(nfb.BaseComp):
 
     def rst_cntrs(self) -> None:
         self._comp.set_bit(IuventusMiRegMap.CONTROL.value, CtrlRegBits.RST_CNTRS.value)
+
+    def op_soft_rst(self) -> None:
+        """Pulses the operational (per-command) soft-reset: clears op_ctrl/dispatch/completion/
+        doorbell FSMs, FIFOs, allocators and tags, WITHOUT resetting this component's own
+        per-queue configuration (SQ/CQ/doorbell base addresses stay programmed)."""
+        self._comp.set_bit(IuventusMiRegMap.CONTROL.value, CtrlRegBits.OP_SOFT_RST.value)
 
     def enable_rpt_upd(self) -> None:
         self._comp.set_bit(IuventusMiRegMap.CONTROL.value, CtrlRegBits.EN_UPD_RPT.value)
@@ -342,6 +366,23 @@ class DMAIuventusRegAccess(nfb.BaseComp):
     @property
     def nvme_flush_disp(self) -> int:
         return self._comp.read64(IuventusMiRegMap.NVME_FLUSH_DISP_CNTR_L.value)
+
+    # --- WRBUFF peer-write 32B-alignment statistics (empirical HW measurement) -----------------
+    @property
+    def cq_wr_total(self) -> int:
+        return self._comp.read64(CQ_WR_TOTAL_CNTR_L_ADDR)
+
+    @property
+    def cq_wr_unalign_start(self) -> int:
+        return self._comp.read64(CQ_WR_UNALIGN_START_CNTR_L_ADDR)
+
+    @property
+    def cq_wr_unalign_size(self) -> int:
+        return self._comp.read64(CQ_WR_UNALIGN_SIZE_CNTR_L_ADDR)
+
+    @property
+    def cq_wr_over16beats(self) -> int:
+        return self._comp.read64(CQ_WR_OVER16BEATS_CNTR_L_ADDR)
 
     def get_configuration(self) -> DMAIuventusConfig:
         """Returns the full configuration of the DMA Iuventus (all properties)."""
