@@ -74,16 +74,26 @@ architecture TEST of USER_CORE is
     -- Read-side QID round-robin: min/max queue for the range and burst (number of read requests
     -- sent to a queue before advancing to the next one), mirroring MFB_GENERATOR_MI32 semantics.
     -- Default (0,0) keeps every read request on queue 0 until software configures the range.
-    signal rd_ch_min_reg  : std_logic_vector(QID_W -1 downto 0);
-    signal rd_ch_max_reg  : std_logic_vector(QID_W -1 downto 0);
-    signal rd_burst_reg   : std_logic_vector(15 downto 0);
-    signal rd_qid_cntr    : unsigned(QID_W -1 downto 0);
-    signal rd_burst_cntr  : unsigned(15 downto 0);
+    signal rd_ch_min_reg   : std_logic_vector(QID_W -1 downto 0);
+    signal rd_ch_max_reg   : std_logic_vector(QID_W -1 downto 0);
+    signal rd_burst_reg    : std_logic_vector(15 downto 0);
+    signal rd_qid_cntr     : unsigned(QID_W -1 downto 0);
+    signal rd_burst_cntr   : unsigned(15 downto 0);
     -- Round-robin QID for the read-request submit interface; forced to 0 when NUM_QUEUES = 1.
-    signal gen_rd_req_qid : std_logic_vector(QID_W -1 downto 0);
+    signal gen_rd_req_qid  : std_logic_vector(QID_W -1 downto 0);
+    -- Round-robin candidate queue selected THIS cycle by rd_qid_select_p: the next queue at/after
+    -- rd_qid_cntr, wrapping within [rd_ch_min_reg, rd_ch_max_reg], whose SQ currently has room
+    -- (NVME_RD_REQ_QUEUE_RDY). Presented as gen_rd_req_qid instead of the raw rd_qid_cntr so a
+    -- full queue is skipped rather than livelocking the round-robin on it (OP_CTRL is a
+    -- single-issue serial FSM; presenting a full queue would stall every other queue too).
+    signal rd_qid_cand     : unsigned(QID_W -1 downto 0);
+    -- '1' when rd_qid_cand is actually ready (some queue in [min,max] currently has room); '0'
+    -- when every queue in range is full -- gates NVME_RD_REQ_VLD off so the generator holds
+    -- instead of presenting a request to a queue that would just stall.
+    signal rd_qid_cand_rdy : std_logic;
     -- QID that the integrity checker's write/read requests are tagged with (queue 0 / rd_ch_min);
     -- forced to 0 when NUM_QUEUES = 1.
-    signal checker_qid    : std_logic_vector(QID_W -1 downto 0);
+    signal checker_qid     : std_logic_vector(QID_W -1 downto 0);
 
     -- MFB Generator outputs
     signal gen_mfb_sof     : std_logic_vector(NVME_WR_MFB_SOF'range);
@@ -458,8 +468,50 @@ begin
         end if;
     end process;
 
+    -- Combinational round-robin scan: pick the next ready queue at/after rd_qid_cntr within
+    -- [rd_ch_min_reg, rd_ch_max_reg] (wrapping); see rd_qid_cand's declaration comment. At
+    -- NUM_QUEUES = 1 this always resolves to queue 0, with rd_qid_cand_rdy mirroring
+    -- NVME_RD_REQ_QUEUE_RDY(0).
+    rd_qid_select_p : process (all)
+        variable cand_v  : unsigned(QID_W -1 downto 0);
+        variable found_v : std_logic;
+    begin
+        cand_v  := rd_qid_cntr;
+        found_v := '0';
+
+        -- Pass 1: rd_qid_cntr .. rd_ch_max_reg (no wrap)
+        for q in 0 to NUM_QUEUES -1 loop
+            if (found_v = '0' and to_unsigned(q, QID_W) >= rd_qid_cntr
+                and to_unsigned(q, QID_W) <= unsigned(rd_ch_max_reg)) then
+                if (NVME_RD_REQ_QUEUE_RDY(q) = '1') then
+                    cand_v  := to_unsigned(q, QID_W);
+                    found_v := '1';
+                end if;
+            end if;
+        end loop;
+
+        -- Pass 2 (wrap): rd_ch_min_reg .. rd_ch_max_reg, only if pass 1 found nothing
+        if (found_v = '0') then
+            for q in 0 to NUM_QUEUES -1 loop
+                if (found_v = '0' and to_unsigned(q, QID_W) >= unsigned(rd_ch_min_reg)
+                    and to_unsigned(q, QID_W) <= unsigned(rd_ch_max_reg)) then
+                    if (NVME_RD_REQ_QUEUE_RDY(q) = '1') then
+                        cand_v  := to_unsigned(q, QID_W);
+                        found_v := '1';
+                    end if;
+                end if;
+            end loop;
+        end if;
+
+        rd_qid_cand     <= cand_v;
+        rd_qid_cand_rdy <= found_v;
+    end process;
+
     -- Round-robin QID counter for read requests: advances by one queue every rd_burst accepted
-    -- requests, wrapping from rd_ch_max back to rd_ch_min.
+    -- requests, wrapping from rd_ch_max back to rd_ch_min. Tracks the queue actually used
+    -- (rd_qid_cand, which may have skipped ahead of the raw rd_qid_cntr -- see rd_qid_select_p)
+    -- rather than the raw counter, so the round-robin keeps making progress even when the
+    -- nominal next queue is (still) full.
     rd_qid_rr_p : process (DMA_CLK)
     begin
         if (rising_edge(DMA_CLK)) then
@@ -469,19 +521,20 @@ begin
             elsif (NVME_RD_REQ_VLD = '1' and NVME_RD_REQ_RDY = '1') then
                 if (rd_burst_cntr + 1 >= unsigned(rd_burst_reg)) then
                     rd_burst_cntr <= (others => '0');
-                    if (rd_qid_cntr >= unsigned(rd_ch_max_reg)) then
+                    if (rd_qid_cand >= unsigned(rd_ch_max_reg)) then
                         rd_qid_cntr <= resize(unsigned(rd_ch_min_reg), rd_qid_cntr'length);
                     else
-                        rd_qid_cntr <= rd_qid_cntr + 1;
+                        rd_qid_cntr <= rd_qid_cand + 1;
                     end if;
                 else
                     rd_burst_cntr <= rd_burst_cntr + 1;
+                    rd_qid_cntr   <= rd_qid_cand;
                 end if;
             end if;
         end if;
     end process;
 
-    gen_rd_req_qid <= (others => '0') when (NUM_QUEUES = 1) else std_logic_vector(rd_qid_cntr);
+    gen_rd_req_qid <= (others => '0') when (NUM_QUEUES = 1) else std_logic_vector(rd_qid_cand);
     checker_qid    <= (others => '0') when (NUM_QUEUES = 1) else rd_ch_min_reg;
 
     rd_req_lba_num_reg_p : process (DMA_CLK)
@@ -585,7 +638,10 @@ begin
                            nvme_rd_req_lba_ptr_reg when (tst_finished = '1' and contig_test = '0') else
                            std_logic_vector(resize(std_logic_vector(tst_addr), NVME_RD_REQ_LBA_PTR'length));
     NVME_RD_REQ_LBA_NUM <= chk_rd_req_lba_num when (integ_en = '1') else nvme_rd_req_lba_num_reg;
-    NVME_RD_REQ_VLD     <= chk_rd_req_vld     when (integ_en = '1') else gen_nvme_rd_req_vld;
+    -- Non-blocking round-robin: withhold VLD (rather than offering a request to a queue that
+    -- would just stall) when no queue in [rd_ch_min..rd_ch_max] currently has SQ room -- see
+    -- rd_qid_cand_rdy's declaration comment. The checker path (integ_en='1') is unaffected.
+    NVME_RD_REQ_VLD     <= chk_rd_req_vld     when (integ_en = '1') else (gen_nvme_rd_req_vld and rd_qid_cand_rdy);
     -- Read-request QID: round-robin counter for the throughput generator, queue 0 / rd_ch_min for
     -- the checker; both are forced to 0 above when NUM_QUEUES = 1.
     NVME_RD_REQ_QID     <= checker_qid        when (integ_en = '1') else gen_rd_req_qid;

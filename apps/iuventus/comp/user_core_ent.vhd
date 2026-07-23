@@ -73,13 +73,17 @@ entity USER_CORE is
         -- Read operation submit interface
         -- =========================================================================================
         -- The size of data (0-based value).
-        NVME_RD_REQ_LBA_NUM : out std_logic_vector(7 downto 0);
+        NVME_RD_REQ_LBA_NUM   : out std_logic_vector(7 downto 0);
         -- This is a LBA address (not a byte address) to the NVMe
-        NVME_RD_REQ_LBA_PTR : out std_logic_vector(63 downto 0);
-        NVME_RD_REQ_VLD     : out std_logic;
-        NVME_RD_REQ_RDY     : in  std_logic;
+        NVME_RD_REQ_LBA_PTR   : out std_logic_vector(63 downto 0);
+        NVME_RD_REQ_VLD       : out std_logic;
+        NVME_RD_REQ_RDY       : in  std_logic;
         -- Queue Identifier of the queue this read request targets (round-robin, see architecture)
-        NVME_RD_REQ_QID     : out std_logic_vector(maximum(1, log2(NUM_QUEUES))-1 downto 0);
+        NVME_RD_REQ_QID       : out std_logic_vector(maximum(1, log2(NUM_QUEUES))-1 downto 0);
+        -- Per-queue "DMA can currently accept a read for this queue" (mirrors that queue's SQ
+        -- space). The round-robin generator must skip a queue whose bit is '0' instead of
+        -- presenting it and stalling -- see DMA_IUVENTUS's NVME_RD_REQ_QUEUE_RDY port comment.
+        NVME_RD_REQ_QUEUE_RDY : in std_logic_vector(NUM_QUEUES -1 downto 0);
 
         -- =========================================================================================
         -- Operation status interface
