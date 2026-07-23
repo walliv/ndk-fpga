@@ -110,6 +110,12 @@ class SimplifiedDmaModel:
         self.lba_space_size = None
 
         dut.NVME_RD_REQ_RDY.value = 1
+        # Per-queue "DMA can accept a read for this queue" (op_ctrl.vhd's SQ_HAS_SPACE, mirrored up
+        # through DMA_IUVENTUS -- see USER_CORE's NVME_RD_REQ_QUEUE_RDY port comment). This
+        # simplified single-outstanding model does not simulate per-queue SQ occupancy at all, so
+        # every queue is tied permanently "ready" -- functionally identical to no gate existing,
+        # matching this model's behavior before that port was added.
+        dut.NVME_RD_REQ_QUEUE_RDY.value = (1 << _NUM_QUEUES) - 1
         dut.NVME_OP_STAT_TYPE.value = 0
         dut.NVME_OP_STAT_CODE.value = 0
         dut.NVME_OP_STAT_VLD.value = 0

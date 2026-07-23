@@ -260,6 +260,10 @@ architecture FULL of CORE_LOGIC is
     signal nvme_rd_req_vld     : std_logic_vector(DMA_STREAMS-1 downto 0);
     signal nvme_rd_req_rdy     : std_logic_vector(DMA_STREAMS-1 downto 0);
     signal nvme_rd_req_qid     : slv_array_t(DMA_STREAMS-1 downto 0)(maximum(1, log2(NUM_QUEUES)) -1 downto 0);
+    -- Per-queue "DMA can currently accept a read for this queue" (mirrors OP_CTRL's SQ_HAS_SPACE);
+    -- passed through from DMA_IUVENTUS to USER_CORE so its round-robin generator can skip a full
+    -- queue -- see DMA_IUVENTUS's NVME_RD_REQ_QUEUE_RDY port comment.
+    signal nvme_rd_req_queue_rdy : slv_array_t(DMA_STREAMS-1 downto 0)(NUM_QUEUES -1 downto 0);
 
     signal nvme_op_stat_type : std_logic_vector(DMA_STREAMS-1 downto 0);
     signal nvme_op_stat_code : slv_array_t(DMA_STREAMS-1 downto 0)(1 downto 0);
@@ -642,7 +646,9 @@ begin
                 -- pkt_dispatcher path. Moving the per-queue register file into NP_LUTRAM freed
                 -- ~1152 flops at N=4, so QUEUE_DEPTH is raised from 4 to 8 (N=4 x QD8 = 32 total
                 -- outstanding commands); rebuild confirms the LUTRAM area drop closes timing at QD8.
-                QUEUE_DEPTH => 8,
+                -- NOTE: raised to 64 for the CQ-alignment measurement (matches the validated
+                -- multi-Samsung throughput config); may need AggressiveExplore route + phys_opt.
+                QUEUE_DEPTH => 64,
                 -- Production keepalive width (2**28 DMA_CLK cycles, ~1 s); explicitly assigned
                 -- (equals DMA_IUVENTUS's own default) per the "always assign every generic" rule.
                 FLUSH_DELAY_CNTR_WIDTH => 28,
@@ -666,6 +672,7 @@ begin
                 NVME_RD_REQ_VLD     => nvme_rd_req_vld(str),
                 NVME_RD_REQ_RDY     => nvme_rd_req_rdy(str),
                 NVME_RD_REQ_QID     => nvme_rd_req_qid(str),
+                NVME_RD_REQ_QUEUE_RDY => nvme_rd_req_queue_rdy(str),
 
                 OP_STAT_TYPE => nvme_op_stat_type(str),
                 OP_STAT_CODE => nvme_op_stat_code(str),
@@ -794,6 +801,7 @@ begin
             NVME_RD_REQ_VLD     => nvme_rd_req_vld(0),
             NVME_RD_REQ_RDY     => nvme_rd_req_rdy(0),
             NVME_RD_REQ_QID     => nvme_rd_req_qid(0),
+            NVME_RD_REQ_QUEUE_RDY => nvme_rd_req_queue_rdy(0),
 
             NVME_OP_STAT_TYPE => nvme_op_stat_type(0),
             NVME_OP_STAT_CODE => nvme_op_stat_code(0),
