@@ -58,6 +58,11 @@ set SYNTH_FLAGS(PROJ_ONLY) "0"
 # "1" ... synthesize the project
 set SYNTH_FLAGS(SYNTH_ONLY) "0"
 
+# Timing-closure directives for the N=4 x QD64 build (the QD64 config lands slightly negative on
+# the CQ/WRBUFF URAM-read path; AggressiveExplore route + post-place phys_opt closed it before).
+set SYNTH_FLAGS(ROUTE_DIRECTIVE)           "AggressiveExplore"
+set SYNTH_FLAGS(PPLACE_PHYS_OPT_DIRECTIVE) "AggressiveExplore"
+
 # Associative array which is propagated throughout Modules.tcl files
 set APP_ARCHGRP(CORE_BASE)       $CORE_BASE
 set APP_ARCHGRP(CLOCK_GEN_ARCH)  $CLOCK_GEN_ARCH
@@ -87,7 +92,9 @@ lappend HIERARCHY(MOD) "$CARD_BASE/src/card_top.vhd"
 lappend SYNTH_FLAGS(CONSTR) "$CARD_BASE/src/general.xdc"
 lappend SYNTH_FLAGS(CONSTR) "$CARD_BASE/src/pblock.xdc"
 # Comment this constraint out if you don't want to see the received data in the hardware
-lappend SYNTH_FLAGS(CONSTR) "$CARD_BASE/src/ilas.xdc"
+# ILA disabled for the CQ-alignment measurement build (read counters over MI, not JTAG); its
+# capture paths were the only timing-failing group (WNS -0.088) -- removing it closes timing.
+# lappend SYNTH_FLAGS(CONSTR) "$CARD_BASE/src/ilas.xdc"
 
 lappend SYNTH_FLAGS(CONSTR) "$COMBO_BASE/cards/amd/alveo-u55c/constr/pcie_half.xdc"
 
