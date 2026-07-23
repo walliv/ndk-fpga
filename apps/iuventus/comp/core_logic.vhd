@@ -661,7 +661,12 @@ begin
                 PCIE_MFB_REGIONS     => PCIE_RQ_MFB_REGIONS,
                 PCIE_MFB_REGION_SIZE => PCIE_RQ_MFB_REGION_SIZE,
                 PCIE_MFB_BLOCK_SIZE  => PCIE_RQ_MFB_BLOCK_SIZE,
-                PCIE_MFB_ITEM_WIDTH  => PCIE_RQ_MFB_ITEM_WIDTH
+                PCIE_MFB_ITEM_WIDTH  => PCIE_RQ_MFB_ITEM_WIDTH,
+
+                -- Enable the op_ctrl stall profiler: OP_PROF -> R_PROF_* MI counters
+                -- (IDLE_NOREQ/ALLOC_WAIT/DISP_WAIT/DATA_WAIT/BUSY at 0x0A4..0x0C8). Off by default;
+                -- turned on to profile where op_ctrl spends its cycles under the non-blocking accept.
+                PROFILE_EN => true
             )
             port map (
                 CLK      => pcie_clks(str),
