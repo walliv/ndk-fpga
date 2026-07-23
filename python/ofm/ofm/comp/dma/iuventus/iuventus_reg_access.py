@@ -173,6 +173,13 @@ class DMAIuventusRegAccess(nfb.BaseComp):
         self._comp.wait_for_bit(IuventusMiRegMap.STATUS.value, StatRegBits.READY.value, level=True)
 
     def disable(self) -> None:
+        """Graceful stop + drain barrier. Clearing ENABLE makes the design stop ACCEPTING new
+        traffic (op_ctrl deasserts read-request ready and, for a write already streaming, finishes
+        that frame to its EOF before blocking further WR_MFB), drain every outstanding command, then
+        stop. STATUS.READY stays high for the whole of that sequence and only drops once the design
+        is fully idle, so this wait BLOCKS until the drain has completed. Always call this (never a
+        bare CONTROL=0 write) and let it return BEFORE tearing down the host NVMe queues -- otherwise
+        the SSD's outstanding P2P fetches are stranded and its controller state is corrupted."""
         self._comp.clr_bit(IuventusMiRegMap.CONTROL.value, CtrlRegBits.ENABLE.value)
         self._comp.wait_for_bit(IuventusMiRegMap.STATUS.value, StatRegBits.READY.value, level=False)
 
