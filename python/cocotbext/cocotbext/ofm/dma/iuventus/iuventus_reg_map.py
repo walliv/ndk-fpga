@@ -12,6 +12,7 @@ class CtrlRegBits(IntEnum):
     CLR_ERR_MASK = 2
     RST_CNTRS = 3
     EN_UPD_RPT = 4
+    OP_SOFT_RST = 5
 
 class StatRegBits(IntEnum):
     READY = 0
