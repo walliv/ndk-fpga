@@ -20,13 +20,23 @@ address per access, plus ordinary per-byte write enables. This is what removes t
 per-DWord/per-byte address plumbing (one address per one of the 64 individual byte lanes) and is also
 what makes URAM a legal target for this component (see below).
 
-Each bank is implemented by :ref:`tdp_bram_be` (2-region/TDP configuration, one shared address bus per
-port) or by :ref:`sdp_bram` in ``SDP_BRAM_BE`` mode (1-region configuration, independent read/write
-address buses, so reads never stall on a concurrent write). Both banks receive the *same* rotated
-write data; only the write-enable and the address differ between them. On the read side, both banks
-are always fetched for the requested channel/row and the two 512 b words are recombined byte-by-byte
-(picking, per byte, whichever bank holds that byte's actual row) before -- optionally -- being
-byte-rotated by the read-side barrel shifter to the requested intra-word offset.
+Each bank is implemented by :ref:`tdp_bram_be` or by :ref:`sdp_bram` in ``SDP_BRAM_BE`` mode, depending
+on the region count and the resolved :vhdl:genconstant:`RAM_TYPE`:
+
+* 2-region configurations always use ``TDP_BRAM_BE`` in its native TDP mode: one shared address bus
+  per port (region 0 on port A, region 1 on port B), write priority stalls a same-port read.
+* 1-region + BRAM configurations use ``SDP_BRAM_BE``: independent read/write address buses, so reads
+  never stall on a concurrent write.
+* 1-region + URAM configurations also use ``TDP_BRAM_BE``, but driven SDP-style: port A is dedicated
+  to write, port B is dedicated to read, reproducing the same "reads never stall" behavior and the
+  same read-latency contract as the ``SDP_BRAM_BE`` branch (this is the only way to reach URAM on a
+  1-region geometry, since ``SDP_BRAM_BE`` itself has no ``RAM_TYPE`` generic at all).
+
+Both banks receive the *same* rotated write data; only the write-enable and the address differ between
+them. On the read side, both banks are always fetched for the requested channel/row and the two 512 b
+words are recombined byte-by-byte (picking, per byte, whichever bank holds that byte's actual row)
+before -- optionally -- being byte-rotated by the read-side barrel shifter to the requested intra-word
+offset.
 
 Memory primitive selection (:vhdl:genconstant:`RAM_TYPE`)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -35,10 +45,14 @@ Memory primitive selection (:vhdl:genconstant:`RAM_TYPE`)
 
 * ``"AUTO"`` (default) resolves to URAM on an AMD UltraScale+/Versal device (:vhdl:genconstant:`DEVICE`)
   when the configuration uses 2 MFB regions and the resulting bank is at least 2048 rows deep
-  (avoiding grossly underfilled URAM288 columns); BRAM otherwise.
+  (avoiding grossly underfilled URAM288 columns); BRAM otherwise. ``"AUTO"`` never resolves to URAM
+  on a 1-region geometry.
 * ``"BRAM"`` / ``"URAM"`` force the respective primitive; ``"URAM"`` together with an Intel
   :vhdl:genconstant:`DEVICE` fails elaboration (Intel devices always use the structural, per-byte-column
-  mapping described in :ref:`tdp_bram_be`).
+  mapping described in :ref:`tdp_bram_be`). ``"URAM"`` is honored on both 1- and 2-region geometries
+  (see above); a 1-region ``"URAM"`` instance still drives ``TDP_BRAM_BE`` SDP-style, so the read
+  latency and "reads never stall" property are unchanged relative to ``"BRAM"``/``"AUTO"`` on the same
+  geometry.
 
 The maximum usable depth of one memory array (and therefore how many channels share one array,
 :vhdl:genconstant:`CHANS_PER_ARRAY`) also depends on the resolved primitive: URAM cascades cheaply to
@@ -119,6 +133,23 @@ The ``TB_TXN_GAP`` environment variable (default ``1``) inserts one no-op word b
 transactions to sidestep a *simulator* artifact of nvc 1.21.0 that affects only the **previous**
 (per-byte-BRAM) architecture; set ``TB_TXN_GAP=0`` to drive transactions truly back-to-back at
 line rate (the current architecture passes either way).
+
+.. NOTE:: ``cocotb_test.py``/``trans_buffer_model.py`` are hard-wired to the fixed
+   ``(MFB_REGIONS=2, MFB_REGION_SIZE=1, MFB_BLOCK_SIZE=8, MFB_ITEM_WIDTH=32)`` MFB geometry (the
+   reference model and the write-side driver both assume two regions) and cannot elaborate/drive a
+   1-region instance. ``cocotb/cocotb_1region_smoke.py`` is a separate, self-contained smoke test for
+   1-region geometries (in particular the ``(1,1,16,32)`` config used by DMA Iuventus's
+   ``sq_rd_buffer_i``, both ``RAM_TYPE => "BRAM"`` and ``"URAM"``): it drives a handful of aligned
+   writes and reads, checks data integrity and asserts that the ``RD_EN_A`` -> ``RD_DATA_VLD_A``
+   latency is identical between the two ``RAM_TYPE`` values. Run it with::
+
+       cd cocotb
+       COCOTB_TEST_MODULES=cocotb_1region_smoke NVC_ELAB_ARGS="-gMFB_REGIONS=1 -gMFB_REGION_SIZE=1 \
+           -gMFB_BLOCK_SIZE=16 -gMFB_ITEM_WIDTH=32 -gPOINTER_WIDTH=18 -gCHANNELS=2 -gRAM_TYPE=URAM" \
+           make sim-elab sim-run
+       COCOTB_TEST_MODULES=cocotb_1region_smoke NVC_ELAB_ARGS="-gMFB_REGIONS=1 -gMFB_REGION_SIZE=1 \
+           -gMFB_BLOCK_SIZE=16 -gMFB_ITEM_WIDTH=32 -gPOINTER_WIDTH=18 -gCHANNELS=2 -gRAM_TYPE=BRAM" \
+           make sim-elab sim-run
 
 Resource comparison
 ^^^^^^^^^^^^^^^^^^^^

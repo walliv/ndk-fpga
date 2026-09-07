@@ -1046,3 +1046,152 @@ async def test_flat_random_soak(dut):
         got = await tb.read_range(_noise_chan(tb.channels), start_byte, len(data))
         assert got == data, f"flat soak final mismatch start={start_byte} len={len(data)}"
     cocotb.log.info(f"test_flat_random_soak: {len(sample)} final read-back checks passed")
+
+
+# ==== EXPERIMENTAL collision probe ====
+# RD_EN_A broadcasts to both region ports; the write gate stalls only a region's own write, so the
+# other region's write leaves RD_DATA_VLD_A='1' with torn data. Logged, gated by TB_COLLISION_PROBE.
+
+TB_COLLISION_PROBE = os.environ.get("TB_COLLISION_PROBE", "0") == "1"
+
+
+async def _collision_probe_one(tb, chan: int, addr_byte: int, p_old: bytes, p_new: bytes, delay: int):
+    """One data point of the sweep: restore `addr_byte` (a 64 B, row-aligned window of `chan`) to
+    p_old, then drive a SINGLE region-0-anchored (SOF0, no SOF1) write word of p_new to the same
+    address while issuing exactly one RD_EN_A/RD_ADDR_A/RD_CHAN_A pulse at `delay` clock cycles
+    relative to the write word's capturing edge (delay=0: same edge; negative: read captured before
+    the write word's edge; positive: after). Returns (vld: bool, data: bytes|None) sampled the cycle
+    RD_DATA_VLD_A/RD_DATA_A are expected valid (immediately after the read's own capturing edge,
+    matching read_window()'s sampling point above and this component's documented RD_EN->
+    RD_DATA_VLD contract).
+
+    Uses two independent concurrent coroutines (one per bus, following the write_stream_and_
+    read_burst() pattern above) rather than a single shared per-cycle loop: the reader needs to
+    leave the ReadOnly phase (entered once to sample RD_DATA_VLD_A/RD_DATA_A) via a RisingEdge
+    before this task ends, and a single shared loop that also drives the write bus from the very
+    next statement after that ReadOnly() would violate cocotb's "no signal writes during ReadOnly"
+    rule -- see NVC_ARRAY_DEMUX_ARTIFACT's neighboring sections for other simulator-driven
+    constraints on this testbench's driving style.
+    """
+    dut = tb.dut
+    addr_dw = addr_byte // 4
+
+    # ---- restore the row to a known old pattern and let it fully settle -----------------------
+    words_old = gen_words(anchor=0, addr_dw=addr_dw, chan=chan, byte_offset=0, data=p_old)
+    await tb.write_transaction(words_old)
+    await tb.drive_idle(WRITE_SETTLE_MARGIN)
+
+    words_new = gen_words(anchor=0, addr_dw=addr_dw, chan=chan, byte_offset=0, data=p_new)
+    assert len(words_new) == 1, "a 64 B, byte_offset=0, anchor=0 write must be exactly one MFB word"
+    w = words_new[0]
+
+    # PRE must be >= -min(delay) so the reader's idle-cycle count below never goes negative.
+    PRE, POST = 4, 20
+    result = {"vld": False, "data": None}
+
+    async def writer():
+        for _ in range(PRE):
+            dut.PCIE_MFB_SRC_RDY.value = 0
+            await RisingEdge(dut.CLK)
+        # capturing edge (the reference point delay=0 is measured against)
+        dut.PCIE_MFB_SRC_RDY.value = 1
+        sof_val = (1 if w['sof1'] else 0) << 1 | (1 if w['sof0'] else 0)
+        dut.PCIE_MFB_SOF.value = sof_val
+        dut.PCIE_MFB_DATA.value = int.from_bytes(w['data'], 'little')
+        m0addr, m0chan, m0be = w['meta0']
+        m1addr, m1chan, m1be = w['meta1']
+        dut.PCIE_MFB_META[0].value = encode_meta(m0addr, m0chan, m0be, tb.chan_width)
+        dut.PCIE_MFB_META[1].value = encode_meta(m1addr, m1chan, m1be, tb.chan_width)
+        await RisingEdge(dut.CLK)
+        dut.PCIE_MFB_SRC_RDY.value = 0
+        for _ in range(POST):
+            await RisingEdge(dut.CLK)
+
+    async def reader():
+        wait_cycles = PRE + delay
+        assert wait_cycles >= 0, "delay too negative for PRE margin"
+        for _ in range(wait_cycles):
+            dut.RD_EN_A.value = 0
+            await RisingEdge(dut.CLK)
+        dut.RD_EN_A.value = 1
+        dut.RD_CHAN_A.value = chan
+        dut.RD_ADDR_A.value = addr_byte
+        await RisingEdge(dut.CLK)  # the read's own capturing edge
+        dut.RD_EN_A.value = 0
+        await ReadOnly()
+        result["vld"] = bool(dut.RD_DATA_VLD_A.value)
+        if result["vld"]:
+            result["data"] = int(dut.RD_DATA_A.value).to_bytes(MFB_BYTES, 'little')
+        await RisingEdge(dut.CLK)  # leave the ReadOnly phase cleanly before this task ends
+        for _ in range(max(0, (PRE + POST + 1) - (wait_cycles + 2))):
+            await RisingEdge(dut.CLK)
+
+    writer_task = cocotb.start_soon(writer())
+    reader_task = cocotb.start_soon(reader())
+    await writer_task
+    await reader_task
+
+    dut.PCIE_MFB_SRC_RDY.value = 0
+    dut.RD_EN_A.value = 0
+    await tb.drive_idle(WRITE_SETTLE_MARGIN)
+
+    return result["vld"], result["data"]
+
+
+async def _collision_sweep(tb, chan: int, addr_byte: int, label: str):
+    """Sweeps delay in -2..+14 at a fixed (chan, addr_byte), logging one line per delay and a final
+    summary. Returns the list of (delay, vld, verdict, data) tuples for the caller to inspect."""
+    row_len = MFB_BYTES  # 64 B, one full row
+    p_old = bytes((i * 7 + 0x11) & 0xFF for i in range(row_len))
+    p_new = bytes((i * 3 + 0xA5) & 0xFF for i in range(row_len))
+    assert p_old != p_new
+
+    results = []
+    for delay in range(-2, 15):
+        vld, data = await _collision_probe_one(tb, chan, addr_byte, p_old, p_new, delay)
+        if not vld:
+            verdict = "VLD=0"
+        elif data == p_old:
+            verdict = "OLD"
+        elif data == p_new:
+            verdict = "NEW"
+        else:
+            verdict = "OTHER"
+        results.append((delay, vld, verdict, data))
+        data_hex = "-" if data is None else data[:8].hex()
+        cocotb.log.info(f"[{label}] delay={delay:+3d}  VLD={int(vld)}  verdict={verdict:5s}  data[:8]={data_hex}")
+
+    table = ", ".join(f"{d:+d}:{v}" for d, _, v, _ in results)
+    cocotb.log.info(f"[{label}] delay sweep table: {table}")
+
+    any_other = any(v == "OTHER" for _, _, v, _ in results)
+    any_stale_vld = any(v == "OLD" and vld for _, vld, v, _ in results)
+    cocotb.log.info(f"[{label}] VERDICT: any delay with VLD=1 and OTHER (neither old nor new) data: "
+                     f"{any_other} -- any delay with VLD=1 and STALE (old) data: {any_stale_vld}")
+    return results
+
+
+@cocotb.test(skip=(TB_FLAT or not TB_COLLISION_PROBE))
+async def test_collision_probe_partitioned(dut):
+    """EXPERIMENTAL / report-only (see section header above). Partitioned (MEM_PARTITIONING=TRUE)
+    configuration: channel 0, row-aligned address 0."""
+    random.seed(RANDOM_SEED + 200)
+    tb = Testbench(dut)
+    await tb.start_clock()
+    await tb.reset()
+
+    await _collision_sweep(tb, chan=0, addr_byte=0, label="partitioned")
+
+
+@cocotb.test(skip=((not TB_FLAT) or not TB_COLLISION_PROBE))
+async def test_collision_probe_flat(dut):
+    """EXPERIMENTAL / report-only (see section header above). Flat (MEM_PARTITIONING=FALSE)
+    configuration: row-aligned address inside channel 0's physical slice (channel field is a noise
+    value, ignored by the DUT in this mode -- see test_flat_channel_ignored above)."""
+    random.seed(RANDOM_SEED + 201)
+    tb = Testbench(dut)
+    await tb.start_clock()
+    await tb.reset()
+
+    addr_byte = 4096  # inside channel 0's [0, 2**POINTER_WIDTH) physical slice, 64 B row-aligned
+    await _collision_sweep(tb, chan=_noise_chan(tb.channels), addr_byte=addr_byte, label="flat")
