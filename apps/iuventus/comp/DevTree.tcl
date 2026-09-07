@@ -28,6 +28,11 @@ proc dts_iuventus_main_mi {DTS pcie_eps pcie_debug_en pcie_endpoint_mode pcie_mo
     # MI test space
     append ret [dts_mi_test_space "mi_test_space" $NdkCore::ADDR_TEST_SPACE]
 
+    # HBM smoke-test debug registers (base must match MI_ADC_PORT_HBM_DBG in mi_addr_space_pkg.vhd)
+    dts_create_node ret "hbm_smoke_test" {
+        dts_appendprop_comp_node ret 0x6000 0x80 "ziti,hbm_smoke_test"
+    }
+
     dts_application ret $NdkCore::ADDR_USERAPP $usr_core_arch
 
     # PCIe Debug

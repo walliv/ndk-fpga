@@ -45,7 +45,7 @@ set config_list [list \
     CONFIG.plltype {QPLL0} \
     CONFIG.axisten_freq {250} \
     CONFIG.axisten_if_enable_client_tag {true} \
-    CONFIG.pf0_dev_cap_max_payload {512_bytes} \
+    CONFIG.pf0_dev_cap_max_payload {1024_bytes} \
     CONFIG.PF0_Use_Class_Code_Lookup_Assistant {false} \
     CONFIG.PF0_CLASS_CODE {020000} \
     CONFIG.MSI_X_OPTIONS {None} \
@@ -109,6 +109,9 @@ if {$PARAMS(PCIE_ENDPOINT_MODE) == 0} {
 
 # x8 
 } elseif {$PARAMS(PCIE_ENDPOINT_MODE) == 2} {
+    # X1Y1 is the stock site. The HBM-adjacent routing congestion was caused by the HBM data
+    # ports being mapped west of the DMA pblock; with them on 24-30 the design routes with zero
+    # overlaps from X1Y1.
     lappend config_list \
         CONFIG.pcie_blk_locn {X1Y1} \
         CONFIG.PL_LINK_CAP_MAX_LINK_WIDTH {X8}
@@ -146,21 +149,32 @@ if {$PARAMS(DMA_TYPE) == 6} {
         CONFIG.pf0_bar2_scale {Gigabytes}
 }
 
+# DMA Iuventus peer apertures on PF1, indexed and sized to match iuventus_bar_map_pkg.vhd and
+# iuventus_sizing_pkg.vhd, or address masking truncates. Data apertures are 64-bit and take two
+# slots each; 32-bit would force 2 GiB below 4 GiB.
 if {$PARAMS(DMA_TYPE) == 5} {
     lappend config_list \
         CONFIG.TL_PF_ENABLE_REG {2} \
         CONFIG.copy_pf0 {false} \
         CONFIG.PF1_DEVICE_ID {c020} \
         CONFIG.PF1_SUBSYSTEM_ID {c020} \
-        CONFIG.pf1_bar0_size {512} \
+        CONFIG.pf1_bar0_size {16} \
         CONFIG.pf1_bar0_64bit {false} \
         CONFIG.pf1_bar0_scale {Kilobytes} \
         CONFIG.pf1_bar1_enabled {true} \
-        CONFIG.pf1_bar1_size {512} \
+        CONFIG.pf1_bar1_size {16} \
         CONFIG.pf1_bar1_64bit {false} \
         CONFIG.pf1_bar1_scale {Kilobytes} \
-        CONFIG.pf1_bar2_enabled {false} \
-        CONFIG.pf1_bar3_enabled {false} \
+        CONFIG.pf1_bar2_enabled {true} \
+        CONFIG.pf1_bar2_size {1} \
+        CONFIG.pf1_bar2_64bit {true} \
+        CONFIG.pf1_bar2_prefetchable {true} \
+        CONFIG.pf1_bar2_scale {Gigabytes} \
+        CONFIG.pf1_bar4_enabled {true} \
+        CONFIG.pf1_bar4_size {1} \
+        CONFIG.pf1_bar4_64bit {true} \
+        CONFIG.pf1_bar4_prefetchable {true} \
+        CONFIG.pf1_bar4_scale {Gigabytes} \
         CONFIG.pf1_base_class_menu {Memory_controller} \
         CONFIG.pf1_class_code_interface {00} \
         CONFIG.pf1_sub_class_interface_menu {Other_memory_controller} \
