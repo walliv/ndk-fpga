@@ -26,10 +26,9 @@ NUM_QUEUES ?= 1
 WAVEFORM_FILE=user_core.fst
 DEBUG_ENABLE ?= false
 
-# NETCOPE_TEMP: where the component-level DevTree.dtb (see gen_devtree.tcl) is written; read by
-# cocotbext.nfb.NfbDevice.read_dtb() at cocotb-test run time (os.environ["NETCOPE_TEMP"] +
-# "DevTree.dtb"). The generic nvc build path in build/common.mk does not export NETCOPE_TEMP for
-# us (unlike the Vivado/Quartus/Synplify targets), so this component owns it directly.
+# Where the component-level DevTree.dtb is written, and where cocotbext.nfb reads it back at run
+# time. The generic nvc build path does not export NETCOPE_TEMP the way the vendor targets do, so
+# this component sets it directly.
 NETCOPE_TEMP ?= $(CURDIR)/netcope_tmp/
 export NETCOPE_TEMP
 
@@ -43,12 +42,9 @@ devtree:
 	mkdir -p $(NETCOPE_TEMP)
 	tclsh gen_devtree.tcl $(NETCOPE_TEMP)DevTree.dtb
 
-# test: elaborate + run the cocotb smoke test(s) (test_dma_iuventus.py's sibling here is
-# cocotb_test.py). Mirrors comp/dma/dma_iuventus/cocotb/Makefile's sim-elab/sim-run split, but
-# collapsed into one step since Stage 1 only needs a single smoke test, not a parallel gate.
-# NUM_QUEUES is passed BOTH as an elaboration generic (-g) AND as a plain env var so the cocotb
-# Python side (see cocotb_test.py's os.environ["NUM_QUEUES"] read) knows which NUM_QUEUES the
-# elaborated design actually used, to predict the matching round-robin QID pattern.
+# Elaborate and run the smoke test in one step, since only a single test runs here. NUM_QUEUES
+# goes in as both an elaboration generic and an env var, so the Python side knows which value the
+# design was built with and can predict the round-robin QID pattern.
 test: devtree
 	NUM_QUEUES=$(NUM_QUEUES) NVC_ELAB_ARGS="-g NUM_QUEUES=$(NUM_QUEUES)" $(MAKE) "SYNTHFILES=$(OFM_PATH)/build/targets/comp_vivado.tcl" nvc-sim
 
