@@ -29,6 +29,7 @@ set LFSR_GEN_BASE            "$OFM_PATH/comp/base/logic/lfsr_simple_random_gen"
 set EVENT_CNTR_BASE          "$OFM_PATH/comp/base/misc/event_counter"
 set ASFIFOX_BASE             "$OFM_PATH/comp/base/fifo/asfifox"
 set PIPE_BASE                "$OFM_PATH/comp/base/misc/pipe"
+set FIFOX_BASE               "$OFM_PATH/comp/base/fifo/fifox"
 
 # Packages
 lappend PACKAGES "$OFM_PATH/comp/base/pkg/math_pack.vhd"
@@ -77,6 +78,20 @@ if {$ARCHGRP_ARR(USR_CORE_ARCH) == "FULL"} {
 
     lappend MOD "$ENTITY_BASE/iuventus_integrity_checker.vhd"
     lappend MOD "$ENTITY_BASE/user_core_test_arch.vhd"
+} elseif {$ARCHGRP_ARR(USR_CORE_ARCH) == "GROUPBY"} {
+    lappend COMPONENTS [list "MI_ASYNC"      $MI_ASYNC_BASE                       "FULL"]
+    lappend COMPONENTS [list "SDP_BRAM"      "$OFM_PATH/comp/base/mem/sdp_bram"   "FULL"]
+    lappend COMPONENTS [list "EVENT_COUNTER" $EVENT_CNTR_BASE                     "FULL"]
+    lappend COMPONENTS [list "MFB_PIPE"      $MFB_PIPE_BASE                       "FULL"]
+    lappend COMPONENTS [list "FIFOX"         $FIFOX_BASE                          "FULL"]
+
+    lappend MOD "$ENTITY_BASE/iuventus_groupby_lane.vhd"
+    lappend MOD "$ENTITY_BASE/iuventus_groupby_engine.vhd"
+    lappend MOD "$ENTITY_BASE/groupby_if_pipe.vhd"
+    lappend MOD "$ENTITY_BASE/user_core_groupby_arch.vhd"
+} else {
+    error "Unknown USR_CORE_ARCH '$ARCHGRP_ARR(USR_CORE_ARCH)'. Without a matching arm the design\
+           elaborates USER_CORE with no architecture, which fails later with an unrelated message."
 }
 
 lappend MOD "$ENTITY_BASE/hbm_smoke_test.vhd"

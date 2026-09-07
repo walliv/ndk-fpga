@@ -9,6 +9,8 @@ __pycache__/
 results.xml
 *.vivado.mk
 *.netcope_tmp/
+# The component benches write theirs to a bare netcope_tmp/, which the pattern above misses.
+netcope_tmp/
 DevTree_paths.txt
 
 # nvc code coverage databases/reports (opt-in via COVERAGE_EN, see build/common.mk)

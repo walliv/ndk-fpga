@@ -113,7 +113,15 @@ class SimplifiedDmaModel:
         # Enabled, a READ returns bytes a prior WRITE stored there so the integrity checker's
         # read-back compare runs end-to-end; disabled, READ returns the fixed pattern.
         self.data_integrity = False
-        self._storage = {}  # 512-aligned byte offset -> bytes(512)
+        self._storage = {}  # key -> bytes(512); key is LBA_PTR, or (qid, LBA_PTR) below
+        # Off by default: the store is one shared LBA_PTR -> sector map. Set True to isolate it per
+        # queue (key becomes (qid, LBA_PTR)), matching hardware where each queue talks to its own
+        # drive; cocotb_test_arch never sets this.
+        self.per_queue_storage = False
+        # How much LBA_PTR advances per sector. The integrity checker strides it by 512, as a byte
+        # address; the GROUP BY engine strides it by 1, as the block index the NVMe command
+        # expects. Both are self-consistent, so the DUT has to say which it means.
+        self.lba_sector_stride = 512
         # Optional OOR modelling: when set, any read/write whose (lba_ptr + sectors) exceeds this
         # SECTOR count completes with OP_STAT_CODE_OOR and no data transfer, mirroring the DMA's
         # LBA-Out-of-Range completion. None = never OOR (default).
@@ -191,6 +199,18 @@ class SimplifiedDmaModel:
         """Disarms backpressure; RDY/DST_RDY return to their normal (busy-gated / always-high)
         behavior from the next cycle."""
         self._bp_enabled = False
+
+    def _storage_key(self, qid: int, lba: int):
+        return (qid, lba) if self.per_queue_storage else lba
+
+    def seed_sector(self, lba: int, data: bytes, qid: int = None) -> None:
+        """Stages one 512 B sector where a later read will find it -- the public alternative to a
+        test reaching into `_storage` directly. `qid` selects the drive in per_queue_storage mode
+        and must be omitted otherwise."""
+        assert len(data) == 512, f"a sector is 512 B, got {len(data)}"
+        assert self.per_queue_storage or qid is None, \
+            "qid is only meaningful with per_queue_storage enabled"
+        self._storage[self._storage_key(qid if qid is not None else 0, lba)] = bytes(data)
 
     async def _rst_loop(self):
         """Self-reset on DMA_RST, as the engine this stands in for does. A test that pulses the
@@ -302,8 +322,9 @@ class SimplifiedDmaModel:
             # Return exactly what a prior WRITE stored at this LBA (zeros if never written), so the
             # integrity checker's read-back compare against its own write pattern is meaningful.
             out = bytearray()
-            for off in range(0, total_bytes, 512):
-                out += self._storage.get(lba_ptr + off, bytes(512))
+            for i in range(lba_num + 1):
+                key = self._storage_key(self._inflight_qid, lba_ptr + i * self.lba_sector_stride)
+                out += self._storage.get(key, bytes(512))
             pattern = bytes(out)
         else:
             pattern = bytes([i & 0xFF for i in range(total_bytes)])
@@ -328,14 +349,17 @@ class SimplifiedDmaModel:
     def _on_wr_frame(self, trans):
         if self.wr_frame_accept_cb:
             self.wr_frame_accept_cb(trans)
-        # META = [QID (high QID_W bits) | LBA_PTR (low SQE_LBA_PTR_W bits, a BYTE address)].
-        lba = int(trans.meta) & ((1 << SQE_LBA_PTR_W) - 1)
+        # META = [QID (high QID_W bits) | LBA_PTR (low SQE_LBA_PTR_W bits)].
+        meta = int(trans.meta)
+        qid = (meta >> SQE_LBA_PTR_W) & ((1 << QID_W) - 1)
+        lba = meta & ((1 << SQE_LBA_PTR_W) - 1)
         data = bytes(trans.data)
         sectors = max(1, len(data) // 512)
         oor = self.lba_space_size is not None and (lba + sectors) > self.lba_space_size
         if self.data_integrity and not oor:
-            for off in range(0, len(data), 512):
-                self._storage[lba + off] = data[off:off + 512].ljust(512, b'\x00')
+            for i in range(sectors):
+                key = self._storage_key(qid, lba + i * self.lba_sector_stride)
+                self._storage[key] = data[512 * i:512 * (i + 1)].ljust(512, b'\x00')
         cocotb.start_soon(self._service_write(oor))
 
     async def _service_write(self, oor: bool = False):
