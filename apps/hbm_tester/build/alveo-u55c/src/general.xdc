@@ -1,0 +1,65 @@
+# general.xdc
+# Copyright (C) 2023 CESNET z. s. p. o.
+# Copyright (C) 2026 Universitaet Heidelberg, Institut fuer Technische Informatik (ZITI)
+# Author(s): Jakub Cabal <cabal@cesnet.cz>
+#            Vladislav Valek <vladislav.valek@stud.uni-heidelberg.de>
+#
+# SPDX-License-Identifier: BSD-3-Clause OR Apache-2.0
+
+# ==============================================================================
+# BITSTREAM CONFIGURATION
+# ==============================================================================
+set_property CONFIG_VOLTAGE 1.8 [current_design]
+set_property BITSTREAM.CONFIG.CONFIGFALLBACK Enable [current_design]
+set_property BITSTREAM.GENERAL.COMPRESS TRUE [current_design]
+set_property CONFIG_MODE SPIx4 [current_design]
+set_property BITSTREAM.CONFIG.SPI_BUSWIDTH 4 [current_design]
+set_property BITSTREAM.CONFIG.CONFIGRATE 63.8 [current_design]
+set_property BITSTREAM.CONFIG.EXTMASTERCCLK_EN disable [current_design]
+set_property BITSTREAM.CONFIG.SPI_FALL_EDGE YES [current_design]
+set_property BITSTREAM.CONFIG.UNUSEDPIN Pullup [current_design]
+set_property BITSTREAM.CONFIG.SPI_32BIT_ADDR Yes [current_design]
+set_operating_conditions -design_power_budget 100
+
+# ==============================================================================
+# GENERAL PINS
+# ==============================================================================
+# System Clock for HBM (100 MHz) - onboard SYSCLK3 Clock
+set_property PACKAGE_PIN BK43 [get_ports SYSCLK3_P]
+set_property PACKAGE_PIN BK44 [get_ports SYSCLK3_N]
+set_property IOSTANDARD LVDS [get_ports SYSCLK3_P]
+set_property IOSTANDARD LVDS [get_ports SYSCLK3_N]
+create_clock -period 10.000 [get_ports SYSCLK3_P]
+
+# System Clock for LOGIC (100 MHz) - onboard SYSCLK2 Clock
+# set_property PACKAGE_PIN BK10 [get_ports SYSCLK2_P]
+# set_property PACKAGE_PIN BL10 [get_ports SYSCLK2_N]
+# set_property IOSTANDARD LVDS [get_ports SYSCLK2_P]
+# set_property IOSTANDARD LVDS [get_ports SYSCLK2_N]
+# create_clock -period 10.000 [get_ports SYSCLK2_P]
+
+# HBM CATTRIP
+set_property PACKAGE_PIN BE45 [get_ports HBM_CATTRIP]
+set_property IOSTANDARD LVCMOS18 [get_ports HBM_CATTRIP]
+
+# Lock DNA_PORT2E to X0Y0 due to different Chip ID in each SLRs!!!
+set_property LOC CONFIG_SITE_X0Y0 [get_cells core_logic_i/hwid_i/usp_g.dna_port_i]
+
+# ==============================================================================
+# Status LEDs
+# ==============================================================================
+set_property PACKAGE_PIN BK14 [get_ports {STATUS_LEDS[0]}]
+set_property PACKAGE_PIN BK15 [get_ports {STATUS_LEDS[1]}]
+set_property PACKAGE_PIN BL12 [get_ports {STATUS_LEDS[2]}]
+set_property PACKAGE_PIN BL13 [get_ports {STATUS_LEDS[3]}]
+set_property PACKAGE_PIN BK11 [get_ports {STATUS_LEDS[4]}]
+set_property PACKAGE_PIN BJ11 [get_ports {STATUS_LEDS[5]}]
+
+set_property IOSTANDARD LVCMOS18 [get_ports {STATUS_LEDS[5]}]
+set_property IOSTANDARD LVCMOS18 [get_ports {STATUS_LEDS[4]}]
+set_property IOSTANDARD LVCMOS18 [get_ports {STATUS_LEDS[3]}]
+set_property IOSTANDARD LVCMOS18 [get_ports {STATUS_LEDS[2]}]
+set_property IOSTANDARD LVCMOS18 [get_ports {STATUS_LEDS[1]}]
+set_property IOSTANDARD LVCMOS18 [get_ports {STATUS_LEDS[0]}]
+
+
