@@ -11,12 +11,7 @@ use ieee.numeric_std.all;
 use work.math_pack.all;
 use work.type_pack.all;
 
--- =========================================================================
---                                 Description
--- =========================================================================
--- Statistical unit for counting a number of occurences of a certain event
--- in a certain time interval.
--- =========================================================================
+-- Statistical unit: counts event occurrences within a configurable CLK-cycle interval.
 
 entity EVENT_COUNTER is
     generic (

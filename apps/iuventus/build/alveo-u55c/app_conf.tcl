@@ -29,17 +29,18 @@ set PCIE_ENDPOINTS     [lindex $pcie_conf_list 0]
 # 2 = 1x8  lanes
 set PCIE_ENDPOINT_MODE [lindex $pcie_conf_list 2]
 
-# ------------------------------------------------------------------------------
-# Other parameters:
-# ------------------------------------------------------------------------------
-set PROJECT_NAME "IUVENTUS_TEST"
+# ---- Other parameters ----
+# The user-core architecture is read before PROJECT_NAME because the name carries it: nfb-info
+# reports that name and the flash procedure identifies a card by it, so two architectures must
+# not answer to the same name.
+set USR_CORE_ARCH $env(USR_CORE_ARCH)
+
+set PROJECT_NAME "IUVENTUS_$USR_CORE_ARCH"
 set PROJECT_VARIANT "$PCIE_CONF"
 set PROJECT_VERSION [exec cat ../../../../VERSION]
 
 # Enables debug probes and counters in the PCIe Module (PCIe Core arch: USP and P-Tile and PCIe Ctrl)
 set PCIE_DEBUG_ENABLE false
-# Select architecture of the user core
-set USR_CORE_ARCH $env(USR_CORE_ARCH)
 
 # ------------------------------------------------------------------------------
 # Constant parameters (do not change)
