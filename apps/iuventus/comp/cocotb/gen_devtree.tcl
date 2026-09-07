@@ -1,11 +1,8 @@
-# gen_devtree.tcl: DevTree.dtb for the USER_CORE TEST-architecture cocotb testbench
+# gen_devtree.tcl: DevTree.dtb generator for cocotb.
 # Copyright (C) 2026 Universitaet Heidelberg, Institut fuer Technische Informatik (ZITI)
 # Author(s): Vladislav Valek <vladislav.valek@stud.uni-heidelberg.de>
 #
 # SPDX-License-Identifier: Apache-2.0
-
-# Just enough of the card DevTree for cocotbext.nfb.NfbDevice to open the simulated design as a
-# real nfb device and reach its component nodes.
 set SCRIPT_DIR    [file dirname [file normalize [info script]]]
 set NDK_FPGA_PATH [file normalize "$SCRIPT_DIR/../../../.."]
 
@@ -23,8 +20,9 @@ if {$OUT_DTB eq ""} {
 }
 set OUT_DTS "[file rootname $OUT_DTB].dts"
 
-# Servicer.get_node_base matches "resource = PCI0,BAR0" to pick device.mi[0]. dts_application is
-# called with base=0 so the user_core node's reg offsets are absolute MI addresses.
+# mi_pci0_bar0: the "PCI0,BAR0" node Servicer.get_node_base matches to pick device.mi[0],
+# bound to USER_CORE.MI_*. base=0, so the user_core node's reg offsets are absolute MI
+# addresses.
 set dts ""
 dts_create_default_mi_bar_node dts 0 0 {
     dts_application dts 0 "TEST"
@@ -43,8 +41,9 @@ close $f
 
 puts "Building component DevTree: $OUT_DTS"
 
-# dtc warns that the intermediate user_core node re-declares no #address-cells/#size-cells; it
-# inherits them from mi_pci0_bar0. Benign, and build/DevTree.tcl wraps the same step in a catch.
+# dtc warnings about a missing #address-cells/#size-cells re-declaration on the intermediate
+# "user_core" node are expected and benign -- it correctly inherits 1/1 from its ancestor.
+# DevTreeGenerateBlob treats this step the same way, wrapped in `catch`.
 catch {exec dtc -I dts -O dtb -o $OUT_DTB $OUT_DTS} msg
 
 if {![file exists $OUT_DTB]} {
