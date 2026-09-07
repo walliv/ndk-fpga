@@ -66,9 +66,9 @@ entity IUVENTUS_INTEGRITY_CHECKER is
 
         -- ---- Operation completion (one pulse per finished NVMe command) ----------------------
         OP_STAT_VLD    : in  std_logic;
-        -- op_ctrl's completion code: "00"=SUCCESS, "01"=generic failure, "10"=LBA Out of
-        -- Range. A non-"00" code aborts the sweep (-> S_DONE, STS_OP_ERR) so a failed command
-        -- can't wedge the FSM on a CQE or read-back that never drains.
+        -- Completion code: "00"=SUCCESS, "01"=generic failure, "10"=LBA Out of Range. Any
+        -- non-"00" code aborts the sweep (-> S_DONE, STS_OP_ERR) so a failed command can't wedge
+        -- the FSM on a CQE or read-back that never drains.
         OP_STAT_CODE   : in  std_logic_vector(1 downto 0);
 
         -- ---- DMA-Iuventus READ data path (SSD -> host) --------------------------------------
@@ -254,10 +254,10 @@ begin
                                 beat_idx <= beat_idx + 1;
                             end if;
                         elsif (OP_STAT_VLD = '1' and OP_STAT_CODE /= OP_STAT_SUCCESS) then
-                            -- OOR / device error read: op_ctrl completes it internally without
-                            -- draining WRBUFF, so RD_MFB data never arrives -- abort instead of
-                            -- hanging in S_RD_DATA (a successful read's OP_STAT is "00", ignored
-                            -- here).
+                            -- OOR / device error read: the DMA completes it without moving data, so
+                            -- RD_MFB will NEVER arrive -- abort instead of hanging in S_RD_DATA (a
+                            -- successful read's OP_STAT carries "00" and is ignored here; its data
+                            -- is consumed by the branch above).
                             op_err <= '1';
                             state  <= S_DONE;
                         end if;

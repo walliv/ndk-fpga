@@ -19,7 +19,7 @@ entity USER_CORE is
         MI_WIDTH    : integer := 32;
         -- DMA: number of DMA streams
         DMA_STREAMS : natural := 1;
-        -- DMA: number of independent SQ/CQ queues (one per SSD) that the DMA core is built with.
+        -- DMA: number of independent SQ/CQ queues (one per SSD) that the DMA is built with.
         -- Governs the width of NVME_RD_REQ_QID and of the QID field appended to NVME_WR_MFB_META.
         NUM_QUEUES  : natural := 1;
 

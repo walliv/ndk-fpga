@@ -1,6 +1,8 @@
 # Local, machine-specific Claude context (not for commit)
 CLAUDE.local.md
 
+resources/
+
 # cocotb and nvc build artifacts, generated in-tree next to each testbench
 nvcwork/
 __pycache__/

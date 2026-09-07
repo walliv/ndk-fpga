@@ -13,8 +13,9 @@ from cocotbext.ofm.dma.iuventus import CQEntry
 from cocotbext.ofm.dma.iuventus import IuventusMiRegMap, CtrlRegBits, StatRegBits
 from cocotbext.ofm.dma.iuventus import IuventusPerQueueCntrRegMap, per_queue_cntr_reg_addr
 
-# WRBUFF peer-write 32B-alignment statistics. Kept out of IuventusMiRegMap, which lists only
-# throughput and debug addresses. Must match nvme_sw_manager.vhd's R_CQ_WR_*_CNTR_L constants.
+# WRBUFF peer-write 32B-alignment statistics (empirical HW measurement of NVMe peer-write fit to
+# a 32B-aligned, <=16-beat AXI burst). Not in IuventusMiRegMap, which lists only SSD
+# throughput/HW-debug addresses.
 CQ_WR_TOTAL_CNTR_L_ADDR         = 0x0CC
 CQ_WR_UNALIGN_START_CNTR_L_ADDR = 0x0D4
 CQ_WR_UNALIGN_SIZE_CNTR_L_ADDR  = 0x0DC
@@ -169,11 +170,9 @@ class DMAIuventusRegAccess(nfb.BaseComp):
         self._comp.wait_for_bit(IuventusMiRegMap.STATUS.value, StatRegBits.READY.value, level=True)
 
     def disable(self) -> None:
-        """Graceful stop + drain barrier. Clearing ENABLE makes the design stop ACCEPTING new
-        traffic (op_ctrl deasserts read-request ready and, for a write already streaming, finishes
-        that frame to its EOF before blocking further WR_MFB), drain every outstanding command, then
-        stop. STATUS.READY stays high for the whole of that sequence and only drops once the design
-        is fully idle, so this wait BLOCKS until the drain has completed. Always call this (never a
+        """Graceful stop + drain barrier. Clearing ENABLE stops the design from accepting new
+        traffic and drains every outstanding command; STATUS.READY only drops once the design is
+        fully idle, so this call BLOCKS until the drain has completed. Always call this (never a
         bare CONTROL=0 write) and let it return BEFORE tearing down the host NVMe queues -- otherwise
         the SSD's outstanding P2P fetches are stranded and its controller state is corrupted."""
         self._comp.clr_bit(IuventusMiRegMap.CONTROL.value, CtrlRegBits.ENABLE.value)
@@ -186,8 +185,8 @@ class DMAIuventusRegAccess(nfb.BaseComp):
         self._comp.set_bit(IuventusMiRegMap.CONTROL.value, CtrlRegBits.RST_CNTRS.value)
 
     def op_soft_rst(self) -> None:
-        """Pulses the operational (per-command) soft-reset: clears op_ctrl/dispatch/completion/
-        doorbell FSMs, FIFOs, allocators and tags, WITHOUT resetting this component's own
+        """Pulses the operational (per-command) soft-reset: clears the DMA's dispatch/completion/
+        doorbell FSMs, FIFOs, buffers and tags, WITHOUT resetting this component's own
         per-queue configuration (SQ/CQ/doorbell base addresses stay programmed)."""
         self._comp.set_bit(IuventusMiRegMap.CONTROL.value, CtrlRegBits.OP_SOFT_RST.value)
 
@@ -286,8 +285,7 @@ class DMAIuventusRegAccess(nfb.BaseComp):
     def cqes_processed(self) -> int:
         return self._comp.read64(IuventusMiRegMap.CQE_PROC_CNTR_L.value)
 
-    # sq_pcie_rds stays aggregate-only: PCIE_RD_REQ_INCRS classifies reads by target BAR, not by
-    # the SQ ring within it, and no QID is available at this signal's boundary.
+    # sq_pcie_rds/sq_pcie_rds_bytes stay aggregate-only; no per-queue breakdown is available.
     @property
     def sq_pcie_rds(self) -> int:
         return self._comp.read64(IuventusMiRegMap.SQ_PCIE_RDS_CNTR_L.value)
