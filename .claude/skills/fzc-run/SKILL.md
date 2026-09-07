@@ -63,7 +63,8 @@ test.contig_test=False; test.tst_mode="rd"; test.tst_addressing="seq"; test.rd_r
 test.tst_iterations = 99999                            # trigger a bounded read burst
 ra.sample_cntrs(); print(ra.succ_cpls, ra.unsucc_cpls, ra.sqes_dispatched, ra.sq_pcie_rds)
 ```
-Built-in throughput/latency: `iuventus_rw_test.py -t` (IOPS+GBps via MFB speed meters) / `-l` / `-p`
+Built-in throughput/latency: `iuventus_rw_test.py -t` (IOPS from the EVENT_COUNTER, GBps derived
+from it -- the design has no MFB speed meter) / `-l` / `-p`
 (plots) / `--throughput-from-file`. Prefer these over ad-hoc scripts. A healthy drive shows `succ`
 climbing steadily with `unsucc=0`. **Wedged/jammed** = `succ` frozen, `SQ_PCIE_RDS` stalls while
 `SQE_DISP` climbs, `RDY=0`.

@@ -12,14 +12,39 @@ import nfb
 from cocotbext.ofm.dma.iuventus import CQEntry
 from cocotbext.ofm.dma.iuventus import IuventusMiRegMap, CtrlRegBits, StatRegBits
 from cocotbext.ofm.dma.iuventus import IuventusPerQueueCntrRegMap, per_queue_cntr_reg_addr
+from cocotbext.ofm.dma.iuventus import IuventusPerQueueRegMap, per_queue_reg_addr
 
-# WRBUFF peer-write 32B-alignment statistics (empirical HW measurement of NVMe peer-write fit to
-# a 32B-aligned, <=16-beat AXI burst). Not in IuventusMiRegMap, which lists only SSD
-# throughput/HW-debug addresses.
+# WRBUFF peer-write 32B-alignment stats (HW-measured fit of NVMe CQ peer-writes to a 32B-aligned,
+# <=16-beat AXI burst). Not in IuventusMiRegMap, which only lists addresses needed for SSD
+# throughput/HW debug.
 CQ_WR_TOTAL_CNTR_L_ADDR         = 0x0CC
 CQ_WR_UNALIGN_START_CNTR_L_ADDR = 0x0D4
 CQ_WR_UNALIGN_SIZE_CNTR_L_ADDR  = 0x0DC
 CQ_WR_OVER16BEATS_CNTR_L_ADDR   = 0x0E4
+
+# WRBUFF_FIFO capacity drops: inbound read-data frames dropped because the ingest FIFO was
+# full. Always-on (not PROFILE_EN-gated). 0 is healthy; see the DMA core's own documentation
+# for diagnosis of a non-zero value.
+WRBUFF_DROPPED_FRAME_CNTR_L_ADDR = 0x0EC
+
+# HBM datapath alignment counters. Always-on, not PROFILE_EN-gated. A burst that is not
+# 32B-aligned costs an extra HBM beat.
+WRBUFF_UNALIGNED_CNTR_L_ADDR     = 0x114
+RDBUFF_RD_UNALIGNED_CNTR_L_ADDR  = 0x11C
+
+# Drain/fence counters, addressed directly rather than through IuventusMiRegMap because that enum
+# does not carry them. Each is a 64-bit counter whose low word sits at the address below. See the
+# DMA core's own documentation for their semantics.
+DRAIN_ADMIT_CNTR_L_ADDR          = 0x0FC
+DRAIN_FENCE_W_CNTR_L_ADDR        = 0x104
+DRAIN_HBM_W_CNTR_L_ADDR          = 0x10C
+FENCE_CLIP_CNTR_L_ADDR           = 0x124
+FENCE_AFULL_CNTR_L_ADDR          = 0x12C
+
+# Raw WRBUFF drain accounting. FENCE_GAP packs {drained[31:16], accepted[15:0]}. See the DMA
+# core's own documentation for their semantics.
+FENCE_GAP_ADDR                   = 0x134
+FENCE_TARGET_ADDR                = 0x138
 
 @dataclass
 class DMAIuventusConfig:
@@ -56,6 +81,12 @@ class DMAIuventusConfig:
     cq_wr_unalign_start     : int
     cq_wr_unalign_size      : int
     cq_wr_over16beats       : int
+    wrbuff_dropped_frame    : int
+    wrbuff_unaligned        : int
+    rdbuff_rd_unaligned     : int
+    fence_accepted          : int
+    fence_drained           : int
+    fence_target            : int
 
     ERROR_CODES = [
         ("000", "01", "Invalid Opcode"),
@@ -150,6 +181,14 @@ class DMAIuventusConfig:
             elif name in ["cq_wr_unalign_start", "cq_wr_unalign_size", "cq_wr_over16beats"]:
                 pct = (val / self.cq_wr_total * 100) if self.cq_wr_total else 0.0
                 formatted_val = f"{val}\t({pct:.2f}% of cq_wr_total={self.cq_wr_total})"
+            elif name == "fence_drained":
+                # The whole point of exposing these: name the stuck SIDE, not just the stall.
+                gap = self.fence_accepted - val
+                formatted_val = f"{val}" if gap == 0 else f"{val}\t*** {gap} FRAMES BEHIND accepted ***"
+            elif name == "wrbuff_dropped_frame":
+                # Loud on purpose: a non-zero value means read data was lost, which shows up
+                # downstream as leaked pages rather than as an error.
+                formatted_val = f"{val}" if val == 0 else f"{val}\t*** READ DATA LOST ***"
             elif isinstance(val, int) and ("addr" in name or "ptr" in name):
                 formatted_val = hex(val)
             else:
@@ -164,6 +203,40 @@ class DMAIuventusRegAccess(nfb.BaseComp):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+
+    # NVMe doorbells sit at BAR + 0x1000 + 2*qid*stride, so every queue on one SSD shares that
+    # drive's doorbell base above the page offset; two queues resolving to the same page means
+    # both were bound to the same drive.
+    DBL_PAGE_MASK = ~0xFFF
+
+    def queue_ssd_key(self, qid: int) -> int:
+        """Page-aligned SQ doorbell base for `qid`: identifies which SSD the queue is bound to.
+
+        0 means the queue has not been brought up.
+        """
+        return self._comp.read64(
+            per_queue_reg_addr(IuventusPerQueueRegMap.SQTDBL_BADDR_L, qid)) & self.DBL_PAGE_MASK
+
+    def check_one_queue_per_ssd(self, num_queues: int) -> None:
+        """Raise if more than one queue pair is bound to the same SSD.
+
+        The design supports exactly one SQ/CQ pair per drive. Queues sharing a drive contend for
+        that drive's completion path while the per-queue counters still report per queue, so any
+        throughput or latency figure derived from them stops attributing to a device. The binding
+        is made by fzc (-i <queue> -t traddr:<ssd>), and each fzc instance cannot see the others,
+        so this is the first place in the stack where the collision is observable.
+        """
+        seen = {}
+        for qid in range(num_queues):
+            key = self.queue_ssd_key(qid)
+            if key == 0:
+                continue  # not brought up yet -- nothing to compare against
+            if key in seen:
+                raise RuntimeError(
+                    "queues %d and %d are bound to the same SSD (doorbell page 0x%x). Exactly one "
+                    "queue pair per SSD is supported: start one fzc per drive, each with a "
+                    "distinct traddr." % (seen[key], qid, key))
+            seen[key] = qid
 
     def enable(self) -> None:
         self._comp.set_bit(IuventusMiRegMap.CONTROL.value, CtrlRegBits.ENABLE.value)
@@ -183,12 +256,6 @@ class DMAIuventusRegAccess(nfb.BaseComp):
 
     def rst_cntrs(self) -> None:
         self._comp.set_bit(IuventusMiRegMap.CONTROL.value, CtrlRegBits.RST_CNTRS.value)
-
-    def op_soft_rst(self) -> None:
-        """Pulses the operational (per-command) soft-reset: clears the DMA's dispatch/completion/
-        doorbell FSMs, FIFOs, buffers and tags, WITHOUT resetting this component's own
-        per-queue configuration (SQ/CQ/doorbell base addresses stay programmed)."""
-        self._comp.set_bit(IuventusMiRegMap.CONTROL.value, CtrlRegBits.OP_SOFT_RST.value)
 
     def enable_rpt_upd(self) -> None:
         self._comp.set_bit(IuventusMiRegMap.CONTROL.value, CtrlRegBits.EN_UPD_RPT.value)
@@ -301,8 +368,46 @@ class DMAIuventusRegAccess(nfb.BaseComp):
     def lba_mask(self, value: int) -> None:
         self._comp.write16(IuventusMiRegMap.LBA_NUM_MASK.value, value)
 
-    # succ_cpls/unsucc_cpls below are COMMON aggregates (all queues summed); pq_* counters further
-    # down expose the per-queue breakdown (PER_Q_CNTR_BASE) for HW debug, e.g. localizing a stall.
+    # succ_cpls/unsucc_cpls below are COMMON aggregates (all queues); pq_succ_cpls(qid)/pq_unsucc_cpls(qid)/
+    # pq_sqe_disp(qid)/pq_cqe_proc(qid) further down give the per-queue breakdown for localizing a stall.
+    @property
+    def rd_pages_free(self) -> int:
+        """Free READ pages. 0 under load is normal."""
+        return self._comp.read32(IuventusMiRegMap.RD_PAGES_FREE.value) & 0xFFFF
+
+    @property
+    def wr_pages_free(self) -> int:
+        """Free WRITE pages."""
+        return self._comp.read32(IuventusMiRegMap.WR_PAGES_FREE.value) & 0xFFFF
+
+    @property
+    def drain_admit(self) -> int:
+        """WRBUFF drains admitted. Should track succ_cpls 1:1."""
+        return self._comp.read64(DRAIN_ADMIT_CNTR_L_ADDR)
+
+    @property
+    def drain_fence_wait(self) -> int:
+        """Cycles a drain waited on the frame fence. LEVEL counter; see the DMA core's own
+        documentation for diagnosis, together with fence_clip."""
+        return self._comp.read64(DRAIN_FENCE_W_CNTR_L_ADDR)
+
+    @property
+    def drain_hbm_wait(self) -> int:
+        """Cycles a drain waited on HBM. Non-zero means the HBM datapath is the constraint."""
+        return self._comp.read64(DRAIN_HBM_W_CNTR_L_ADDR)
+
+    @property
+    def fence_clip(self) -> int:
+        """Frame-fence pushes discarded by the buffer writer's drain guard. MUST be 0; see the
+        DMA core's own documentation for what a non-zero value means."""
+        return self._comp.read64(FENCE_CLIP_CNTR_L_ADDR)
+
+    @property
+    def fence_afull_cycles(self) -> int:
+        """Cycles the WRBUFF drain guard held RX off. See the DMA core's own documentation for
+        interpretation together with fence_clip."""
+        return self._comp.read64(FENCE_AFULL_CNTR_L_ADDR)
+
     @property
     def succ_cpls(self) -> int:
         return self._comp.read64(IuventusMiRegMap.SUCC_COMPL_CNTR_L.value)
@@ -346,6 +451,41 @@ class DMAIuventusRegAccess(nfb.BaseComp):
     def tag_fifo_status(self) -> int:
         return self._comp.read16(IuventusMiRegMap.TAG_FIFO_STATUS.value)
 
+    # ==== Buffer page occupancy ====
+    # Both registers pack {31:16 = fewest pages ever free, 15:0 = free right now}. The watermark is
+    # cleared only by RST, not by sample_cntrs()/rst_cntrs(), so it survives the run it explains.
+
+    @property
+    def rd_pages_free(self) -> int:
+        return self._comp.read32(IuventusMiRegMap.RD_PAGES_FREE.value) & 0xFFFF
+
+    @property
+    def rd_pages_free_min(self) -> int:
+        return (self._comp.read32(IuventusMiRegMap.RD_PAGES_FREE.value) >> 16) & 0xFFFF
+
+    @property
+    def wr_pages_free(self) -> int:
+        return self._comp.read32(IuventusMiRegMap.WR_PAGES_FREE.value) & 0xFFFF
+
+    @property
+    def wr_pages_free_min(self) -> int:
+        return (self._comp.read32(IuventusMiRegMap.WR_PAGES_FREE.value) >> 16) & 0xFFFF
+
+    # Read-drain observability: a page frees only once its drain delivers the data, so a
+    # completed READ whose drain never finishes holds pages forever. These separate "lost before
+    # the drain" from "stuck in the drain".
+    @property
+    def rd_cpl_occupancy(self) -> int:
+        return self._comp.read32(IuventusMiRegMap.RD_DRAIN_DBG.value) & 0xFFFF
+
+    @property
+    def rd_cpl_occupancy_max(self) -> int:
+        return (self._comp.read32(IuventusMiRegMap.RD_DRAIN_DBG.value) >> 16) & 0x7FFF
+
+    @property
+    def rd_drain_waiting(self) -> bool:
+        return bool((self._comp.read32(IuventusMiRegMap.RD_DRAIN_DBG.value) >> 31) & 1)
+
     # --- Per-queue SSD-facing stat counters (PER_Q_CNTR_BASE block) ---
     # Read-only; qid is the queue index (0..NUM_QUEUES-1) -- see IuventusPerQueueCntrRegMap's
     # docstring for why sq_pcie_rds has no per-queue counterpart.
@@ -382,8 +522,39 @@ class DMAIuventusRegAccess(nfb.BaseComp):
     def cq_wr_over16beats(self) -> int:
         return self._comp.read64(CQ_WR_OVER16BEATS_CNTR_L_ADDR)
 
+    @property
+    def wrbuff_dropped_frame(self) -> int:
+        """Inbound read-data frames dropped because the WRBUFF ingest FIFO was full. 0 is healthy."""
+        return self._comp.read64(WRBUFF_DROPPED_FRAME_CNTR_L_ADDR)
+
+    @property
+    def wrbuff_unaligned(self) -> int:
+        """WRBUFF HBM write bursts that were not 32B-aligned. Each costs an extra HBM beat."""
+        return self._comp.read64(WRBUFF_UNALIGNED_CNTR_L_ADDR)
+
+    @property
+    def rdbuff_rd_unaligned(self) -> int:
+        """RDBUFF HBM read bursts that were not 32B-aligned. Each costs an extra HBM beat."""
+        return self._comp.read64(RDBUFF_RD_UNALIGNED_CNTR_L_ADDR)
+
+    @property
+    def fence_accepted(self) -> int:
+        """Frames the buffer writer took (low half of FENCE_GAP)."""
+        return self._comp.read32(FENCE_GAP_ADDR) & 0xFFFF
+
+    @property
+    def fence_drained(self) -> int:
+        """Frames whose every AXI write has BRESP'd (high half of FENCE_GAP)."""
+        return (self._comp.read32(FENCE_GAP_ADDR) >> 16) & 0xFFFF
+
+    @property
+    def fence_target(self) -> int:
+        """Snapshotted accepted-count the drain guard is waiting for drained to reach."""
+        return self._comp.read32(FENCE_TARGET_ADDR) & 0xFFFF
+
     def get_configuration(self) -> DMAIuventusConfig:
-        """Returns the full configuration of the DMA Iuventus (all properties)."""
+        """One snapshot of every configuration register, so a caller comparing against a
+        measurement reads them all from the same instant rather than across several reads."""
         self.sample_cntrs()
 
         # Build the configuration object dynamically based on dataclass fields.

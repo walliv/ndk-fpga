@@ -12,7 +12,7 @@ class CtrlRegBits(IntEnum):
     CLR_ERR_MASK = 2
     RST_CNTRS = 3
     EN_UPD_RPT = 4
-    OP_SOFT_RST = 5
+    # Bit 5 (was the operational soft reset) is retired and stays reserved.
 
 class StatRegBits(IntEnum):
     READY = 0
@@ -76,6 +76,38 @@ class IuventusMiRegMap(IntEnum):
     NVME_WR_BYTES_CNTR_H        = 0x098
     NVME_FLUSH_DISP_CNTR_L      = 0x09C
     NVME_FLUSH_DISP_CNTR_H      = 0x0A0
+    # Stall-class profiler, present only on a PROFILE_EN build. These five do NOT partition a
+    # cycle: an idle cycle sets no bit, so their sum is CLASSIFIED cycles, not elapsed ones.
+    PROF_DISP_WAIT_SQ_CNTR_L    = 0x0A4
+    PROF_DISP_WAIT_SQ_CNTR_H    = 0x0A8
+    PROF_ALLOC_WAIT_CNTR_L      = 0x0AC
+    PROF_ALLOC_WAIT_CNTR_H      = 0x0B0
+    PROF_DISP_WAIT_TAG_CNTR_L   = 0x0B4
+    PROF_DISP_WAIT_TAG_CNTR_H   = 0x0B8
+    PROF_DATA_WAIT_CNTR_L       = 0x0BC
+    PROF_DATA_WAIT_CNTR_H       = 0x0C0
+    PROF_BUSY_CNTR_L            = 0x0C4
+    PROF_BUSY_CNTR_H            = 0x0C8
+    # Allocator free-page counts and WRBUFF drain-path profiling. See the DMA core's own
+    # documentation for diagnosing a drain-fence wedge.
+    RD_PAGES_FREE               = 0x0F4
+    WR_PAGES_FREE               = 0x0F8
+    DRAIN_ADMIT_CNTR_L          = 0x0FC
+    DRAIN_ADMIT_CNTR_H          = 0x100
+    DRAIN_FENCE_W_CNTR_L        = 0x104
+    DRAIN_FENCE_W_CNTR_H        = 0x108
+    DRAIN_HBM_W_CNTR_L          = 0x10C
+    DRAIN_HBM_W_CNTR_H          = 0x110
+    # MUST read zero; see the DMA core's own documentation for what a non-zero value means.
+    FENCE_CLIP_CNTR_L           = 0x124
+    FENCE_CLIP_CNTR_H           = 0x128
+    # Cycles the drain guard held RX off; see the DMA core's own documentation for
+    # interpretation together with FENCE_CLIP_CNTR.
+    FENCE_AFULL_CNTR_L          = 0x12C
+    FENCE_AFULL_CNTR_H          = 0x130
+    # {31 = read-drain FSM waiting on WRBUFF_RD_REQ_FNS, 30:16 = deepest rd_cpl
+    # occupancy ever, 15:0 = occupancy now}. See the DMA core's RD_DRAIN_DBG_O.
+    RD_DRAIN_DBG                = 0x13C
 
 
 # Base offset and per-queue slot stride of the PER-QUEUE 2D register block. Queue 0 is q=0 of it

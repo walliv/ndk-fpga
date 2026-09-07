@@ -4,17 +4,9 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-# ------------------------------------------------------------------------------
-# PCIe parameters (can be overriden via environment variables coming from the Makefile):
-# ------------------------------------------------------------------------------
-# Supported combinations for this card:
-# 1x PCIe Gen3 x16  -- PCIE_GEN=3 and PCIE_ENDPOINT_MODE=0 (Note: default configuration)
-# 1x PCIe Gen4 x8x8 -- PCIE_GEN=4 and PCIE_ENDPOINT_MODE=1
-# 1x PCIe Gen3 x8   -- PCIE_GEN=3 and PCIE_ENDPOINT_MODE=2
-# 1x PCIe Gen4 x4   -- PCIE_GEN=4 and PCIE_ENDPOINT_MODE=3
-# ------------------------------------------------------------------------------
-
-# Set default PCIe configuration
+# ---- PCIe parameters, overridable from the Makefile ----
+# Supported (PCIE_GEN, PCIE_ENDPOINT_MODE) for this card: Gen3 x16 = (3,0) default; Gen4 x8x8 =
+# (4,1); Gen3 x8 = (3,2);
 set PCIE_CONF "1xGen3x16"
 if { [info exist env(PCIE_CONF)] } {
     set PCIE_CONF $env(PCIE_CONF)
