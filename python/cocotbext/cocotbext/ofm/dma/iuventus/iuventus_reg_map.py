@@ -22,8 +22,8 @@ class StatRegBits(IntEnum):
 class IuventusMiRegMap(IntEnum):
     """COMMON register block (shared across every queue): CONTROL/STATUS, the shared RDBUFF/
     WRBUFF data-pool base addresses/PRP list pointers, METADATA_PTR, LAST_CQ_ENTRY/CPL_ERR_MASK/
-    TAG_FIFO_STATUS status, and every *_CNTR performance counter (see nvme_sw_manager.vhd's
-    R_ADDRS, which this must match exactly). Per-queue configuration/doorbell registers live in
+    TAG_FIFO_STATUS status, and every *_CNTR performance counter. Per-queue
+    configuration/doorbell registers live in
     the separate PER_Q_BASE-based 2D block (IuventusPerQueueRegMap below); per-queue SSD-facing
     stat counters (succ/unsucc completions, SQE dispatches, CQE processed) live in the separate
     PER_Q_CNTR_BASE-based 2D block (IuventusPerQueueCntrRegMap below).
@@ -31,7 +31,7 @@ class IuventusMiRegMap(IntEnum):
     The debug-only per-BAR/buffer breakdown counters (aggregate PCIE_RDS/RD_BYTES/WRS/WR_BYTES,
     RDBUFF_PCIE_*, WRBUFF_PCIE_*, CQ_PCIE_*, SQ_DISP_RDS/BYTES, RDBUFF_DISP_*, WRBUFF_USR_*, and
     the never-wired *_RPT_UPDS_CNTR_* placeholders) were dropped from the register map -- they
-    weren't needed for SSD throughput/HW debug (see the report accompanying this change).
+    weren't needed for SSD throughput/HW debug.
     SUCC_COMPL/UNSUCC_COMPL/SQE_DISP/CQE_PROC stay here as COMMON aggregates (quick "everything"
     totals) alongside their new per-queue counterparts in IuventusPerQueueCntrRegMap.
     """
@@ -78,8 +78,7 @@ class IuventusMiRegMap(IntEnum):
     NVME_FLUSH_DISP_CNTR_H      = 0x0A0
 
 
-# Base offset and per-queue slot stride of the PER-QUEUE 2D register block (must match
-# nvme_sw_manager.vhd's PER_Q_BASE/PER_Q_STRIDE constants exactly). Queue 0 is q=0 of this block
+# Base offset and per-queue slot stride of the PER-QUEUE 2D register block. Queue 0 is q=0 of it
 # -- there is no separate/legacy register set for queue 0.
 PER_Q_BASE = 0x200
 PER_Q_STRIDE = 0x40
@@ -88,7 +87,7 @@ PER_Q_STRIDE = 0x40
 class IuventusPerQueueRegMap(IntEnum):
     """Byte offsets *relative to one queue's slot* (PER_Q_BASE + qid*PER_Q_STRIDE) -- see
     per_queue_reg_addr() below for turning one of these into an absolute MI address for a given
-    queue. Must match nvme_sw_manager.vhd's PQ_OFFSETS exactly.
+    queue. Must match the core's per-queue offset map exactly.
     """
     SQTDBL           = 0x00  # RO: observed current SQTDBL value
     SQHDBL           = 0x04  # RO: observed current SQHDBL value
@@ -109,8 +108,10 @@ def per_queue_reg_addr(reg: IuventusPerQueueRegMap, qid: int) -> int:
     return PER_Q_BASE + qid * PER_Q_STRIDE + int(reg)
 
 
-# Base offset and per-queue slot stride of the PER-QUEUE 2D register block. Queue 0 is q=0 of it
-# -- there is no separate/legacy register set for queue 0.
+# Base offset and per-queue slot stride of the PER-QUEUE COUNTER 2D register block. A SEPARATE,
+# parallel
+# 2D block from IuventusPerQueueRegMap above -- PER_Q_STRIDE (0x40) has no room left for these 8
+# more 32-bit fields alongside the 12 already there.
 PER_Q_CNTR_BASE = 0x800
 PER_Q_CNTR_STRIDE = 0x40
 
@@ -119,12 +120,10 @@ class IuventusPerQueueCntrRegMap(IntEnum):
     """Byte offsets *relative to one queue's slot* (PER_Q_CNTR_BASE + qid*PER_Q_CNTR_STRIDE) --
     see per_queue_cntr_reg_addr() below. Read-only; populated by SAMPLE_CNTRS like the COMMON
     counters (write CtrlRegBits.SAMPLE_CNTRS to IuventusMiRegMap.CONTROL, then read). Must match
-    nvme_sw_manager.vhd's PQC_* constants exactly.
+    the core's per-queue counter offset map exactly.
 
     sq_pcie_rds is NOT here (stays a COMMON-only aggregate, IuventusMiRegMap.SQ_PCIE_RDS_CNTR_*):
-    the underlying PCIe-read-request-count signal is classified only by which BAR it targets, not
-    which queue's SQ ring within that BAR, so no per-queue QID is available at that signal's
-    boundary (see the report accompanying this change).
+    no per-queue breakdown is available.
     """
     SUCC_CPLS_L   = 0x00
     SUCC_CPLS_H   = 0x04

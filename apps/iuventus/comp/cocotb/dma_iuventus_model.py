@@ -20,7 +20,7 @@ from cocotbext.ofm.mfb.transaction import MfbTransactionWithMeta
 OP_STAT_TYPE_WRITE = 0
 OP_STAT_TYPE_READ = 1
 OP_STAT_CODE_SUCCESS = 0
-OP_STAT_CODE_OOR = 2   # LBA Out of Range (op_ctrl.vhd's "10"): completed internally, no data transfer
+OP_STAT_CODE_OOR = 2   # LBA Out of Range ("10"): completed without moving data
 
 # QID_W, matching user_core_test_arch.vhd's `maximum(1, log2(NUM_QUEUES))` (ceil-log2, log2(1)=0
 # by math_pack convention). Needed for NVME_WR_MFB_META's width (SQE_LBA_PTR_W(64) + QID_W).
@@ -66,7 +66,7 @@ class SimplifiedDmaModel:
     (`_backpressure_loop`) periodically hold BOTH NVME_RD_REQ_RDY and NVME_WR_MFB_DST_RDY low
     together for `bp_low_cycles` cycles out of every `bp_period` cycles -- the direct
     component-level sim analog of a real backend (SSD/DMA_IUVENTUS) that intermittently can't
-    accept new requests or write data (e.g. the HW read-path stall / SSD idle-window wedge).
+    accept new requests or write data.
     USER_CORE's request/frame generators must hold VLD/SRC_RDY steady and resume (not drop,
     duplicate, or wedge) once ready is reasserted; that's exactly what the backpressure directed
     case in cocotb_test.py checks via the reference-model scoreboard. Disabled by default
@@ -101,7 +101,7 @@ class SimplifiedDmaModel:
         self.lba_space_size = None
 
         dut.NVME_RD_REQ_RDY.value = 1
-        # Per-queue "DMA can accept a read" (op_ctrl.vhd's SQ_HAS_SPACE, mirrored via
+        # Per-queue "DMA can accept a read" (the DMA core's SQ_HAS_SPACE, mirrored via
         # DMA_IUVENTUS -- NVME_RD_REQ_QUEUE_RDY). This single-outstanding model skips per-queue SQ
         # occupancy: every queue stays permanently "ready".
         dut.NVME_RD_REQ_QUEUE_RDY.value = (1 << _NUM_QUEUES) - 1
@@ -210,7 +210,7 @@ class SimplifiedDmaModel:
             await RisingEdge(self._clk)
 
         if self.lba_space_size is not None and (lba_ptr + lba_num + 1) > self.lba_space_size:
-            # LBA Out of Range: op_ctrl completes it internally, never drains WRBUFF (no RD_MFB).
+            # LBA Out of Range: completed without moving data, so no RD_MFB follows.
             done = Event()
             self._op_stat_pending.append((OP_STAT_TYPE_READ, OP_STAT_CODE_OOR, done))
             await done.wait()
