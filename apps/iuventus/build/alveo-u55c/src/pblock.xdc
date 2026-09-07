@@ -14,10 +14,23 @@ add_cells_to_pblock [get_pblocks pblock_dma] [get_cells -quiet [list {core_logic
 resize_pblock [get_pblocks pblock_dma] -add {CLOCKREGION_X4Y0:CLOCKREGION_X6Y3}
 set_property IS_SOFT 0 [get_pblocks pblock_dma]
 
-# Co-locates the WRBUFF drain FIFO with its consumer: that path is route-dominated and closes
-# only with both ends in one region. Four regions, not two -- that consumer is ~41k
-# cells and two leave it route-bound. Re-measure before shrinking.
 create_pblock pblock_wrbuff_drain
-add_cells_to_pblock [get_pblocks pblock_wrbuff_drain] [get_cells -quiet [list {core_logic_i/dma_g[0].dma_i/nvme2card_ctrl_i/wrbuff_fifo_i} {core_logic_i/dma_g[0].dma_i/nvme2card_ctrl_i/hbm_stream_writer_i}]]
-resize_pblock [get_pblocks pblock_wrbuff_drain] -add {CLOCKREGION_X5Y2:CLOCKREGION_X6Y3}
+add_cells_to_pblock [get_pblocks pblock_wrbuff_drain] [get_cells -quiet [list {core_logic_i/dma_g[0].dma_i/nvme2card_ctrl_i/hbm_stream_writer_i}]]
+# X4Y0:X5Y1 follows the WRBUFF HBM ports, which now sit under X4Y0. The previous X5Y0:X6Y1 box ran
+# at 90-98% SLICE occupancy in every one of its four regions, and being IS_SOFT 0 it left the
+# placer no way out; X4Y0/X4Y1 are the least occupied regions inside the enclosing DMA pblock.
+resize_pblock [get_pblocks pblock_wrbuff_drain] -add {CLOCKREGION_X4Y0:CLOCKREGION_X5Y1}
+#set_property CONTAIN_ROUTING 1 [get_pblocks pblock_wrbuff_drain]
 set_property IS_SOFT 0 [get_pblocks pblock_wrbuff_drain]
+
+
+create_pblock pblock_groupby
+# Everything the architecture builds except the interface pipeline. Naming the direct children
+# rather than user_core_i itself is what catches the MI register file, which is synthesised at the
+# architecture level and has no instance name of its own to list.
+add_cells_to_pblock [get_pblocks pblock_groupby] [get_cells -filter {NAME !~ "*if_pipe_i*"} core_logic_i/user_core_i/*]
+# The engine has no reason to sit next to the DMA and every reason not to: SLR0's left half is empty
+# while X4-X7 hold the DMA and PCIe. if_pipe_i stays out so the placer can spread its register
+# stages, data and reset alike, across the gap.
+resize_pblock [get_pblocks pblock_groupby] -add {CLOCKREGION_X0Y0:CLOCKREGION_X3Y3}
+set_property IS_SOFT 0 [get_pblocks pblock_groupby]

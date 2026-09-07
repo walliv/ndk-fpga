@@ -12,6 +12,27 @@ proc get_ip_filename {ip_name {synth "QUARTUS"}} {
     }
 }
 
+# Key for an IP's output directory: every parameter its modification script can read, plus the
+# script itself. Two configurations never share a directory, so reusing one cannot hand back a
+# core customised for different generics.
+proc get_ip_dir_key {ip_params_l script_path} {
+    array set p $ip_params_l
+    # IP_BUILD_DIR is the value being keyed and IP_MODIFY_BASE moves with it, so including either
+    # would make the key depend on itself.
+    foreach k {IP_BUILD_DIR IP_MODIFY_BASE} { array unset p $k }
+    set acc ""
+    foreach k [lsort [array names p]] { append acc $k "=" $p($k) "|" }
+    if {[file exists $script_path]} {
+        set fh [open $script_path r]
+        append acc [read $fh]
+        close $fh
+    }
+    if {[catch {package require sha256}]} {
+        return [format %08x [zlib crc32 $acc]]
+    }
+    return [string range [::sha2::sha256 -hex $acc] 0 11]
+}
+
 proc get_ip_mod_files {ip_components_l ip_params_l} {
     array set ip_params $ip_params_l
     set ip_files_l [list]
@@ -55,9 +76,19 @@ proc get_ip_mod_files {ip_components_l ip_params_l} {
             }
         }
 
-        # Skip regenerating an IP already generated. Quartus only: IP_BUILD_DIR carries no
-        # configuration key, so on Vivado a file-exists hit would reuse a core built for a
-        # different PCIE_GEN/DMA_TYPE.
+        # Give each configuration its own output directory. Without a key, create_ip finds the
+        # directory occupied, uniquifies to <name>_N and leaves a ~43 MB copy behind per build.
+        if {!$use_quartus} {
+            set ip_dir_key [get_ip_dir_key $ip_params_l \
+                                $ip_params_mod(IP_MODIFY_BASE)/$script.ip.tcl]
+            set ip_params_mod(IP_BUILD_DIR) $ip_params_mod(IP_BUILD_DIR)/ipcfg_$ip_dir_key
+            # create_ip -dir requires the directory to already exist; it does not create one.
+            file mkdir $ip_params_mod(IP_BUILD_DIR)
+        }
+
+        # Skip regenerating an IP already generated. Quartus only: the Vivado path relies on
+        # create_ip plus the modification script instead, which the keyed directory above makes
+        # safe to land on an existing tree.
         set ip_file $ip_params_mod(IP_BUILD_DIR)/[get_ip_filename $comp]
         if {[file exists $ip_file]} {
             if {$use_quartus && ![file exists $ip_params_mod(IP_MODIFY_BASE)/$script\_ip.qpf]} {

@@ -4,11 +4,23 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+# The node set follows the architecture that was built: the register maps have nothing in common,
+# so emitting the TEST layout for a GROUPBY build would hand software addresses that decode to
+# something else entirely.
 proc dts_application {DTS base arch_type} {
     upvar 1 $DTS dts
 
     set mfb_gen_base     [expr $base + 0x100]
     set data_logger_base [expr $base + 0x200]
+
+    if {$arch_type eq "GROUPBY"} {
+        dts_create_node dts "user_core" {
+            dts_create_node dts "iuventus_groupby" {
+                dts_appendprop_comp_node dts $base 0x100 "ziti,iuventus_groupby"
+            }
+        }
+        return
+    }
 
     dts_create_node dts "user_core" {
         dts_create_node dts "iuventus_test_ctrl" {

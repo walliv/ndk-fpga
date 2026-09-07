@@ -300,6 +300,34 @@ proc SetupDesign {synth_flags} {
 
     set_param messaging.defaultLimit 3000
 
+    # OOC IP synthesis cache, on by default. The create_project -force above deletes
+    # <OUTPUT>.cache, so a project-local repo never hits and every build re-synthesises every IP.
+    # NDK_IP_CACHE_DIR overrides the path, or disables it with "off".
+    set ip_cache_dir ""
+    if {[info exists ::env(NDK_IP_CACHE_DIR)]} {
+        set ip_cache_dir $::env(NDK_IP_CACHE_DIR)
+    } elseif {[info exists ::env(HOME)]} {
+        set ip_cache_dir [file join $::env(HOME) .cache ndk-fpga vivado-ip-cache]
+    }
+
+    # Fail CLOSED: an unusable path disables caching rather than caching somewhere unintended. The
+    # per-release subdirectory restores a separation the project-local repo has built in.
+    if {$ip_cache_dir eq "" || [string equal -nocase $ip_cache_dir "off"]} {
+        puts "IP synthesis cache: disabled"
+    } elseif {[catch {
+        set ip_cache_dir [file normalize [file join $ip_cache_dir [version -short]]]
+        file mkdir $ip_cache_dir
+        set ip_cache_probe [file join $ip_cache_dir .writable]
+        close [open $ip_cache_probe w]
+        file delete -force $ip_cache_probe
+        config_ip_cache -use_cache_location $ip_cache_dir
+        set_property IP_CACHE_PERMISSIONS {read write} [current_project]
+    } ip_cache_err]} {
+        puts "WARNING: IP synthesis cache disabled ($ip_cache_err)"
+    } else {
+        puts "IP synthesis cache: $ip_cache_dir"
+    }
+
     # Apply user settings
     foreach i $SYNTH_FLAGS(SETUP_FLAGS) {
         if { $i == "USE_XPM_LIBRARIES" } {
