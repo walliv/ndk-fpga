@@ -91,11 +91,9 @@ lappend HIERARCHY(MOD) "$CARD_BASE/src/card_top.vhd"
 # --------- Add constraints to the design ---------------------------------------
 lappend SYNTH_FLAGS(CONSTR) "$CARD_BASE/src/general.xdc"
 lappend SYNTH_FLAGS(CONSTR) "$CARD_BASE/src/pblock.xdc"
-# Comment this constraint out if you don't want to see the received data in the hardware
-# ILA disabled for the CQ-alignment measurement build (read counters over MI, not JTAG); its
-# capture paths were the only timing-failing group (WNS -0.088) -- removing it closes timing.
+# ILA disabled for the CQ-alignment build: counters are read over MI, and its capture paths were
+# the only timing-failing group.
 # lappend SYNTH_FLAGS(CONSTR) "$CARD_BASE/src/ilas.xdc"
-
 lappend SYNTH_FLAGS(CONSTR) "$COMBO_BASE/cards/amd/alveo-u55c/constr/pcie_half.xdc"
 
 if {$PCIE_ENDPOINT_MODE == 0 || $PCIE_ENDPOINT_MODE == 1} {

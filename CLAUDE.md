@@ -78,6 +78,20 @@ SPDX-License-Identifier: <license_specifier>
 - instances of components need to declare all generics and ports even when just
   assigning them a constant or default value
 
+## Commentaries in the code
+
+- Commentaries in the code should be kept sufficiently condensed, its maximum length must be 250
+  characters for each statement they are commenting.
+  There are some exceptions to this rule:
+  - commented out code
+  - file headers with authors/licenses/small descriptions
+  - compiler-specific directives
+- The paragraphs in comments are not allowed. Two commentary blocks separated by one or more
+  newlines are considered a single commentary block and thus also a subject of this prohibition.
+- The best commentary is no commentary since code should document itself to the highest degree
+  possible. The code answers WHAT is done whereas the commentary, if it needs to be used, describes
+  WHY is it done.
+
 ## Commands
 
 ### Environment Setup

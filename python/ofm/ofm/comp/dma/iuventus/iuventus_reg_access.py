@@ -13,12 +13,8 @@ from cocotbext.ofm.dma.iuventus import CQEntry
 from cocotbext.ofm.dma.iuventus import IuventusMiRegMap, CtrlRegBits, StatRegBits
 from cocotbext.ofm.dma.iuventus import IuventusPerQueueCntrRegMap, per_queue_cntr_reg_addr
 
-# WRBUFF peer-write 32B-alignment statistics (empirical HW measurement of how well NVMe
-# peer-writes on the CQ interface fit a 32B-aligned, <=16-beat AXI burst -- see
-# NVME_CQ_META_EXTRACTOR's CQ_WR_*_INCR outputs). Not part of IuventusMiRegMap since that enum
-# only lists the addresses needed for SSD throughput/HW debug (mirroring how the R_PROF_*
-# profiling counters in nvme_sw_manager.vhd are also omitted there); addresses must match
-# nvme_sw_manager.vhd's R_CQ_WR_*_CNTR_L constants exactly.
+# WRBUFF peer-write 32B-alignment statistics. Kept out of IuventusMiRegMap, which lists only
+# throughput and debug addresses. Must match nvme_sw_manager.vhd's R_CQ_WR_*_CNTR_L constants.
 CQ_WR_TOTAL_CNTR_L_ADDR         = 0x0CC
 CQ_WR_UNALIGN_START_CNTR_L_ADDR = 0x0D4
 CQ_WR_UNALIGN_SIZE_CNTR_L_ADDR  = 0x0DC
@@ -290,9 +286,8 @@ class DMAIuventusRegAccess(nfb.BaseComp):
     def cqes_processed(self) -> int:
         return self._comp.read64(IuventusMiRegMap.CQE_PROC_CNTR_L.value)
 
-    # sq_pcie_rds/sq_pcie_rds_bytes stay aggregate-only: PCIE_RD_REQ_INCRS classifies PCIe read
-    # requests by which BAR they target, not which queue's SQ ring within that BAR -- no per-queue
-    # QID is available at this signal's boundary (see the report accompanying this change).
+    # sq_pcie_rds stays aggregate-only: PCIE_RD_REQ_INCRS classifies reads by target BAR, not by
+    # the SQ ring within it, and no QID is available at this signal's boundary.
     @property
     def sq_pcie_rds(self) -> int:
         return self._comp.read64(IuventusMiRegMap.SQ_PCIE_RDS_CNTR_L.value)
@@ -308,9 +303,8 @@ class DMAIuventusRegAccess(nfb.BaseComp):
     def lba_mask(self, value: int) -> None:
         self._comp.write16(IuventusMiRegMap.LBA_NUM_MASK.value, value)
 
-    # succ_cpls/unsucc_cpls (below) are COMMON aggregates (all queues summed); pq_succ_cpls(qid)/
-    # pq_unsucc_cpls(qid)/pq_sqe_disp(qid)/pq_cqe_proc(qid) further down expose the per-queue
-    # breakdown (PER_Q_CNTR_BASE block) for HW debug (e.g. localizing a per-queue stall/wedge).
+    # succ_cpls/unsucc_cpls below are COMMON aggregates (all queues summed); pq_* counters further
+    # down expose the per-queue breakdown (PER_Q_CNTR_BASE) for HW debug, e.g. localizing a stall.
     @property
     def succ_cpls(self) -> int:
         return self._comp.read64(IuventusMiRegMap.SUCC_COMPL_CNTR_L.value)
@@ -354,10 +348,9 @@ class DMAIuventusRegAccess(nfb.BaseComp):
     def tag_fifo_status(self) -> int:
         return self._comp.read16(IuventusMiRegMap.TAG_FIFO_STATUS.value)
 
-    # --- Per-queue SSD-facing stat counters (PER_Q_CNTR_BASE block) ---------------------------
-    # Read-only, populated by sample_cntrs() like every other counter here. `qid` is the queue
-    # index (0..NUM_QUEUES-1) -- see IuventusPerQueueCntrRegMap's own docstring for why sq_pcie_rds
-    # has no per-queue counterpart.
+    # --- Per-queue SSD-facing stat counters (PER_Q_CNTR_BASE block) ---
+    # Read-only; qid is the queue index (0..NUM_QUEUES-1) -- see IuventusPerQueueCntrRegMap's
+    # docstring for why sq_pcie_rds has no per-queue counterpart.
     def pq_succ_cpls(self, qid: int) -> int:
         return self._comp.read64(per_queue_cntr_reg_addr(IuventusPerQueueCntrRegMap.SUCC_CPLS_L, qid))
 
