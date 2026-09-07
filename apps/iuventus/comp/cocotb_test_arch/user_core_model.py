@@ -119,18 +119,26 @@ class ReadReqModel:
 
     Two distinct dispatch modes exist in the RTL and are modeled separately:
       - manual (one-shot register write to 0x00, IuventusTest.disp_rd_req): LBA_PTR/LBA_NUM come
-        straight from the configured registers, bypassing seq/rand addressing entirely.
-      - burst (an active throughput test, tst_finished='0'): LBA_PTR is tst_addr (seq_addr_cntr or
-        the LFSR), which only advances on completion (NVME_OP_STAT_VLD), not on request
-        acceptance -- see on_completion().
+        straight from the configured registers, bypassing seq/rand addressing entirely, and no
+        counter moves (seq_addr_cntr_p's gate is closed while tst_finished='1', contig_test='0').
+      - burst (tst_finished='0', or contig_test='1'): LBA_PTR is tst_addr -- the requested queue's
+        own seq_addr_cntr entry, or the shared LFSR.
     In both modes the QID round-robin (rd_qid_cntr/rd_burst_cntr) advances on every accepted
     request regardless of dispatch mode.
+
+    Only the read stream is modeled here. A write frame accepted while the same gate is open also
+    advances the queue it names (user_core_test_arch.vhd's seq_addr_cntr_p, :1342), so a scenario
+    running the write generator during a burst would have to feed that in too; none does, because
+    every case starts from a DMA_RST that clears MFB_GENERATOR_MI32's own enable.
     """
 
     def __init__(self, num_queues: int = 1):
         self.num_queues = num_queues
         self.rr = RoundRobinQid(num_queues=num_queues)
-        self.seq_addr = 0
+        # One counter per queue, mirroring user_core_test_arch.vhd's seq_addr_cntr array (:278).
+        # An accepted request only moves the counter of the queue it names, so a round-robin
+        # stream steps each queue once per full rotation rather than once per request.
+        self.seq_addr = [0] * num_queues
         self.lfsr_reg = _LFSR21_SEED
         self.addressing = "seq"
         self.lba_num = 0
@@ -142,11 +150,20 @@ class ReadReqModel:
         self.rr.ch_max = ch_max
         self.rr.burst = max(burst, 1)
 
+    def _seq_idx(self, qid: int) -> int:
+        """Mirrors user_core_test_arch.vhd's seq_idx_f (:222): QID_W is a rounded-up log2, so at
+        NUM_QUEUES 1 or 3 a QID value can name a queue that does not exist; the RTL folds those
+        onto queue 0 rather than indexing the array out of range."""
+        return qid if qid < self.num_queues else 0
+
     def dut_reset(self) -> None:
-        """Mirrors DMA_RST/data_logger_rst: reseeds the LFSR and the round-robin QID counter."""
+        """Mirrors DMA_RST/data_logger_rst: reseeds the LFSR and the round-robin QID counter, and
+        re-arms EVERY queue's seq_addr_cntr entry from nvme_rd_req_lba_ptr_reg -- which the same
+        reset clears to 0 (user_core_test_arch.vhd's rd_req_lba_ptr_reg_p, :709)."""
         self.lfsr_reg = _LFSR21_SEED
         self.rr.qid = 0
         self.rr.burst_cnt = 0
+        self.seq_addr = [0] * self.num_queues
         self.test_active = False
 
     def next_manual_request(self, lba_ptr: int, lba_num: int) -> ExpectedReadReq:
@@ -154,10 +171,13 @@ class ReadReqModel:
         return ExpectedReadReq(lba_ptr=lba_ptr, lba_num=lba_num, qid=qid)
 
     def start_burst(self, lba_ptr: int, lba_num: int, addressing: str, contig: bool) -> None:
-        """Mirrors tst_trigg's effect (a write to TST_ITERATIONS): seq_addr_cntr is (re)armed to
-        the currently-configured LBA_PTR; the LFSR is NOT reseeded here (only DMA_RST does that)."""
+        """Mirrors tst_trigg's effect (a write to TST_ITERATIONS): EVERY queue's seq_addr_cntr
+        entry is (re)armed to the currently-configured LBA_PTR -- the RTL assigns the whole array
+        with `(others => resize(unsigned(nvme_rd_req_lba_ptr_reg), ADDR_CNTR_WIDTH))` (:1318), so
+        all queues start the burst on the same address and diverge only as each is used. The LFSR
+        is NOT reseeded here (only DMA_RST does that)."""
         assert addressing in ("seq", "rand")
-        self.seq_addr = lba_ptr
+        self.seq_addr = [lba_ptr] * self.num_queues
         self.lba_num = lba_num
         self.addressing = addressing
         self.contig = contig
@@ -167,27 +187,39 @@ class ReadReqModel:
         self.test_active = False
 
     def next_burst_request(self) -> ExpectedReadReq:
-        addr = self.seq_addr if self.addressing == "seq" else self.lfsr_reg
+        """Predicts ONE accepted burst request and applies that accept's own side effect.
+
+        LBA_PTR is the requested queue's own address: tst_addr indexes tst_addr_q by the QID the
+        request carries (user_core_test_arch.vhd:1359), so each queue reads its own counter, while
+        the random stream stays shared across queues (:1355).
+
+        seq_addr_cntr advances HERE, on acceptance (`rd_req_accepted_s`, :1330), and only for the
+        queue named by the request. Waiting for the completion instead would leave the next
+        address undefined for a whole round trip, capping a sequential stream at one useful
+        command in flight per queue. NVME_RD_REQ_LBA_NUM is a 0-based LBA count (0 => 1 LBA), so
+        the step of lba_num+1 keeps each queue's stream contiguous and disjoint. Gated exactly
+        like the RTL: (tst_finished = '0') or (contig_test = '1'). The counter runs in rand
+        addressing too -- tst_sel_reg(0) only selects which address is read out."""
         qid = self.rr.next_qid()
+        idx = self._seq_idx(qid)
+        addr = self.seq_addr[idx] if self.addressing == "seq" else self.lfsr_reg
+        if self.test_active or self.contig:
+            self.seq_addr[idx] += (self.lba_num + 1)
         return ExpectedReadReq(lba_ptr=addr, lba_num=self.lba_num, qid=qid)
 
     def on_completion(self) -> None:
-        """Mirrors seq_addr_cntr / the LFSR advancing on NVME_OP_STAT_VLD, gated exactly like the
-        RTL: (tst_finished = '0') or (contig_test = '1').
+        """Mirrors lfsr_rand_addr_gen_i's ENABLE, `core_op_stat_vld and ((not tst_finished) or
+        contig_test)` (user_core_test_arch.vhd:1295): the random address is the part of tst_addr
+        that still moves on the completion. The sequential counter moves on acceptance instead --
+        see next_burst_request().
 
-        Step size: user_core_test_arch.vhd's seq_addr_cntr_p advances by
-        `unsigned(nvme_rd_req_lba_num_reg) + 1` (RTL fix applied after this was previously
-        observed/calibrated as advancing by lba_num alone, which left the address frozen for
-        lba_num=0 bursts). NVME_RD_REQ_LBA_NUM is a 0-based LBA count (0 => 1 LBA accessed), so
-        the address must step by lba_num+1 LBAs for successive reads/writes to be contiguous and
-        non-overlapping -- exactly what the RTL now does. One shared seq_addr_cntr feeds both the
-        read (tst_addr) and write (gen_wr_meta_lba) test-mode addresses, so this same step applies
-        to both."""
+        One call per completion. The callers drive it from the pin-side accept callback, which is
+        only equivalent while the harness's DMA model keeps a single read outstanding: the request
+        pipe grants the engine REQ_FIFO_ITEMS credits per queue (user_core_if_pipe.vhd:356), so
+        against a deeper backend the engine stamps an address many completions before the matching
+        request reaches the DMA pins."""
         if self.test_active or self.contig:
-            if self.addressing == "seq":
-                self.seq_addr += (self.lba_num + 1)
-            else:
-                self.lfsr_reg = lfsr21_step(self.lfsr_reg)
+            self.lfsr_reg = lfsr21_step(self.lfsr_reg)
 
 
 class WriteFrameModel:
@@ -213,6 +245,11 @@ class WriteFrameModel:
         self.word_cnt = 0
 
     def next_frame(self, lba_ptr: int, total_bytes: int) -> ExpectedWrFrame:
+        """`lba_ptr` is supplied by the caller, not predicted: every scenario here dispatches
+        writes with the test idle (tst_finished='1', contig_test='0'), where gen_wr_meta_lba is
+        the nvme_wr_req_lba_ptr_reg the caller just programmed (user_core_test_arch.vhd:863). A
+        write issued during a burst instead takes tst_addr_q of the queue its own region names,
+        which would have to be predicted from ReadReqModel's per-queue counters."""
         qid = self.rr.next_qid()
         num_beats = (total_bytes + REGION_BEAT_BYTES - 1) // REGION_BEAT_BYTES
 

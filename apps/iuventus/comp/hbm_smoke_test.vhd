@@ -9,8 +9,8 @@ use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
 -- Lightweight HW-debug scaffolding: an MI-driven single-beat AXI3 master for the HBM ports.
--- Software pokes CTRL to fire one write or read beat at a 34-bit HBM address and reads STATUS/RDATA
--- back, proving read-after-write on silicon.
+-- Software pokes CTRL to fire one write or read beat at a 34-bit HBM address and reads
+-- STATUS/RDATA back, proving read-after-write on silicon.
 entity HBM_SMOKE_TEST is
     generic (
         -- MI bus width

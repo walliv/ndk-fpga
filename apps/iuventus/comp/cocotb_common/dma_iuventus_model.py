@@ -334,9 +334,9 @@ class SimplifiedDmaModel:
             meta=(self._inflight_qid << CQ_ENTRY_CMD_ID_W) | self._inflight_cid,
         ))
 
-        # Wait for THIS completion's OP_STAT_VLD to be dispatched, not just queued, before
-        # re-arming RDY: the seq_addr and QID counters advance off that pulse, so re-driving RDY on
-        # the same edge accepts the next request a cycle early, reading the STALE value.
+        # Wait for THIS completion's OP_STAT_VLD to dispatch, not just queue, before re-arming RDY:
+        # the address generator steps off that pulse (lfsr_rand_addr_gen_i ENABLE), so re-driving
+        # RDY the same edge accepts the next request early, on a stale address.
         done = Event()
         self._op_stat_pending.append((OP_STAT_TYPE_READ, OP_STAT_CODE_SUCCESS, done))
         await done.wait()

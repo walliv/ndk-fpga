@@ -150,7 +150,15 @@ SPDX-License-Identifier: <license_specifier>
 ### Environment Setup
 ```sh
 source env.sh      # Must be run before any Python tooling or cocotb flows
+export PATH=$HOME/miniforge3/envs/ndk-env/bin:$PATH   # ndk-env python for ALL Python tooling
 ```
+
+Always use the Python from the **`ndk-env`** mamba environment. It is the only one with
+`pytest`, `pytest-xdist` and `cocotb` together. Put its `bin` on `PATH` rather than passing
+`PYTHON=` to make: the cocotb Makefile derives `PYTHON_LIBDIR` from a hardcoded `python3` and
+resolves `cocotb-config` from `PATH`, so overriding only `PYTHON` desynchronises them and every
+test fails at once with `nvc produced no results.xml (exit 0)` — the VHPI bridge failing to load,
+which reads like an RTL fault but is not one. Bare `python3` is miniforge base and has no pytest.
 
 ### Building FPGA Firmware (App for a Card)
 

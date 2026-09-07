@@ -668,14 +668,44 @@ class LatencyMeter(DataLogger):
 # These take an ALREADY-OPEN IuventusTest/LatencyMeter plus parsed parameters -- no argparse, no
 # nfb.open() -- so main()'s CLI handlers and a cocotb testbench drive the same code paths.
 
+class FzcNotRunning(RuntimeError):
+    """The design is not enabled, so no traffic can flow and every rate would read zero."""
+
+
+def assert_fzc_running(test: IuventusTest) -> None:
+    """Refuse to start a measurement unless fzc has enabled the design.
+
+    fzc owns CONTROL bit 0: it sets it once the SQ/CQ/buffers are up and the drives are attached.
+    Without it the generator has nowhere to send requests, so a sweep runs its full duration and
+    reports zeros -- which reads as a catastrophic result rather than as a setup mistake. That
+    happened for 12 minutes on 2026-09-05 after a fabric reload left the FPGA's PF1 unbound and
+    fzc could not attach; the probe loop kept going and produced nothing.
+    """
+    # Reached through the test object's OWN device handle. Opening a second one with nfb.open()
+    # makes every counter read back zero, which would turn this guard into the fault it detects.
+    dma = getattr(test, "_dma_ctl_comp", None)
+    if dma is None:
+        dma = test._dev.comp_open("ziti,dma_iuventus", 0)
+        test._dma_ctl_comp = dma
+    ctl = dma.read16(0x00)
+    if not (ctl & 1):
+        raise FzcNotRunning(
+            "DMA Iuventus CONTROL=0x%04x: bit 0 clear, so fzc has not enabled the design. "
+            "Start fzc and wait for CONTROL & 1 before measuring. If fzc exited with "
+            "'Cannot find device', the FPGA's PF1 is unbound -- rebind it to uio_pci_generic "
+            "and set COMMAND=0x406." % ctl)
+
+
 def run_read_dispatch(test: IuventusTest, lba_ptr: int, lba_num: int) -> None:
     """CLI '-r LBA_PTR LBA_NUM': dispatch one manual read request."""
+    assert_fzc_running(test)
     test.disp_rd_req(lba_ptr, lba_num)
 
 
 def run_write_dispatch(test: IuventusTest, lba_ptr: int, lba_num: int, burst_size: int = 1) -> None:
     """CLI '-w LBA_PTR LBA_NUM': dispatch one write frame (or a free-running burst if
     burst_size > 1, matching IuventusTest.disp_wr_req's own semantics)."""
+    assert_fzc_running(test)
     test.disp_wr_req(lba_ptr, lba_num, burst_size)
 
 
@@ -685,8 +715,10 @@ def run_latency(
 ) -> None:
     """CLI '-l TYPE ITERATIONS ADDRESSING LBA_NUM': measure and report the latency of one
     mode/addressing/size combination."""
-    # Pin to one queue: without it, a leftover range from a prior multi-queue sweep bleeds in,
-    # mixing SSDs into a single-drive latency figure.
+    assert_fzc_running(test)
+    # Pin to one queue: unlike -t and --profile, this path sets no range on its own, so it would
+    # otherwise inherit a prior multi-queue sweep's and mix SSDs into one figure. QD1 already
+    # makes the meter's pairing exact; this makes it single-drive.
     lmeter.test_comp.set_queue_range(1)
 
     tst_comb = {f"{mode}_{addressing}_{size}": (mode, addressing, size)}
@@ -698,6 +730,7 @@ def _throughput_point_start(test: IuventusTest, mode: str, addressing: str, size
     """Arms one throughput measurement point (mode/addressing/size): configures the test-mode
     registers and, for writes, dispatches the free-running generator via disp_wr_req -- exactly
     the setup the CLI's -t sweep performs for every point of the sweep."""
+    assert_fzc_running(test)
     test.tst_addressing = addressing
     test.tst_mode = mode
 
@@ -748,16 +781,52 @@ def run_throughput_point(
     return iops, throughput_bps
 
 
-# Stall-profiler MI offsets, in the order plot_stall_profile.py's r() takes them.
+# Stall-profiler MI offsets, first five keeping plot_stall_profile.py's r() order. ALLOC_WAIT
+# (0x0AC) is the read-side allocator stall; ALLOC_WR and ALLOC_RD_PEND carry the other two
+# allocator stalls OP_CTRL can be in (see the DMA core's own docs).
 PROF_CLASS_REGS = [("DISP_SQ", 0x0A4), ("ALLOC_WAIT", 0x0AC), ("DISP_TAG", 0x0B4),
-                   ("DATA_WAIT", 0x0BC), ("BUSY", 0x0C4)]
+                   ("DATA_WAIT", 0x0BC), ("BUSY", 0x0C4), ("ALLOC_WR", 0x170),
+                   ("ALLOC_RD_PEND", 0x178)]
+# Elapsed cycles, free-running while the counters are not reset. THE denominator: the classes
+# above leave an idle cycle unscored, so their sum is an unknown-size window -- a share reads the
+# same whether the DMA saturated or did eight cycles of work.
+PROF_ELAPSED_REG = 0x158
 PROF_SIZES = [(7, "4K"), (31, "16K"), (255, "128K")]
 
 
-# Short enough that several windows close inside one profile point: the counter's default interval
-# free-runs for ~2.1 s, which against a 3 s settle can straddle the point's start and score the
-# ramp as if it were steady state.
-EVCR_PROFILE_INTERVAL = 1 << 20
+def _profile_sample_faults(mode, iops, elapsed, classified, delta, commands):
+    """Self-contradictions that make one profile point unusable, as a list of reasons.
+
+    These are checks against the RTL, not thresholds: OP_PROF sets at most one bit per cycle, so
+    classified can never exceed elapsed, every accepted write sets DATA_WAIT for at least one
+    cycle, and every completed command occupies at least one classified cycle."""
+    faults = []
+    if elapsed <= 0:
+        faults.append("TOTAL_CYCLES did not advance: no window to score against")
+    elif classified > elapsed:
+        faults.append("classified %d > elapsed %d cycles: the counters are not one window"
+                      % (classified, elapsed))
+    backwards = sorted(k for k, v in delta.items() if v < 0)
+    if backwards:
+        faults.append("%s counted backwards: the counters were reset inside the window"
+                      % ", ".join(backwards))
+    if iops <= 0:
+        faults.append("no completions in the window: nothing was profiled")
+    else:
+        if mode == "wr" and delta["DATA_WAIT"] == 0:
+            faults.append("write point with IOPS=%d but DATA_WAIT=0: no write was accepted "
+                          "while these counters ran" % iops)
+        if classified < commands:
+            faults.append("classified %d cycles < %d commands completed: at least one classified "
+                          "cycle per command is structural, so the counters missed the traffic"
+                          % (classified, int(commands)))
+    return faults
+
+
+# Short enough that several windows close inside one measurement point: a too-long interval can
+# straddle the point's start and score the ramp as steady state, or (for the throughput sweep)
+# read a rate mostly covering earlier points.
+EVCR_WINDOW_CYCLES = 1 << 20
 
 
 def _evcr_rate(test, seconds, sleep_fn):
@@ -782,13 +851,15 @@ def run_stall_profile(test, queues: int, settle_seconds: float = 3.0, results_fi
                       sleep_fn=sleep, verbose: bool = True):
     """CLI '-p': DMA stall-class breakdown across read/write x rand/seq x 4K/16K/128K.
 
-    Requires firmware built with PROFILE_EN -- without it every counter reads zero. Emits rows in
-    the exact shape doc/measurements/plot_stall_profile.py's r() helper takes.
+    Requires firmware built with PROFILE_EN -- without it every counter reads zero, which the
+    per-point checks below then reject rather than render as a breakdown.
 
-    IOPS comes from the core's EVENT_COUNTER, not a host clock. The five classes do NOT partition a cycle: an idle cycle (S_IDLE with no request) sets no bit
-    and is never counted, so the percentages are shares of CLASSIFIED cycles -- the time the DMA
-    had work in hand, which is the quantity that locates a bottleneck.
+    IOPS comes from the core's EVENT_COUNTER, not a host clock. Percentages are shares of ELAPSED
+    cycles (TOTAL_CYCLES over the same window) and 'idle' is the unclassified remainder, so a
+    point where the DMA did almost nothing reads as almost all idle instead of as a full-looking
+    stall breakdown. Every row also carries the raw cycle counts it was computed from.
     """
+    assert_fzc_running(test)
     import nfb
     from ofm.comp.dma.iuventus.iuventus_reg_access import DMAIuventusRegAccess
 
@@ -800,8 +871,12 @@ def run_stall_profile(test, queues: int, settle_seconds: float = 3.0, results_fi
     test.set_queue_range(queues)
 
     def snap():
+        # One SAMPLE_CNTRS strobe latches every counter, so the classes and the elapsed count
+        # below come from the same instant and are subtractable against another snapshot.
         reg.sample_cntrs()
-        return {name: dma.read64(addr) for name, addr in PROF_CLASS_REGS}
+        out = {name: dma.read64(addr) for name, addr in PROF_CLASS_REGS}
+        out["ELAPSED"] = dma.read64(PROF_ELAPSED_REG)
+        return out
 
     rows = []
     for mode in ("rd", "wr"):
@@ -809,7 +884,7 @@ def run_stall_profile(test, queues: int, settle_seconds: float = 3.0, results_fi
             for size, blk in PROF_SIZES:
                 # _throughput_point_start sets contig_test on both paths: contiguous stream.
                 _throughput_point_start(test, mode, addressing, size)
-                test.evcr_interval_cycles = EVCR_PROFILE_INTERVAL
+                test.evcr_interval_cycles = EVCR_WINDOW_CYCLES
                 sleep_fn(0.5)
                 before = snap()
                 rate = _evcr_rate(test, settle_seconds, sleep_fn)
@@ -818,16 +893,37 @@ def run_stall_profile(test, queues: int, settle_seconds: float = 3.0, results_fi
                 sleep_fn(0.5)
 
                 delta = {k: after[k] - before[k] for k, _ in PROF_CLASS_REGS}
-                total = sum(delta.values()) or 1
-                pct = {k: round(100.0 * v / total, 1) for k, v in delta.items()}
+                elapsed = after["ELAPSED"] - before["ELAPSED"]
+                classified = sum(delta.values())
                 iops = int(rate)
+                # Commands the core completed inside this very window, from the window's own
+                # length -- a host sleep is never the divisor.
+                commands = iops * elapsed * test.clk_period
+                faults = _profile_sample_faults(mode, iops, elapsed, classified, delta, commands)
+                pct = {k: round(100.0 * v / elapsed, 1) if elapsed > 0 else 0.0
+                       for k, v in delta.items()}
+                idle_pct = round(100.0 * (elapsed - classified) / elapsed, 1) if elapsed > 0 else 0.0
                 rows.append(dict(N=queues, mode=mode, addressing=addressing, blk=blk,
-                                 iops=iops, pct=pct))
+                                 iops=iops, pct=pct, idle_pct=idle_pct, raw=delta,
+                                 elapsed=elapsed, classified=classified, valid=not faults,
+                                 faults=faults))
                 if verbose:
-                    print('  r(%d, %-7s %8d, %5.1f, %5.1f, %5.1f, %5.1f, %5.1f),  # %s %s' % (
-                        queues, '"%s",' % blk, iops, pct["DISP_SQ"], pct["ALLOC_WAIT"],
-                        pct["DISP_TAG"], pct["DATA_WAIT"], pct["BUSY"], mode, addressing),
-                        flush=True)
+                    print('  %s %s %s N%d: iops=%d elapsed=%d classified=%d idle=%.1f%% raw=%s' % (
+                        blk, mode, addressing, queues, iops, elapsed, classified, idle_pct,
+                        delta), flush=True)
+                    if faults:
+                        # Printed instead of the pasteable row: a point that contradicts the RTL
+                        # must not reach a plot by being copied out of this log.
+                        for fault in faults:
+                            print('  !! REJECTED %s %s %s N%d: %s' % (
+                                blk, mode, addressing, queues, fault), flush=True)
+                    else:
+                        print('  r(%d, %-7s %8d, %5.1f, %5.1f, %5.1f, %5.1f, %5.1f),  # %s %s, '
+                              'idle %.1f%%, alloc_wr %.1f%%, alloc_rd_pend %.1f%%' % (
+                                  queues, '"%s",' % blk, iops, pct["DISP_SQ"], pct["ALLOC_WAIT"],
+                                  pct["DISP_TAG"], pct["DATA_WAIT"], pct["BUSY"], mode,
+                                  addressing, idle_pct, pct["ALLOC_WR"], pct["ALLOC_RD_PEND"]),
+                              flush=True)
 
     if results_file:
         with open(results_file, "w") as handle:
@@ -844,8 +940,9 @@ def run_throughput(
     """CLI '-t [--queues N]': the full throughput sweep across mode x addressing x size (the
     default combination list, or an explicit tst_comb override), returning the same list-of-dict
     `results` structure save_throughput_results()/generate_throughput_outputs() expect."""
+    assert_fzc_running(test)
     assert queues >= 1, "--queues must be at least 1"
-    test.evcr_interval_cycles = 0xFFFFFFFF
+    test.evcr_interval_cycles = EVCR_WINDOW_CYCLES
     # Confine both read and write request generation to queues 0..queues-1 so traffic is spread
     # across exactly this many SSD-backed queues. With queues=1 (the default) this reproduces the
     # previous single-queue-only behavior exactly.

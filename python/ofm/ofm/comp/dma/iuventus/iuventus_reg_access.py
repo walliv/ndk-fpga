@@ -54,6 +54,18 @@ CC_STALL_CNTR_L_ADDR             = 0x148
 DEV_INFLIGHT_ACC_L_ADDR          = 0x150
 TOTAL_CYCLES_CNTR_L_ADDR         = 0x158
 
+# The seven OP_CTRL stall classes, in OP_PROF bit order; see stall_profile() below for how they
+# are scored, and the DMA core's own documentation for their semantics.
+OP_PROF_CLASS_ADDRS = (
+    ("DISP_WAIT_SQ",       IuventusMiRegMap.PROF_DISP_WAIT_SQ_CNTR_L.value),
+    ("ALLOC_WAIT_RD",      IuventusMiRegMap.PROF_ALLOC_WAIT_CNTR_L.value),
+    ("DISP_WAIT_TAG",      IuventusMiRegMap.PROF_DISP_WAIT_TAG_CNTR_L.value),
+    ("DATA_WAIT",          IuventusMiRegMap.PROF_DATA_WAIT_CNTR_L.value),
+    ("BUSY",               IuventusMiRegMap.PROF_BUSY_CNTR_L.value),
+    ("ALLOC_WAIT_WR",      IuventusMiRegMap.PROF_ALLOC_WAIT_WR_CNTR_L.value),
+    ("ALLOC_WAIT_RD_PEND", IuventusMiRegMap.PROF_ALLOC_WAIT_PEND_CNTR_L.value),
+)
+
 @dataclass
 class DMAIuventusConfig:
     ctrl_reg                : int
@@ -434,6 +446,41 @@ class DMAIuventusRegAccess(nfb.BaseComp):
             "serving": max(0.0, (cyc - idle - stall) / cyc),
             "mean_inflight": acc / cyc,
         }
+
+    def op_prof_classes(self) -> dict:
+        """Raw cycle count of each OP_CTRL stall class plus the elapsed cycles they share a
+        window with, all from ONE snapshot so they are comparable.
+
+        Reads zero on a build without PROFILE_EN. 'cycles' is TOTAL_CYCLES, which free-runs while
+        the counters are not reset, so it also covers cycles the core was disabled."""
+        self.sample_cntrs()
+        out = {name: self._comp.read64(addr) for name, addr in OP_PROF_CLASS_ADDRS}
+        out["cycles"] = self._comp.read64(TOTAL_CYCLES_CNTR_L_ADDR)
+        return out
+
+    def stall_profile(self, before: dict = None) -> dict:
+        """The stall classes as fractions of ELAPSED cycles, with 'idle' as the unclassified
+        remainder -- pass a previous op_prof_classes() sample as `before` to window it.
+
+        A share of the classified cycles alone cannot be falsified by an idle DMA: eight busy
+        cycles in a second render as a full-looking breakdown. Scoring against elapsed makes that
+        case read idle=1.000 with raw counts in single digits. 'idle' also absorbs the cycles the
+        core was disabled."""
+        now = self.op_prof_classes()
+        if before is not None:
+            now = {k: now[k] - before[k] for k in now}
+        cycles = now["cycles"]
+        classes = {name: now[name] for name, _ in OP_PROF_CLASS_ADDRS}
+        classified = sum(classes.values())
+        out = {"cycles": cycles, "raw": classes, "classified": classified}
+        if cycles <= 0:
+            # No window, so no share exists. Reporting 0.0 here would look like a measurement.
+            out["valid"] = False
+            return out
+        out["valid"] = classified <= cycles
+        out["pct"] = {name: 100.0 * val / cycles for name, val in classes.items()}
+        out["idle"] = max(0.0, (cycles - classified) / cycles)
+        return out
 
     @property
     def drain_admit(self) -> int:

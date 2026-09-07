@@ -292,12 +292,11 @@ async def _case_small_read_burst(dut, dev, test, lba_num):
     """(c) a small (minimum-sized, 1000-iteration) read throughput burst -> stream order/QID/count
     match, at whatever NUM_QUEUES the design was elaborated with (collapses to q0 at NUM_QUEUES=1,
     full round-robin at NUM_QUEUES=4). Also probes the EVCR/EVENT_COUNTER event count, and
-    explicitly cross-checks the seq-address step size (user_core_test_arch.vhd's seq_addr_cntr_p
-    now advances by lba_num+1 LBAs per completion, fixed from an earlier lba_num-only step that
-    left lba_num=0 bursts reading the same address forever -- see user_core_model.py's
-    ReadReqModel.on_completion() docstring). Called twice by the top-level test, once with
-    lba_num=0 (checks the previously-frozen case now advances by exactly 1) and once with
-    lba_num=3 (checks a >1 step).
+    explicitly cross-checks the seq-address step size: user_core_test_arch.vhd's seq_addr_cntr_p
+    advances the ACCEPTED request's own queue by lba_num+1 LBAs, so the step is only visible
+    within one queue's substream -- see user_core_model.py's ReadReqModel.next_burst_request()
+    docstring. Called twice by the top-level test, once with lba_num=0 (the smallest step, 1) and
+    once with lba_num=3 (checks a >1 step).
 
     History note (both since resolved as ONE testbench bug, not RTL bugs): an earlier version of
     dma_iuventus_model.py's _rd_req_loop drove NVME_RD_REQ_RDY reactively out of the
@@ -332,7 +331,10 @@ async def _case_small_read_burst(dut, dev, test, lba_num):
     await aset(test, "evcr_interval_cycles", EVCR_INTERVAL_CYCLES)
 
     accepted_since_reached = 0
-    seen_addrs = []  # first few accepted addresses, for the explicit step-size assertion below
+    # First few accepted addresses PER QUEUE, for the explicit step-size assertion below. The
+    # counter is per queue, so two consecutive accepts of a round-robin stream come from different
+    # queues and their difference is not the step.
+    seen_addrs = {q: [] for q in range(n_queues)}
 
     def on_accept(got_lba_ptr, got_lba_num, got_qid):
         nonlocal accepted_since_reached
@@ -343,8 +345,9 @@ async def _case_small_read_burst(dut, dev, test, lba_num):
         sb.check(ExpectedReadReq(lba_ptr=got_lba_ptr, lba_num=got_lba_num, qid=got_qid))
         model.on_completion()
         accepted_since_reached += 1
-        if len(seen_addrs) < 5:
-            seen_addrs.append(got_lba_ptr)
+        q = got_qid if got_qid < n_queues else 0
+        if len(seen_addrs[q]) < 5:
+            seen_addrs[q].append(got_lba_ptr)
 
     dev.dma_model.rd_req_accept_cb = on_accept
 
@@ -406,16 +409,22 @@ async def _case_small_read_burst(dut, dev, test, lba_num):
     assert ok, f"timed out: only {sb.checked}/{iterations} burst read requests were accepted (short stream)"
     sb.assert_empty()
 
-    # Explicit step-size cross-check on top of the scoreboard's bit-exact match: the observed
-    # address stream must advance by exactly lba_num+1 every step. Direct evidence of
-    # "lba_num=0 -> +1, contiguous, was frozen before", not an indirect scoreboard pass.
-    assert len(seen_addrs) >= 2, "not enough accepted requests observed to check the address step"
-    for prev_addr, next_addr in zip(seen_addrs, seen_addrs[1:]):
-        step = next_addr - prev_addr
-        assert step == lba_num + 1, (
-            f"seq address step was {step}, expected lba_num+1={lba_num + 1} "
-            f"(addresses observed: {seen_addrs!r})"
-        )
+    # Explicit step-size check atop the scoreboard's bit-exact match: WITHIN one queue the address
+    # stream must advance by exactly lba_num+1 every step -- direct evidence of "lba_num=0 -> +1,
+    # contiguous per queue", not an indirect scoreboard pass.
+    steps_checked = 0
+    for q, addrs in seen_addrs.items():
+        for prev_addr, next_addr in zip(addrs, addrs[1:]):
+            step = next_addr - prev_addr
+            assert step == lba_num + 1, (
+                f"queue {q}: seq address step was {step}, expected lba_num+1={lba_num + 1} "
+                f"(addresses observed: {addrs!r})"
+            )
+            steps_checked += 1
+    assert steps_checked > 0, (
+        f"no queue saw two accepted requests, so the address step was never checked "
+        f"(addresses observed: {seen_addrs!r})"
+    )
 
     model.stop_burst()
     dev.dma_model.rd_req_accept_cb = None
@@ -664,6 +673,12 @@ async def _case_throughput_multi_point(dut, dev, test, n_queues, n_points=6):
         )
 
 
+# Engine-side requests scored per queue: bounded below REQ_FIFO_ITEMS(16, IF_PIPE_REQ_ITEMS) so
+# no queue's credits saturate mid-window (breaking round-robin scoring), and above the DMA round
+# trip so the window scores more than just the LFSR seed.
+ENGINE_SCORED_REQS_PER_QUEUE = 12
+
+
 async def _case_rd_burst_and_rand(dut, dev, test):
     """Stage 3.4: two directed corner cases for the read burst path, folded into one (both need
     NUM_QUEUES>1 to be meaningful and are skipped otherwise):
@@ -671,6 +686,20 @@ async def _case_rd_burst_and_rand(dut, dev, test):
         instead of every 1 (user_core_test_arch.vhd's rd_qid_rr_p / RoundRobinQid.next_qid()).
       - random addressing: LBA_PTR follows the LFSR (lfsr_rand_addr_gen_i / lfsr21_step) instead
         of the sequential counter.
+
+    Scored at the ENGINE boundary (rd_req_accepted_s / nvme_rd_req_qid_s / core_rd_req_lba_ptr),
+    unlike every other case here, because NEITHER property survives user_core_if_pipe.vhd. Its
+    read-request path is a per-queue FIFO whose ENG_RD_REQ_RDY is credit-gated (:356), not gated
+    on the DMA's ready: the engine issues one request per DMA_CLK cycle into those FIFOs, and the
+    DMA drains them through mv_pick_p's own rotation over the non-empty queues. Both consequences
+    are measured, not assumed. The pin-side QID sequence is that rotation (0,1,2,3,...) and
+    carries no trace of RD_BURST; and the LFSR, which steps on core_op_stat_vld, is still on its
+    seed for the engine's first ~32 addresses, because one DMA round trip costs ~22 cycles more
+    than the engine needs to fill the FIFOs. A pin-side scoreboard could only assert things
+    neither register controls.
+
+    The two model hooks are driven by the events they name: the sequential counter advances on the
+    accept and the LFSR on the completion, exactly where user_core_test_arch.vhd puts them.
     """
     if NUM_QUEUES <= 1:
         return
@@ -686,15 +715,54 @@ async def _case_rd_burst_and_rand(dut, dev, test):
     lba_ptr = 0x7000
     lba_num = 1
     iterations = 1000
+    scored_reqs = ENGINE_SCORED_REQS_PER_QUEUE * n_queues
+
+    def _lvl(sig):
+        """int() of a signal, treating an X/U bit as 0 -- these read X for the first cycles out
+        of reset, where a bare int() would raise and kill the monitor."""
+        try:
+            return int(sig.value)
+        except ValueError:
+            return 0
+
+    lfsr_stepped = False
+    scored_after_step = 0
+
+    async def _engine_monitor():
+        # An accept and a completion can land in the same cycle. The accepted request carries the
+        # address the LFSR held BEFORE that cycle's step (both registers take this cycle's
+        # inputs), so the accept is scored first and the completion applied after.
+        nonlocal lfsr_stepped, scored_after_step
+        while sb.checked < scored_reqs:
+            await RisingEdge(dut.DMA_CLK)
+            await ReadOnly()
+            if _lvl(dut.rd_req_accepted_s) == 1:
+                sb.expect(model.next_burst_request())
+                sb.check(ExpectedReadReq(
+                    lba_ptr=_lvl(dut.core_rd_req_lba_ptr),
+                    lba_num=_lvl(dut.core_rd_req_lba_num),
+                    qid=_lvl(dut.nvme_rd_req_qid_s),
+                ))
+                if lfsr_stepped:
+                    scored_after_step += 1
+            if _lvl(dut.core_op_stat_vld) == 1:
+                model.on_completion()
+                lfsr_stepped = True
+
+    # Pin-side tally only. The pipe's arbiter decides the order there, so nothing about that order
+    # is asserted -- only that the requests the engine issued do reach the DMA.
+    pin_accepts = 0
 
     def on_accept(got_lba_ptr, got_lba_num, got_qid):
-        sb.expect(model.next_burst_request())
-        sb.check(ExpectedReadReq(lba_ptr=got_lba_ptr, lba_num=got_lba_num, qid=got_qid))
-        model.on_completion()
+        nonlocal pin_accepts
+        pin_accepts += 1
 
     dev.dma_model.rd_req_accept_cb = on_accept
 
     model.start_burst(lba_ptr, lba_num, addressing="rand", contig=False)
+    # Started before tst_trigg: rd_req_vld_reg_p only raises the generator's VLD once the test is
+    # running (or contig_test is set), so no accept can be missed ahead of the monitor.
+    cocotb.start_soon(_engine_monitor())
 
     await aset(test, "rd_req_lba_ptr", lba_ptr)
     await aset(test, "rd_req_lba_num", lba_num)
@@ -703,9 +771,28 @@ async def _case_rd_burst_and_rand(dut, dev, test):
     await aset(test, "contig_test", False)
     await aset(test, "tst_iterations", iterations)  # fires tst_trigg -- must be written LAST
 
-    ok = await _wait_until(lambda: sb.checked >= iterations, dut, max_cycles=iterations * 50)
-    assert ok, f"timed out: only {sb.checked}/{iterations} rd_burst=2/rand requests were accepted"
+    ok = await _wait_until(lambda: sb.checked >= scored_reqs, dut, max_cycles=scored_reqs * 200)
+    assert ok, (
+        f"timed out: only {sb.checked}/{scored_reqs} rd_burst=2/rand requests were scored at the "
+        f"engine boundary"
+    )
     sb.assert_empty()
+
+    # Anti-vacuity guard: some scored request must carry a STEPPED LFSR value, not the seed. The
+    # engine issues one request/cycle while the first completion is a round trip away, so closing
+    # before it would pass unchanged with on_completion deleted.
+    assert scored_after_step > 0, (
+        f"every one of the {scored_reqs} scored addresses predated the first completion, so they "
+        f"were all the LFSR seed and the lfsr21_step/on_completion path went unchecked"
+    )
+
+    # The engine can run a whole credit pool ahead of the DMA, so a window that closes inside that
+    # pool has not yet shown anything reached the pins. This is what the pin side can still prove.
+    ok = await _wait_until(lambda: pin_accepts >= 2 * n_queues, dut, max_cycles=20000)
+    assert ok, (
+        f"only {pin_accepts} of the engine's {sb.checked} accepted requests reached the DMA -- "
+        f"the request pipe is not draining"
+    )
 
     model.stop_burst()
     dev.dma_model.rd_req_accept_cb = None
