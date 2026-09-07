@@ -8,7 +8,7 @@
 RM ?= rm -f
 TCLSH ?= tclsh
 
-.PHONY: simulation vhdocl cocotb clean_common
+.PHONY: simulation vhdocl cocotb clean_common coverage-report
 
 GEN_MK_TARGETS += simulation vhdocl cocotb ghdl-sim nvc nvc-sim nvc-elab nvc-run
 simulation: GEN_MK_ENV=SIM_SCRIPT=$(SIM_SCRIPT) SIM_FLAGS=$(SIM_FLAGS)
@@ -23,6 +23,21 @@ nvc-run: NETCOPE_ENV+=PLATFORM_TAGS="$(NVC_PLATFORM_TAGS)"
 clean_common:
 	-@$(RM) -r nvcwork/ $(NETCOPE_TEMP)
 	-@$(RM) DevTree_paths.txt vhdocl.doc vhdocl.conf
+
+# coverage-report: recursively merges every *.ncdb under cwd, renders an HTML report. Run after
+# seeded COVERAGE_EN=... runs (distinct COVERAGE_FILE each) for multi-seed coverage. Needs no
+# Modules.tcl, so it skips the GEN_MK_TARGET machinery below.
+COVERAGE_MERGED     ?= coverage_merged.ncdb
+COVERAGE_REPORT_DIR ?= coverage_report
+coverage-report:
+	$(eval NCDB_FILES := $(shell find . -name '*.ncdb' -not -name '$(notdir $(COVERAGE_MERGED))'))
+	@if [ -z "$(NCDB_FILES)" ]; then \
+		echo "*** no .ncdb coverage databases found under $(CURDIR) -- run with COVERAGE_EN=... first ***" >&2; \
+		exit 1; \
+	fi
+	nvc --cover-merge -o $(COVERAGE_MERGED) $(NCDB_FILES)
+	nvc --cover-report -o $(COVERAGE_REPORT_DIR) $(COVERAGE_MERGED)
+	@echo "Coverage report: $(COVERAGE_REPORT_DIR)/index.html (merged from: $(NCDB_FILES))"
 
 MAKE_REC = $(MAKE) -f $(firstword $(MAKEFILE_LIST)) --no-print-directory $(NETCOPE_ENV)
 
@@ -62,18 +77,44 @@ ifneq ($(RANDOM_SEED),)
 COCOTB_RUN_ARGS += COCOTB_RANDOM_SEED=$(RANDOM_SEED)
 endif
 
-# Debug/NVC options: DEBUG_ENABLE=true adds waveform flags to nvc (--no-collapse at elaboration,
-# -w/--dump-arrays at run); false (default) omits them, avoiding the waveform-dump overhead.
+# Without this, nvc keeps running after a PSL/ERROR violation and cocotb prints a clean PASS
+# summary -- only nvc's exit code goes nonzero. This flag aborts the run so cocotb marks it FAIL
+# too. "error" avoids nvc's own "note"/"warning" messages.
+NVC_RUN_ARGS += --exit-severity=error
+
+# DEBUG_ENABLE=true adds waveform/introspection flags: --no-collapse at elaboration (keeps all
+# signals visible), -w and --dump-arrays at run (dumps the waveform incl. arrays). Default false
+# skips the dumping overhead.
 DEBUG_ENABLE?=false
 ifeq ($(DEBUG_ENABLE),true)
 NVC_ELAB_ARGS += --no-collapse
 NVC_RUN_ARGS  += -w --dump-arrays
 endif
 
-# Coverage options
+# COVERAGE_EN selects nvc coverage kinds at ELABORATION only; toggling it needs re-elaboration. Off
+# by default. COVERAGE_FILE must be distinct per independently-seeded/sharded run, or a later run
+# silently overwrites the earlier database.
+COVERAGE_EN ?=
 ifneq ($(COVERAGE_EN),)
+ifeq ($(COVERAGE_EN),all)
 NVC_ELAB_ARGS += --cover
+else
+NVC_ELAB_ARGS += --cover=$(COVERAGE_EN)
 endif
+ifneq ($(COVERAGE_FILE),)
+NVC_ELAB_ARGS += --cover-file=$(COVERAGE_FILE)
+endif
+endif
+
+# check_cocotb_results: fails the recipe when results.xml records a failure -- --exit-severity=error
+# only makes nvc's exit nonzero on a VHDL/PSL abort, not a TestFailure, so rc would stay 0.
+# expect_fail=True scores PASSED, so it won't trip this.
+define check_cocotb_results
+	@if grep -q '<failure' results.xml 2>/dev/null; then \
+		echo "*** cocotb reported a test FAILURE -- see results.xml ***" >&2; \
+		exit 1; \
+	fi
+endef
 
 COCOTB_ENV=\
 COCOTB_TEST_MODULES=$(COCOTB_TEST_MODULES) \
@@ -104,23 +145,25 @@ nvc-run: NVC_LOAD=--load $(shell cocotb-config --lib-name-path vhpi nvc)
 NVC_RUN_ENV ?=
 nvc: $(MOD)
 	$(eval TOP_LEVEL_ENT_LC:=$(shell echo $(TOP_LEVEL_ENT) | tr '[:upper:]' '[:lower:]'))
-	nvc --work=nvcwork -H 1G -M 16G --std=2008 -a --relaxed $(filter %.vhd,$(MOD))
+	nvc --work=nvcwork -H 1G -M 16G --std=2008 -a --relaxed --psl $(filter %.vhd,$(MOD))
 	nvc --work=nvcwork -H 1G -M 16G -e -O3 $(NVC_ELAB_ARGS) $(TOP_LEVEL_ENT_LC)
 	$(NVC_RUN_ENV) $(COCOTB_ENV) nvc --work=nvcwork -H 1G -M 16G -r $(NVC_RUN_ARGS) $(TOP_LEVEL_ENT_LC) --ieee-warnings=off $(NVC_LOAD)
+	$(call check_cocotb_results)
 
 # nvc-elab: analyze + elaborate only (no run). Used by the parallel runner
 # (make sim-parallel) to build nvcwork/ once before launching per-test shards.
 nvc-elab: $(MOD)
 	$(eval TOP_LEVEL_ENT_LC:=$(shell echo $(TOP_LEVEL_ENT) | tr '[:upper:]' '[:lower:]'))
-	nvc --work=nvcwork -H 1G -M 16G --std=2008 -a --relaxed $(filter %.vhd,$(MOD))
+	nvc --work=nvcwork -H 1G -M 16G --std=2008 -a --relaxed --psl $(filter %.vhd,$(MOD))
 	nvc --work=nvcwork -H 1G -M 16G -e -O3 $(NVC_ELAB_ARGS) $(TOP_LEVEL_ENT_LC)
 
-# nvc-run: run only, reusing an already-built nvcwork/ (no analyze/elaborate) -- for fast
-# iteration on cocotb Python, which nvc loads at run time. Run `make nvc-elab` once, then
-# `COCOTB_TESTCASE=<name> make nvc-run` per edit.
+# nvc-run reuses an existing nvcwork/ (no analyze/elaborate): fast iteration on cocotb Python,
+# loaded at run time. Run `make nvc-elab` once, then `COCOTB_TESTCASE=<name> make nvc-run` per
+# edit, skipping ~50 s of analyze+elaborate.
 nvc-run: $(MOD)
 	$(eval TOP_LEVEL_ENT_LC:=$(shell echo $(TOP_LEVEL_ENT) | tr '[:upper:]' '[:lower:]'))
 	$(NVC_RUN_ENV) $(COCOTB_ENV) nvc --work=nvcwork -H 1G -M 16G -r $(NVC_RUN_ARGS) $(TOP_LEVEL_ENT_LC) --ieee-warnings=off $(NVC_LOAD)
+	$(call check_cocotb_results)
 
 else
 .PHONY: $(GEN_MK_NAME)
