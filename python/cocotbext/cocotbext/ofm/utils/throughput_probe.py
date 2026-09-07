@@ -102,6 +102,95 @@ class ThroughputProbeMfbInterface(ThroughputProbeInterface):
         return self._agent._regions * self._agent._region_items
 
 
+class ThroughputProbeAxiInterface(ThroughputProbeInterface):
+    """Throughput probe interface for a cocotbext-axi AxiSlaveWrite / AxiSlaveRead (or any
+    subclass of them, e.g. one that adds a memory-latency model).
+
+    Unlike MFB/MVB there is no cocotbext-axi monitor object carrying a valid-item counter, so this
+    interface supplies one itself -- it does NOT sample the bus. It wraps the slave's own
+    byte-level access hook, which cocotbext-axi calls exactly once per contiguous run of bytes it
+    has already taken off the wire:
+
+      * write (``AxiSlaveWrite._write(address, data)``): cocotbext-axi builds ``data`` from the
+        WSTRB-enabled byte lanes of a W beat it has just accepted (WVALID and WREADY), so
+        ``len(data)`` is popcount(WSTRB). Counting W BEATS x byte_lanes instead would overstate
+        the rate, since a padding beat carries WSTRB=0 and a tail beat is partially strobed.
+      * read (``AxiSlaveRead._read(address, length)``): called once per R beat with
+        ``length = byte_lanes``. The AXI read channel has no strobe, so this is an UPPER BOUND on
+        useful bytes -- a burst whose final beat is only partly consumed still counts in full.
+        It is also charged EARLY: at the point the slave asks its target for the beat, i.e. ahead
+        of any memory-latency model the target applies and ahead of the R channel queue, so a byte
+        is credited up to one memory latency plus the queue depth before RVALID and RREADY meet.
+        That is a constant time SHIFT of the whole series, not a gain or loss of bytes, so a rate
+        measured over a window long compared to that latency is unaffected; a window of the same
+        order as it is not, and should not be measured on this interface.
+
+    Items are BYTES here (item_width = the slave's byte_size, 8 b), and ``items`` is byte_lanes,
+    i.e. the bytes one full-rate cycle could carry -- so ThroughputProbe's efficiency is the
+    port's byte-lane utilisation, and throughput_units="bytes" reads out directly in B/s.
+    """
+    interface_dict = {
+        "clock"     : "clock",
+        "in_reset"  : None,
+        "items"     : "byte_lanes",
+        "item_width": "byte_size",
+        "item_cnt"  : None
+    }
+
+    def __init__(self, agent, direction: str | None = None):
+        """
+        Args:
+            agent: an AxiSlaveWrite or AxiSlaveRead (or subclass).
+            direction: "write" or "read". Inferred from which access hook the agent has when None.
+        """
+        super().__init__(agent)
+        self._item_cnt = 0
+
+        if direction is None:
+            direction = "write" if hasattr(agent, "_write") else "read"
+
+        if direction == "write":
+            inner_write = agent._write
+
+            async def _counting_write(address, data):
+                self._item_cnt += len(data)
+                return await inner_write(address, data)
+
+            # Instance attribute shadowing the bound method: _process_write() calls self._write(),
+            # so it picks this up, and inner_write still runs whatever the class (or a subclass's
+            # latency model) implements.
+            agent._write = _counting_write
+
+        elif direction == "read":
+            inner_read = agent._read
+
+            async def _counting_read(address, length):
+                self._item_cnt += length
+                return await inner_read(address, length)
+
+            agent._read = _counting_read
+
+        else:
+            raise ValueError(f"Unknown AXI direction '{direction}'. Use 'write' or 'read'.")
+
+    @property
+    def item_cnt(self):
+        """Overrides 'item_cnt' in interface_dict: bytes accepted, accumulated by the hook above."""
+        return self._item_cnt
+
+    @property
+    def in_reset(self):
+        """
+        Overrides 'in_reset' in interface_dict.
+
+        cocotbext-axi's ``Reset`` base class already tracks this in ``_reset_state`` (it is what
+        gates the slave's own processing coroutines) with the configured polarity applied, so it
+        is read straight from there rather than re-deriving it from the raw signal. Falls back to
+        False when the agent is not a cocotbext-axi Reset user, matching the MFB/MVB interfaces.
+        """
+        return bool(getattr(self._agent, "_reset_state", False))
+
+
 class ThroughputProbe(Probe):
     """
     Probe for measuring and logging throughput and efficiency.

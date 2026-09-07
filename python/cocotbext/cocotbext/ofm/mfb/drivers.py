@@ -29,10 +29,18 @@ class MFBDriver(ValidatedBusDriver):
         super().__init__(entity, name, clock, valid_generator=vld_gen, **kwargs)
         self.clock = clock
         self.frame_cnt = 0
+        # item_cnt: driven-item counterpart of MFBMonitor.item_cnt; ThroughputProbeMfbInterface
+        # expects it on any MFBDriver, so a driver-only bus without it raised AttributeError.
+        # Incremented once per frame, at its last accepted word (SRC_RDY and DST_RDY).
+        self.item_cnt = 0
         self._regions, self._region_size, self._block_size, self._item_width, self._meta_width = get_mfb_params(
             self.bus, mfb_params
         )
 
+        # Items per region, the same attribute MFBMonitor exposes. ThroughputProbeMfbInterface
+        # reads _regions*_region_items to get the bus' items-per-cycle capacity, so a driver
+        # without it cannot be probed even though that interface accepts one.
+        self._region_items = self._region_size * self._block_size
         self._word_bit_width = self._regions*self._region_size * self._block_size * self._item_width
         self._rgn_bit_width = self._region_size * self._block_size * self._item_width
         self._blk_bit_width = self._block_size * self._item_width
@@ -86,7 +94,10 @@ class MFBDriver(ValidatedBusDriver):
             self._be_int = None
 
         # Base signals
-        self._data_int = LogicArray(0, self._word_bit_width)
+        # `_data_int` is a plain int, not a LogicArray -- LogicArray.__setitem__ makes a Logic
+        # object per bit per slice, the hot-path cost for a wide accumulator. An int shift/masks
+        # cheaply, converting once on assignment to `bus.data.value`.
+        self._data_int = 0
         self._sof_int = LogicArray(0, self._regions)
         self._eof_int = LogicArray(0, self._regions)
         self._sof_pos_int = LogicArray(0, self._regions*max(1, self._sof_pos_w_pr))
@@ -128,17 +139,21 @@ class MFBDriver(ValidatedBusDriver):
             else:
                 raise TypeError(f"Unsupported type of data in MfbTransaction: {type(trans.data)}")
 
-            if hasattr(self.bus, "meta") and hasattr(trans, "meta"):
-                if isinstance(trans.meta, bytes):
-                    meta = LogicArray.from_bytes(trans.meta, byteorder="big")
-                elif isinstance(trans.meta, LogicArray):
-                    meta = trans.meta
-                elif isinstance(trans.meta, int):
-                    meta = LogicArray.from_unsigned(trans.meta, self._meta_width)
+            if hasattr(self.bus, "meta"):
+                # NOTE: buses with no "meta" signal (self._meta_width == 0, e.g. HBM_WRITE_ADAPTER's
+                # RX_MFB) must leave `meta` as None: LogicArray(0, 0) isn't constructible, and
+                # `meta` is never dereferenced when hasattr(bus, "meta") is False anyway.
+                if hasattr(trans, "meta"):
+                    if isinstance(trans.meta, bytes):
+                        meta = LogicArray.from_bytes(trans.meta, byteorder="big")
+                    elif isinstance(trans.meta, LogicArray):
+                        meta = trans.meta
+                    elif isinstance(trans.meta, int):
+                        meta = LogicArray.from_unsigned(trans.meta, self._meta_width)
+                    else:
+                        raise TypeError(f"Unsupported type of meta in MfbTransaction: {type(trans.meta)}")
                 else:
-                    raise TypeError(f"Unsupported type of meta in MfbTransaction: {type(trans.meta)}")
-            else:
-                meta = LogicArray(0, self._meta_width)
+                    meta = LogicArray(0, self._meta_width)
 
             if hasattr(self.bus, "be") and hasattr(trans, "be"):
                 if isinstance(trans.be, int):
@@ -170,12 +185,13 @@ class MFBDriver(ValidatedBusDriver):
         if self.log.isEnabledFor(logging.DEBUG):
             data_disp = data if data is not None else LogicArray.from_bytes(data_bytes, byteorder="little")
             self.log.debug(f"Data: (len {data_bit_len} bits = {data_bit_len // 8} bytes)\n{hex(data_disp)}")
-            self.log.debug(f"Meta: (len {len(meta)} bits)\n{hex(meta)}")
-            self.log.debug(f"BE: {hex(be)}")
+            if meta is not None:
+                self.log.debug(f"Meta: (len {len(meta)} bits)\n{hex(meta)}")
+            if be is not None:
+                self.log.debug(f"BE: {hex(be)}")
 
-        # Parse packet data into separate bus words while varying valid and invalid cycles (if a
-        # valid/invalid generator is given).
-        # Bit index in the input data
+        # Parses packet data into separate bus words, varying valid/invalid cycles if a generator
+        # is set; inp_data_blk_idx tracks the bit offset into the input data.
         inp_data_blk_idx = 0
         pkt_finished = False
 
@@ -230,11 +246,15 @@ class MFBDriver(ValidatedBusDriver):
                         # instead of re-slicing the whole payload LogicArray per block (O(n^2) over the packet).
                         byte_lo = (inp_data_blk_idx*self._blk_bit_width) // 8
                         byte_hi = byte_lo + (data_rest_len // 8)
-                        self._data_int[bus_idx_high : bus_idx_low] \
-                            = LogicArray.from_bytes(data_bytes[byte_lo:byte_hi], byteorder="little")
+                        blk_value = int.from_bytes(data_bytes[byte_lo:byte_hi], byteorder="little")
                     else:
-                        self._data_int[bus_idx_high : bus_idx_low] \
-                            = data[inp_data_blk_idx*self._blk_bit_width + data_rest_len -1 : inp_data_blk_idx*self._blk_bit_width]
+                        blk_value = int(data[inp_data_blk_idx*self._blk_bit_width + data_rest_len -1 : inp_data_blk_idx*self._blk_bit_width])
+                    # Merge this block's bits into the word accumulator via int shift/mask (see the
+                    # NOTE in `_clr_internal_bus`). `& blk_mask` guards a wider-than-range value;
+                    # clearing the destination bits keeps "last write wins" semantics.
+                    blk_mask = (1 << data_rest_len) - 1
+                    self._data_int &= ~(blk_mask << bus_idx_low)
+                    self._data_int |= (blk_value & blk_mask) << bus_idx_low
                     if hasattr(self.bus, 'be'):
                         self.log.debug(f"BE Bus range to write [{bus_idx_high // 8} : {bus_idx_low // 8}]")
                         self.log.debug(f"Range of input BE [{inp_data_blk_idx*self._blk_byte_width + (data_rest_len // 8) -1} : {inp_data_blk_idx*self._blk_byte_width}]")
@@ -356,5 +376,8 @@ class MFBDriver(ValidatedBusDriver):
         assert not self._wordQ
 
         self.frame_cnt += 1
+        # Only reached once every word of this frame has been accepted by the sink (the send loop
+        # above blocks in _wait_ready() until DST_RDY), so this counts transferred items.
+        self.item_cnt += data_bit_len // self._item_width
         self.log.debug(f"Transaction send finished!")
         self.log.debug("==================================================================================================")
