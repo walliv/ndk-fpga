@@ -6,13 +6,18 @@
 
 create_pblock pblock_pcie_i
 add_cells_to_pblock [get_pblocks pblock_pcie_i] [get_cells -quiet [list core_logic_i/pcie_i]]
-resize_pblock [get_pblocks pblock_pcie_i] -add {CLOCKREGION_X7Y1:CLOCKREGION_X7Y3}
-set_property IS_SOFT FALSE [get_pblocks pblock_pcie_i]
+resize_pblock [get_pblocks pblock_pcie_i] -add {CLOCKREGION_X7Y0:CLOCKREGION_X7Y3}
+set_property IS_SOFT 0 [get_pblocks pblock_pcie_i]
 
-create_pblock pblock_1
-add_cells_to_pblock [get_pblocks pblock_1] [get_cells -quiet [list {core_logic_i/dma_g[0].dma_i}]]
-resize_pblock [get_pblocks pblock_1] -add {CLOCKREGION_X4Y0:CLOCKREGION_X6Y3}
+create_pblock pblock_dma
+add_cells_to_pblock [get_pblocks pblock_dma] [get_cells -quiet [list {core_logic_i/dma_g[0].dma_i/card2nvme_ctrl_i} {core_logic_i/dma_g[0].dma_i/nvme2card_ctrl_i}]]
+resize_pblock [get_pblocks pblock_dma] -add {CLOCKREGION_X4Y0:CLOCKREGION_X6Y3}
+set_property IS_SOFT 0 [get_pblocks pblock_dma]
 
-create_pblock pblock_data_logger_i
-add_cells_to_pblock [get_pblocks pblock_data_logger_i] [get_cells -quiet [list core_logic_i/user_core_i/data_logger_i core_logic_i/user_core_i/iops_cntr_i core_logic_i/user_core_i/latency_meter_i core_logic_i/user_core_i/lfsr_rand_addr_gen_i core_logic_i/user_core_i/mfb_generator_i core_logic_i/user_core_i/mfb_reconfigurator_i core_logic_i/user_core_i/rd_mfb_speed_meter_i core_logic_i/user_core_i/wr_mfb_speed_meter_i]]
-resize_pblock [get_pblocks pblock_data_logger_i] -add {CLOCKREGION_X4Y0:CLOCKREGION_X4Y3}
+# Co-locates the WRBUFF drain FIFO with its consumer: that path is route-dominated and closes
+# only with both ends in one region. Four regions, not two -- that consumer is ~41k
+# cells and two leave it route-bound. Re-measure before shrinking.
+create_pblock pblock_wrbuff_drain
+add_cells_to_pblock [get_pblocks pblock_wrbuff_drain] [get_cells -quiet [list {core_logic_i/dma_g[0].dma_i/nvme2card_ctrl_i/wrbuff_fifo_i} {core_logic_i/dma_g[0].dma_i/nvme2card_ctrl_i/hbm_stream_writer_i}]]
+resize_pblock [get_pblocks pblock_wrbuff_drain] -add {CLOCKREGION_X5Y2:CLOCKREGION_X6Y3}
+set_property IS_SOFT 0 [get_pblocks pblock_wrbuff_drain]

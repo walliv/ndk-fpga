@@ -25,19 +25,38 @@ OP_STAT_CODE_OOR = 2   # LBA Out of Range ("10"): completed without moving data
 # QID_W, matching user_core_test_arch.vhd's `maximum(1, log2(NUM_QUEUES))` (ceil-log2, log2(1)=0
 # by math_pack convention). Needed for NVME_WR_MFB_META's width (SQE_LBA_PTR_W(64) + QID_W).
 _NUM_QUEUES = int(os.environ.get("NUM_QUEUES", "1"))
+# Every queue offered ready at once (see the per-queue handshake note in __init__).
+ALL_QUEUES_RDY = (1 << _NUM_QUEUES) - 1
+
+
+def _as_int(value):
+    """int() of a signal value, treating any X/U bit as 0.
+
+    A per-queue vector reads as X for the first cycles out of reset, and a bare int() raises there,
+    which would kill the driving loop rather than simply skipping the cycle."""
+    try:
+        return int(value)
+    except ValueError:
+        return 0
 QID_W = max(1, (_NUM_QUEUES - 1).bit_length())
 SQE_LBA_PTR_W = 64
+# nvme_meta_pack.CQ_ENTRY_CMD_ID_W -- the NVMe Command Identifier width.
+CQ_ENTRY_CMD_ID_W = 16
 
-# MFB geometry passed explicitly: get_mfb_params() infers a wrong block_size/item_width=1
-# from EOF_POS here, tripping MFBDriver's assert. meta_width must be given too, or
-# trans.meta stays unpopulated.
-_MFB_PARAMS = {
+# MFB geometry passed explicitly: get_mfb_params() assumes EOF_POS encodes BLOCK_SIZE, but here
+# it encodes log2(REGION_SIZE*BLOCK_SIZE), deriving a wrong block_size and item_width=1.
+# meta_width must be given too, or trans.meta stays unpopulated.
+_WR_MFB_PARAMS = {
     "regions": 1,
     "region_size": 8,
     "block_size": 8,
     "item_width": 8,
     "meta_width": SQE_LBA_PTR_W + QID_W,
 }
+
+# RD_MFB_META carries the identity of the command whose data the frame holds (QID above CID), a
+# different field from WR_MFB_META's LBA+QID, so the two buses need separate params.
+_RD_MFB_PARAMS = dict(_WR_MFB_PARAMS, meta_width=QID_W + CQ_ENTRY_CMD_ID_W)
 
 
 class SimplifiedDmaModel:
@@ -90,9 +109,9 @@ class SimplifiedDmaModel:
         self._bp_enabled = False  # backpressure feature armed (toggled by enable/disable_backpressure)
         self._bp_active = False  # backpressure window currently in effect (RDY/DST_RDY held low)
         self._op_stat_pending = []  # list of (type, code, done_event_or_None) awaiting dispatch, FIFO
-        # Optional DATA INTEGRITY store (LBA -> 512-byte sector): enabled, READ returns bytes a
-        # prior WRITE stored, so IUVENTUS_INTEGRITY_CHECKER's comparison runs end-to-end;
-        # disabled, READ returns a fixed pattern.
+        # Optional write/read-back DATA INTEGRITY store, byte-address LBA -> 512-byte sector.
+        # Enabled, a READ returns bytes a prior WRITE stored there so the integrity checker's
+        # read-back compare runs end-to-end; disabled, READ returns the fixed pattern.
         self.data_integrity = False
         self._storage = {}  # 512-aligned byte offset -> bytes(512)
         # Optional OOR modelling: when set, any read/write whose (lba_ptr + sectors) exceeds this
@@ -100,14 +119,23 @@ class SimplifiedDmaModel:
         # LBA-Out-of-Range completion. None = never OOR (default).
         self.lba_space_size = None
 
-        dut.NVME_RD_REQ_RDY.value = 1
-        # Per-queue "DMA can accept a read" (the DMA core's SQ_HAS_SPACE, mirrored via
-        # DMA_IUVENTUS -- NVME_RD_REQ_QUEUE_RDY). This single-outstanding model skips per-queue SQ
-        # occupancy: every queue stays permanently "ready".
-        dut.NVME_RD_REQ_QUEUE_RDY.value = (1 << _NUM_QUEUES) - 1
+        # VLD/RDY are per-queue vectors now, the deleted NVME_RD_REQ_QUEUE_RDY's SQ_HAS_SPACE
+        # meaning having folded into RDY. This single-outstanding model does not track per-queue SQ
+        # occupancy, so it offers every queue ready and gates on its own _rd_busy.
+        dut.NVME_RD_REQ_RDY.value = ALL_QUEUES_RDY
         dut.NVME_OP_STAT_TYPE.value = 0
+        dut.NVME_OP_STAT_QID.value = 0
+        dut.NVME_OP_STAT_CID.value = 0
         dut.NVME_OP_STAT_CODE.value = 0
         dut.NVME_OP_STAT_VLD.value = 0
+        dut.NVME_RD_REQ_CID.value = 0
+        dut.NVME_RD_REQ_CID_VLD.value = 0
+        # Tags handed out to accepted reads. The real DMA draws them from a per-queue pool; this
+        # model only has to be self-consistent: the CID it reports on RD_MFB_META and OP_STAT must
+        # be the one it published for that request.
+        self._next_cid = 0
+        self._inflight_cid = 0
+        self._inflight_qid = 0
         dut.NVME_RD_MFB_DATA.value = 0
         dut.NVME_RD_MFB_SOF.value = 0
         dut.NVME_RD_MFB_EOF.value = 0
@@ -116,8 +144,8 @@ class SimplifiedDmaModel:
         dut.NVME_RD_MFB_SRC_RDY.value = 0
         dut.NVME_WR_MFB_DST_RDY.value = 1
 
-        self._rd_mfb_driver = MFBDriver(dut, "NVME_RD_MFB", clk, mfb_params=_MFB_PARAMS, vld_gen=None)
-        self._wr_mfb_monitor = MFBMonitor(dut, "NVME_WR_MFB", clk, mfb_params=_MFB_PARAMS, trans_type=MfbTransactionWithMeta)
+        self._rd_mfb_driver = MFBDriver(dut, "NVME_RD_MFB", clk, mfb_params=_RD_MFB_PARAMS, vld_gen=None)
+        self._wr_mfb_monitor = MFBMonitor(dut, "NVME_WR_MFB", clk, mfb_params=_WR_MFB_PARAMS, trans_type=MfbTransactionWithMeta)
         self._wr_mfb_monitor.add_callback(self._on_wr_frame)
 
         cocotb.start_soon(self._rd_req_loop())
@@ -132,7 +160,7 @@ class SimplifiedDmaModel:
         self._rd_busy = False
         self._bp_active = False
         self._op_stat_pending.clear()
-        self._dut.NVME_RD_REQ_RDY.value = 1
+        self._dut.NVME_RD_REQ_RDY.value = ALL_QUEUES_RDY
         self._dut.NVME_OP_STAT_VLD.value = 0
 
     def enable_backpressure(self, bp_period: int = 10, bp_low_cycles: int = 3) -> None:
@@ -185,25 +213,48 @@ class SimplifiedDmaModel:
         edge-aligned handshakes (see cocotb_test.py's history for the misdiagnosis this caused)."""
         while True:
             await RisingEdge(self._clk)
-            self._dut.NVME_RD_REQ_RDY.value = int((not self._rd_busy) and (not self._bp_active))
+            accepting = (not self._rd_busy) and (not self._bp_active)
+            self._dut.NVME_RD_REQ_RDY.value = ALL_QUEUES_RDY if accepting else 0
 
             await ReadOnly()
-            vld = bool(self._dut.NVME_RD_REQ_VLD.value)
-            rdy = bool(self._dut.NVME_RD_REQ_RDY.value)
+            vld_vec = _as_int(self._dut.NVME_RD_REQ_VLD.value)
+            rdy_vec = _as_int(self._dut.NVME_RD_REQ_RDY.value)
+            qid = _as_int(self._dut.NVME_RD_REQ_QID.value)
 
-            if self._rd_busy or not (vld and rdy):
+            if vld_vec:
+                # The entity promises at most one VLD bit, on bit QID. Checked rather than assumed:
+                # a second bit, or a bit off QID, would route the request to the wrong queue's SQ
+                # while still looking like a clean handshake here.
+                assert vld_vec & (vld_vec - 1) == 0, (
+                    f"NVME_RD_REQ_VLD has {bin(vld_vec)} set -- at most one queue may offer")
+                assert vld_vec == (1 << qid), (
+                    f"NVME_RD_REQ_VLD={bin(vld_vec)} does not match NVME_RD_REQ_QID={qid}")
+
+            if self._rd_busy or not (vld_vec & rdy_vec):
                 continue
 
-            lba_ptr = int(self._dut.NVME_RD_REQ_LBA_PTR.value)
-            lba_num = int(self._dut.NVME_RD_REQ_LBA_NUM.value)
-            qid = int(self._dut.NVME_RD_REQ_QID.value)
+            lba_ptr = _as_int(self._dut.NVME_RD_REQ_LBA_PTR.value)
+            lba_num = _as_int(self._dut.NVME_RD_REQ_LBA_NUM.value)
 
             self._rd_busy = True
+            self._inflight_cid = self._next_cid
+            self._inflight_qid = qid
+            self._next_cid = (self._next_cid + 1) % (1 << CQ_ENTRY_CMD_ID_W)
 
             if self.rd_req_accept_cb:
                 self.rd_req_accept_cb(lba_ptr, lba_num, qid)
 
+            cocotb.start_soon(self._publish_rd_req_cid(self._inflight_cid))
             cocotb.start_soon(self._service_read(lba_num, lba_ptr))
+
+    async def _publish_rd_req_cid(self, cid: int):
+        """One-cycle CID_VLD pulse a cycle after the accept, mirroring the DMA: the tag is drawn a
+        few cycles after admission, so it cannot be returned in the accept cycle."""
+        await RisingEdge(self._clk)
+        self._dut.NVME_RD_REQ_CID.value = cid
+        self._dut.NVME_RD_REQ_CID_VLD.value = 1
+        await RisingEdge(self._clk)
+        self._dut.NVME_RD_REQ_CID_VLD.value = 0
 
     async def _service_read(self, lba_num: int, lba_ptr: int = 0):
         for _ in range(self.rd_latency_cycles):
@@ -228,11 +279,15 @@ class SimplifiedDmaModel:
             pattern = bytes(out)
         else:
             pattern = bytes([i & 0xFF for i in range(total_bytes)])
-        await self._rd_mfb_driver.send(pattern)
+        # Same identity the accept published, so a consumer can match returned data to its request.
+        await self._rd_mfb_driver.send(MfbTransactionWithMeta(
+            data=pattern,
+            meta=(self._inflight_qid << CQ_ENTRY_CMD_ID_W) | self._inflight_cid,
+        ))
 
-        # Wait one extra RisingEdge past OP_STAT_VLD's fall before re-arming RDY: seq_addr/QID
-        # advance synchronously on NVME_OP_STAT_VLD, so re-arming on the same edge could accept the
-        # next request before that increment settles.
+        # Wait for THIS completion's OP_STAT_VLD to be dispatched, not just queued, before
+        # re-arming RDY: the seq_addr and QID counters advance off that pulse, so re-driving RDY on
+        # the same edge accepts the next request a cycle early, reading the STALE value.
         done = Event()
         self._op_stat_pending.append((OP_STAT_TYPE_READ, OP_STAT_CODE_SUCCESS, done))
         await done.wait()
@@ -274,6 +329,8 @@ class SimplifiedDmaModel:
 
             op_type, op_code, done = self._op_stat_pending.pop(0)
             self._dut.NVME_OP_STAT_TYPE.value = op_type
+            self._dut.NVME_OP_STAT_QID.value = self._inflight_qid
+            self._dut.NVME_OP_STAT_CID.value = self._inflight_cid
             self._dut.NVME_OP_STAT_CODE.value = op_code
             self._dut.NVME_OP_STAT_VLD.value = 1
 

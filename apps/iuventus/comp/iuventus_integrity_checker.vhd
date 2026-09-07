@@ -11,9 +11,9 @@ use ieee.numeric_std.all;
 use work.math_pack.all;
 use work.type_pack.all;
 
--- Writes an address-derived pattern to LBAs, reads it back, compares each beat; QD1 makes a
--- returned RD_MFB frame (no LBA tag) unambiguous. The LBA embedded in every word flags both
--- corruption and wrong-block returns. Control/status only.
+-- Writes an address-derived pattern via WRITE, reads it back via READ, comparing in fabric. QD1
+-- (RD_MFB carries no LBA tag). The pattern embeds the LBA in each 64-bit word, catching bit and
+-- wrong-block errors; ERR_CNT/first mismatch latch for SW.
 entity IUVENTUS_INTEGRITY_CHECKER is
     generic (
         -- User MFB geometry (REGIONS is fixed to 1). DATA width = REGION_SIZE*BLOCK_SIZE*ITEM_WIDTH.
@@ -66,9 +66,9 @@ entity IUVENTUS_INTEGRITY_CHECKER is
 
         -- ---- Operation completion (one pulse per finished NVMe command) ----------------------
         OP_STAT_VLD    : in  std_logic;
-        -- Completion code: "00"=SUCCESS, "01"=generic failure, "10"=LBA Out of Range. Any
-        -- non-"00" code aborts the sweep (-> S_DONE, STS_OP_ERR) so a failed command can't wedge
-        -- the FSM on a CQE or read-back that never drains.
+        -- DMA completion code: "00"=SUCCESS, "01"=failure, "10"=LBA out of range. Any non-"00"
+        -- aborts the sweep (-> S_DONE, STS_OP_ERR set), so a failed command can never wedge the FSM
+        -- waiting on a CQE/data that will never drain.
         OP_STAT_CODE   : in  std_logic_vector(1 downto 0);
 
         -- ---- DMA-Iuventus READ data path (SSD -> host) --------------------------------------
@@ -109,6 +109,9 @@ architecture FULL of IUVENTUS_INTEGRITY_CHECKER is
     signal cur_lba  : unsigned(LBA_PTR_W -1 downto 0);
     signal base_lba : unsigned(LBA_PTR_W -1 downto 0);
     signal end_lba  : unsigned(LBA_PTR_W -1 downto 0);
+    -- end_lba - SECT_SIZE, precomputed at CTL_START. Keeps a 64-bit ADDER out of last_lba: see
+    -- its assignment below.
+    signal last_lba_tgt : unsigned(LBA_PTR_W -1 downto 0);
     signal beat_idx : unsigned(BEAT_IDX_W -1 downto 0);
 
     signal err_cnt   : unsigned(31 downto 0);
@@ -126,7 +129,10 @@ architecture FULL of IUVENTUS_INTEGRITY_CHECKER is
 
 begin
 
-    last_lba <= '1' when (cur_lba + to_unsigned(SECT_SIZE, LBA_PTR_W)) = end_lba else '0';
+    -- cur_lba + SECT = end_lba is equivalent to cur_lba = end_lba - SECT, whose right side is
+    -- loop-invariant, so it is precomputed into last_lba_tgt. That keeps a 64-bit adder off this
+    -- path: an equality compare is an XOR/AND reduction, not a carry chain.
+    last_lba <= '1' when (cur_lba = last_lba_tgt) else '0';
 
     -- ---- Datapath outputs (combinational on state) -------------------------------------------
     WR_MFB_DATA    <= ref_beat(cur_lba, resize(beat_idx, cur_lba'length));
@@ -183,6 +189,12 @@ begin
                             base_lba  <= unsigned(CTL_LBA_BASE);
                             end_lba   <= unsigned(CTL_LBA_BASE)
                                          + resize(unsigned(CTL_LBA_COUNT) * to_unsigned(SECT_SIZE, 32), LBA_PTR_W);
+                            -- Same value less one sector. Config-time path with huge slack, unlike
+                            -- last_lba's. CTL_LBA_COUNT=0 underflows here, but a zero-length sweep
+                            -- is degenerate either way.
+                            last_lba_tgt <= unsigned(CTL_LBA_BASE)
+                                            + resize(unsigned(CTL_LBA_COUNT) * to_unsigned(SECT_SIZE, 32), LBA_PTR_W)
+                                            - to_unsigned(SECT_SIZE, LBA_PTR_W);
                             beat_idx  <= (others => '0');
                             err_cnt   <= (others => '0');
                             err_first <= '0';
