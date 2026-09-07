@@ -11,7 +11,7 @@ description: Access a running NDK bitstream from software using nfb-tools (CLI) 
 - `nfb-info -l` — list cards: index, PCI BDF, card name, running project, version.
 - `nfb-bus -l [-d /dev/nfbX]` — list device-tree nodes / the MI (BAR0) address space.
 - `nfb-bus -d /dev/nfbX -p <node_path> <addr> [value]` — read (no value) or write (with value) a register.
-- `nfb-dma [-d /dev/nfbX] [-v]` — DMA controller / queue status (recognizes CALYPTE/NDP/etc.).
+- `nfb-dma [-d /dev/nfbX] [-v]` — DMA controller / queue status (recognizes CALYPTE/NDP/etc. but not Iuventus).
 - `nfb-boot` — program/boot the card (see the `bitstream-flash` skill).
 
 ## Python (pynfb + ofm)

@@ -76,10 +76,12 @@ class IuventusMiRegMap(IntEnum):
     NVME_WR_BYTES_CNTR_H        = 0x098
     NVME_FLUSH_DISP_CNTR_L      = 0x09C
     NVME_FLUSH_DISP_CNTR_H      = 0x0A0
-    # Stall-class profiler, present only on a PROFILE_EN build. These five do NOT partition a
-    # cycle: an idle cycle sets no bit, so their sum is CLASSIFIED cycles, not elapsed ones.
+    # Stall-class profiler (PROFILE_EN build only). Classes don't partition a cycle: idle sets no
+    # bit, so their sum is CLASSIFIED cycles; divide by TOTAL_CYCLES_CNTR_L and the remainder is idle.
     PROF_DISP_WAIT_SQ_CNTR_L    = 0x0A4
     PROF_DISP_WAIT_SQ_CNTR_H    = 0x0A8
+    # Read-side allocator stall only; the write-side and parked-read allocator stalls are
+    # PROF_ALLOC_WAIT_WR/PROF_ALLOC_WAIT_PEND below.
     PROF_ALLOC_WAIT_CNTR_L      = 0x0AC
     PROF_ALLOC_WAIT_CNTR_H      = 0x0B0
     PROF_DISP_WAIT_TAG_CNTR_L   = 0x0B4
@@ -109,6 +111,16 @@ class IuventusMiRegMap(IntEnum):
     # which only carries SSD completion codes -- a wedged queue never completes anything, so it
     # could never appear there.
     DESIGN_ERR                  = 0x13C
+    # Free-running elapsed-cycle counter: the denominator for every counter above. Without it a
+    # class share says nothing about how busy the DMA was, only how its busy cycles split.
+    TOTAL_CYCLES_CNTR_L         = 0x158
+    TOTAL_CYCLES_CNTR_H         = 0x15C
+    # The remaining two stall classes: OP_PROF(5) = a write blocked on the WRITE allocator,
+    # OP_PROF(6) = a parked read blocked on the READ allocator.
+    PROF_ALLOC_WAIT_WR_CNTR_L   = 0x170
+    PROF_ALLOC_WAIT_WR_CNTR_H   = 0x174
+    PROF_ALLOC_WAIT_PEND_CNTR_L = 0x178
+    PROF_ALLOC_WAIT_PEND_CNTR_H = 0x17C
 
 
 # Base offset and per-queue slot stride of the PER-QUEUE 2D register block. Queue 0 is q=0 of it
