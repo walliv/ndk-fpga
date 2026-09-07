@@ -455,7 +455,9 @@ begin
 
         POINTER_WIDTH          => POINTER_WIDTH,
         SPLIT_READ_PORTS       => FALSE,
-        READ_BARREL_SHIFTER_EN => (FALSE, TRUE)
+        -- PCIE_CQ_MFB_REGIONS is 1 or 2 depending on the synth config: named association with
+        -- "others" keeps port A's (index 0) shifter enabled and is legal for either array size.
+        READ_BARREL_SHIFTER_EN => (0 => TRUE, others => FALSE)
     )
     port map (
         CLK   => CLK,
