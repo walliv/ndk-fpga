@@ -68,7 +68,7 @@ set SYNTH_FLAGS(PPLACE_PHYS_OPT_DIRECTIVE) "AggressiveExplore"
 # Post-route phys_opt: build/Vivado.inc.tcl only enables STEPS.POST_ROUTE_PHYS_OPT_DESIGN when
 # this variable exists, and no other app in the repo sets it. It is Vivado's last-mile step, worth
 # having on a design whose margin is tens of ps.
-set SYNTH_FLAGS(PROUTE_PHYS_OPT_DIRECTIVE) "AggressiveExplore"
+set SYNTH_FLAGS(PROUTE_PHYS_OPT_DIRECTIVE) "ExploreWithAggressiveHoldFix"
 # PLACE_DIRECTIVE stays ExtraTimingOpt. AltSpreadLogic_medium trades timing for spreading, the
 # wrong trade on a design whose worst paths are inside the CQ write buffer.
 set SYNTH_FLAGS(PLACE_DIRECTIVE)           "ExtraTimingOpt"

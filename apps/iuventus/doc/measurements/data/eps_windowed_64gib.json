@@ -1,0 +1,35 @@
+[
+  {
+    "queues": 1,
+    "sectors_per_queue": 134217728,
+    "reps": 10,
+    "eps_median": 463534116.7449951,
+    "eps_min": 463452339.1723633,
+    "eps_max": 463679313.65966797,
+    "gbps_median": 7.416545867919922,
+    "spread_pct": 0.0489660801881285,
+    "count_mismatches": 0
+  },
+  {
+    "queues": 2,
+    "sectors_per_queue": 134217728,
+    "reps": 10,
+    "eps_median": 451420783.99658203,
+    "eps_min": 451316356.65893555,
+    "eps_max": 451528549.19433594,
+    "gbps_median": 7.2227325439453125,
+    "spread_pct": 0.04700548643812494,
+    "count_mismatches": 0
+  },
+  {
+    "queues": 4,
+    "sectors_per_queue": 134217728,
+    "reps": 10,
+    "eps_median": 464620113.37280273,
+    "eps_min": 464611053.4667969,
+    "eps_max": 464715003.96728516,
+    "gbps_median": 7.433921813964844,
+    "spread_pct": 0.022373224381888362,
+    "count_mismatches": 0
+  }
+]

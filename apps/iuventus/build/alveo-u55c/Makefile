@@ -14,7 +14,10 @@ APP_CONF=app_conf.tcl
 
 PCIE_CONF=1xGen4x8
 DMA_TYPE=5
-USR_CORE_ARCH=TEST
+# Which USER_CORE architecture to build: TEST is the traffic generator plus integrity checker,
+# GROUPBY is the streaming aggregation engine. Override on the command line, e.g.
+# `make USR_CORE_ARCH=GROUPBY`.
+USR_CORE_ARCH?=TEST
 
 USER_ENV?=
 

@@ -1,0 +1,2 @@
+set SYNTH_FLAGS(FPGA) "xcu55c-fsvh2892-2L-e"
+set CLK_PERIOD 4.0
