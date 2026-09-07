@@ -13,29 +13,9 @@ use IEEE.numeric_std.all;
 use work.math_pack.all;
 use work.type_pack.all;
 
--- This component instantiaties data buffer for every channel. Each buffer consists of an
--- even/odd **row-banked** memory array that totals the size of the input MFB bus in bytes, i.e.
--- 32 \* *MFB_REGIONS*. Rows (one whole MFB word wide) with an even index live in "bank 0", rows
--- with an odd index live in "bank 1"; since a barrel-rotated unaligned write only ever needs two
--- *neighbouring* rows (``row`` and ``row+1``) simultaneously, and neighbouring rows always fall
--- into different banks, every bank only needs a single shared address plus per-byte write enables
--- (no more per-byte/per-DWord address plumbing). This banking is what makes it possible to map the
--- array onto URAM (see :vhdl:entity:`TDP_BRAM_BE`) in addition to BRAM: see :vhdl:genconstant:`RAM_TYPE`.
---
--- Since one array can contain much more data than the largest packet able to be transmitted on a
--- channel, the array is shared between multiple channels. The amount of channels sharing one array
--- depends on :vhdl:genconstant:`POINTER_WIDTH`, :vhdl:genconstant:`MFB_REGIONS` and
--- :vhdl:genconstant:`RAM_TYPE`. See readme.rst for the resulting resource/sharing table.
---
--- .. NOTE:: Requiring more channels than the maximum amount per array results in an instantiation
---           of multiple memory arrays.
---
--- On the output, there is a standard RAM reading interface for multiple channels. Upon setting the
--- address on the :vhdl:portsignal:`RD_ADDR`, an index of a channel on :vhdl:portsignal:`RD_CHAN` and
--- asserting :vhdl:portsignal:`RD_EN`, the
--- core asserts :vhdl:portsignal:`RD_DATA_VLD` 1 or more clock periods later when valid data are
--- available on the :vhdl:portsignal:`RD_DATA` output port.
---
+-- Each channel's buffer is an even/odd row-banked array: a barrel-rotated write only touches
+-- two neighbouring rows, always in different banks, so one shared address plus per-byte
+-- enables suffice. See RAM_TYPE.
 entity TX_DMA_PCIE_TRANS_BUFFER is
     generic (
         DEVICE : string := "ULTRASCALE";
@@ -58,22 +38,14 @@ entity TX_DMA_PCIE_TRANS_BUFFER is
         -- If true, the read data are aligned according to the lower bits of the RD_ADDR input
         READ_BARREL_SHIFTER_EN : b_array_t(1 downto 0) := (TRUE, TRUE);
 
-        -- Memory primitive used for the buffer array: "AUTO" selects URAM on AMD UltraScale+/Versal
-        -- devices when the (2-region) banked geometry fills URAMs reasonably (see the RES_RAM_TYPE
-        -- resolution in the architecture), BRAM otherwise. "BRAM"/"URAM" force the respective
-        -- primitive (see :vhdl:entity:`TDP_BRAM_BE`). RAM_TYPE => "URAM" together with an Intel
-        -- DEVICE fails elaboration.
+        -- Buffer array primitive: "AUTO" selects URAM on UltraScale+/Versal when the banked
+        -- geometry fills URAMs reasonably, else BRAM. "BRAM"/"URAM" force the choice; RAM_TYPE=>
+        -- "URAM" with an Intel DEVICE fails elaboration.
         RAM_TYPE : string := "AUTO";
 
-        -- When TRUE (default), the internal memory is partitioned per channel: each channel owns a
-        -- 2**POINTER_WIDTH-byte region and the channel index (write META channel field / RD_CHAN_*)
-        -- selects it. When FALSE the partitioning is disabled: the channel index is ignored on both
-        -- the write and the read side and the whole CHANNELS*2**POINTER_WIDTH-byte array is exposed
-        -- as a single flat address space, addressed only by the address field (write META PCIe
-        -- address / RD_ADDR_*). This lets the user split the array unevenly in its own way. With
-        -- MEM_PARTITIONING => FALSE and CHANNELS > 1 the RD_ADDR_* ports widen by log2(CHANNELS)
-        -- bits so they can reach the whole array (the write META PCIe-address field is already wide
-        -- enough). CHANNELS still sizes the total memory (CHANNELS * 2**POINTER_WIDTH bytes).
+        -- TRUE (default): partitioned per channel, each owning a 2**POINTER_WIDTH-byte
+        -- region. FALSE: channel index ignored, whole array is one flat address space by
+        -- the address field; RD_ADDR_* then widens by log2(CHANNELS) bits.
         MEM_PARTITIONING : boolean := TRUE
     );
     port (
@@ -88,20 +60,14 @@ entity TX_DMA_PCIE_TRANS_BUFFER is
         PCIE_MFB_SOF     : in  std_logic_vector(MFB_REGIONS -1 downto 0);
         PCIE_MFB_SRC_RDY : in  std_logic;
 
-        -- =========================================================================================
         -- Output reading interface for port A of the TDP or the single read port of the SDP
-        -- =========================================================================================
         RD_CHAN_A     : in  std_logic_vector(log2(CHANNELS) -1 downto 0);
         RD_DATA_A     : out std_logic_vector(MFB_REGIONS*MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH-1 downto 0);
         RD_ADDR_A     : in  std_logic_vector(POINTER_WIDTH + tsel(MEM_PARTITIONING, 0, log2(CHANNELS)) -1 downto 0);
         RD_EN_A       : in  std_logic;
         RD_DATA_VLD_A : out std_logic;
 
-        -- =========================================================================================
-        -- Output reading interface for port B
-        --
-        -- Unused if SPLIT_READ_PORTS=FALSE or MFB configuration is (1,1,8,32)
-        -- =========================================================================================
+        -- Output reading interface for port B. Unused if SPLIT_READ_PORTS=FALSE or MFB configuration is (1,1,8,32).
         RD_CHAN_B     : in  std_logic_vector(log2(CHANNELS) -1 downto 0);
         RD_DATA_B     : out std_logic_vector(MFB_REGIONS*MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH-1 downto 0) := (others => '0');
         RD_ADDR_B     : in  std_logic_vector(POINTER_WIDTH + tsel(MEM_PARTITIONING, 0, log2(CHANNELS)) -1 downto 0);
@@ -154,16 +120,9 @@ architecture FULL of TX_DMA_PCIE_TRANS_BUFFER is
     -- Width of the (registered) target-array index; at least 1 bit even when MEM_ARRAYS = 1
     constant ARR_IDX_W       : natural := max(1, log2(MEM_ARRAYS));
 
-    -- =============================================================================================
-    -- Flat (unpartitioned) addressing -- see the MEM_PARTITIONING generic
-    -- =============================================================================================
-    -- When FLAT the channel index (write META channel / RD_CHAN_*) is ignored and the whole array is
-    -- addressed by the address field alone. Since a channel already occupies the contiguous physical
-    -- rows [chan*BUFFER_DEPTH, (chan+1)*BUFFER_DEPTH), "flat" simply means taking the channel-select
-    -- bits (memory-array index + intra-array channel slot) from the address bits sitting directly
-    -- above the intra-channel row address, instead of from the channel field. Only meaningful for
-    -- CHANNELS > 1 (for CHANNELS = 1 the single channel already spans the whole array, so partitioned
-    -- and flat are identical).
+    -- Flat addressing (MEM_PARTITIONING=FALSE): channel index ignored, array addressed by the
+    -- address field alone, taking channel-select bits from above the intra-channel row address.
+    -- Only meaningful for CHANNELS > 1.
     constant FLAT             : boolean := (not MEM_PARTITIONING) and (CHANNELS > 1);
     -- LSB, within the write META DWord-address, of the flat channel-select field (the read byte
     -- address carries it starting at bit POINTER_WIDTH). It sits directly above the intra-channel row.
@@ -218,9 +177,7 @@ architecture FULL of TX_DMA_PCIE_TRANS_BUFFER is
     -- Meta signal for whole MFB word
     signal pcie_meta_be_per_port    : slv_array_t(MFB_REGIONS - 1 downto 0)(MFB_LENGTH/8 - 1 downto 0);
 
-    -- ================================================================================= --
-    -- Write path: per-region even/odd bank write-enable and bank address (combinational)  --
-    -- ================================================================================= --
+    -- Write path: per-region even/odd bank write-enable and bank address (combinational)
     signal wr_bank_be   : slv_array_2d_t(MFB_REGIONS -1 downto 0)(1 downto 0)(MFB_BYTES -1 downto 0);
     signal wr_bank_addr : slv_array_2d_t(MFB_REGIONS -1 downto 0)(1 downto 0)(BANK_ADDR_W -1 downto 0);
 
@@ -252,13 +209,9 @@ architecture FULL of TX_DMA_PCIE_TRANS_BUFFER is
     -- Memory array read data, indexed [bank][array][region]
     signal rd_data_bram_bank   : slv_array_3d_t(1 downto 0)(MEM_ARRAYS -1 downto 0)(MFB_REGIONS -1 downto 0)(MFB_LENGTH -1 downto 0);
 
-    -- ================== --
-    -- Read path signals  --
-    -- ================== --
-    -- Effective RD_ADDR/RD_CHAN source for each region-slot: with SPLIT_READ_PORTS, region-slot P
-    -- maps 1:1 to read port A/B; without it, both region-slots are broadcast from port A so both
-    -- TDP ports of a 2-region array are attempted for the same logical read (whichever isn't stalled
-    -- by a concurrent write succeeds).
+    -- Read path: effective RD_ADDR/RD_CHAN source per region-slot. With SPLIT_READ_PORTS,
+    -- slot P maps 1:1 to port A/B; without it, both slots broadcast from port A (whichever
+    -- isn't stalled by a concurrent write succeeds).
     signal rd_addr_eff : slv_array_t(MFB_REGIONS -1 downto 0)(POINTER_WIDTH -1 downto 0);
     signal rd_chan_eff : slv_array_t(MFB_REGIONS -1 downto 0)(log2(CHANNELS) -1 downto 0);
 
@@ -278,11 +231,8 @@ architecture FULL of TX_DMA_PCIE_TRANS_BUFFER is
     signal wr_addr_collision_detected : slv_array_t(MEM_ARRAYS -1 downto 0)(1 downto 0);
     signal rdwr_collision_detected    : slv_array_t(MEM_ARRAYS -1 downto 0)(MFB_REGIONS -1 downto 0);
 
-    -- =============================================================================================
-    -- Byte-wise even/odd bank assembly: byte i of the requested word comes from bank 0 unless it
-    -- belongs to a row that has wrapped into the next row because of the intra-word rotation/shift
-    -- (i.e. it is located before the write/read rotation point) -- see readme.rst.
-    -- =============================================================================================
+    -- Byte-wise even/odd bank assembly: byte i comes from bank 0 unless its row wrapped from the
+    -- intra-word rotation/shift (i.e. sits before the write/read rotation point) -- see readme.rst.
     function assemble_bank_bytes (
         row_lsb : std_logic;
         off     : std_logic_vector;
@@ -399,11 +349,9 @@ begin
             -- Last SOF - Higher takes
             for i in 0 to (MFB_REGIONS - 1) loop
                 if (pcie_mfb_sof_inp_reg(INP_REG_NUM)(i) = '1') then
-                    -- First SOF does +16, the second makes +8
-                    -- When second SOF is present, this automatically takes the address from the
-                    -- second region and adds increment of 8 to that. If there is only one SOF and
-                    -- particularly in the first region, then increment by 16 because the frame
-                    -- continues in the next word.
+                    -- First SOF adds 16 to the address; a second SOF instead takes the address
+                    -- from the second region and adds 8, since with only one SOF (in the first
+                    -- region) the frame continues into the next word.
                     addr_cntr_nst   <= unsigned(pcie_mfb_meta_arr(i)(META_PCIE_ADDR)) + (MFB_REGIONS - i)*MFB_BLOCK_SIZE;
                     chan_num_next   <= pcie_mfb_meta_arr(i)(META_CHAN_NUM);
                 end if;
@@ -411,10 +359,8 @@ begin
         end if;
     end process;
 
-    -- =============================================================================================
-    -- META(BE) select
-    -- =============================================================================================
-    -- This process selects which bytes are enabled in which BS based on the SOF status in the second region
+    -- META(BE) select: chooses which bytes are enabled in which BS, based on the SOF status in
+    -- the second region.
     meta_be_g: if (MFB_REGIONS = 1) generate
         pcie_meta_be_per_port(0) <= pcie_mfb_meta_arr(0)(META_BE);
     else generate
@@ -431,15 +377,9 @@ begin
         end process;
     end generate;
 
-    -- =============================================================================================
-    -- Data shift - Port A
-    -- =============================================================================================
-    -- This process controls the shift of the input word and the corresponding byte enable signal to it.
-    -- When beginning of a transaction is captured, the shift is taken directly from the current address,
-    -- but when it continues, then select shift from the counter of addresses.
-
-    -- The previous "2 downto 0" is specification of address - now generic for more regions
-    -- The address system here is divided into two parts due to the dual-port BRAM configuration
+    -- Data shift - Port A: controls the input word's shift/byte-enable. At a transaction's
+    -- start the shift comes from the current address; once it continues, from the address
+    -- counter. Address is split in two (dual-port BRAM).
     wr_bshifter_0_ctrl_p : process (all) is
         variable pcie_mfb_meta_addr_v : std_logic_vector(META_PCIE_ADDR_W -1 downto 0);
     begin
@@ -482,12 +422,8 @@ begin
         SEL      => wr_shift_sel(0)
     );
 
-    -- =============================================================================================
-    -- Data shift - Port B
-    -- =============================================================================================
-    -- This packet starts at the beginning of the second region, so we need to correct the address
-    -- by the number of DWords in region
-
+    -- Data shift - Port B: this packet starts at the second region's beginning, so correct the
+    -- address by the number of DWords in the region.
     tworeg_bs_g: if (MFB_REGIONS = 2) generate
         wr_bshifter_1_ctrl_p : process (all) is
             variable pcie_mfb_meta_addr_v : std_logic_vector(META_PCIE_ADDR_W -1 downto 0);
@@ -532,13 +468,9 @@ begin
         );
     end generate;
 
-    -- =============================================================================================
-    -- Write bank geometry - Port A (region 0)
-    -- =============================================================================================
-    -- Computes, for the current write word, which even/odd bank each byte lands in (a byte "carries"
-    -- into the next row -- and therefore the opposite bank -- exactly when its DWord index is below
-    -- the barrel-shift rotation amount) and the two banks' shared row addresses. This replaces the
-    -- former per-DWord address-correction/demux logic (see readme.rst).
+    -- Write bank geometry - Port A: which even/odd bank each byte lands in (it carries into
+    -- the next row/opposite bank when its DWord index is below the rotation amount) and the
+    -- banks' shared row addresses.
     wr_bank_geom_a_p : process (all) is
         variable pcie_mfb_meta_addr_v : std_logic_vector(META_PCIE_ADDR_W -1 downto 0);
         variable buff_addr_v          : std_logic_vector(log2(BUFFER_DEPTH) -1 downto 0);
@@ -636,10 +568,9 @@ begin
                         wr_bank_addr(1)(1) <= chan_addr_v & buff_addr_v   (log2(BUFFER_DEPTH) -1 downto 1);
                     end if;
 
-                    -- NOTE: the carry/wrap threshold here intentionally uses the *raw* (not the
-                    -- "-8"-corrected) META(1).PCIE_ADDR low bits -- the "-8" correction in
-                    -- wr_bshifter_1_ctrl_p above is only relevant to the barrel-shifter rotation
-                    -- amount (wr_shift_sel(1)), not to which row a byte's DWord belongs to.
+                    -- The carry/wrap threshold uses the raw (uncorrected) META(1).PCIE_ADDR low bits: the "-8"
+                    -- correction in wr_bshifter_1_ctrl_p only affects the barrel-shifter rotation (wr_shift_sel(1)),
+                    -- not which row a byte's DWord belongs to.
                     for i in 0 to (MFB_BYTES -1) loop
                         if ((i/4) < unsigned(pcie_mfb_meta_addr_v(log2(MFB_DWORDS) -1 downto 0))) then
                             carry_v := '1';
@@ -659,14 +590,8 @@ begin
         end process;
     end generate;
 
-    -- =============================================================================================
-    -- Channel index store / per-region target-array index
-    -- =============================================================================================
-    -- Demultiplexer is based on value of META(Channel)
-    -- Last value of the Channel is stored
-    -- TODO: It should be taken into consideration that this storing process should be removed
-    -- because the channel number is already extracted in METADATA_EXTRACTOR and the index of a
-    -- channel is held through the duration of a whole packet.
+    -- Channel index store: demux is based on META(Channel), last value stored. TODO: may be
+    -- removable, since METADATA_EXTRACTOR already holds the channel for the packet's duration.
     mem_arr_indx_hold_g: if (MEM_ARRAYS > 1) generate
         mem_arr_idx_hold_reg_p : process (CLK) is
         begin
@@ -700,13 +625,9 @@ begin
             end if;
         end process;
 
-        -- =========================================================================================
-        -- Per-region target-array index, held in the same pipeline stage as the bank BE/address
-        -- computed above. It is only ever compared for equality against a constant (never used as an
-        -- array index) after being registered through the write pipeline below, to avoid a
-        -- documented nvc 1.21.0 array-indexing artifact -- see the NVC_ARRAY_DEMUX_ARTIFACT note in
-        -- cocotb/cocotb_test.py.
-        -- =========================================================================================
+        -- Per-region target-array index: compared only for equality (never indexed) after being
+        -- registered, to avoid a documented nvc 1.21.0 array-indexing artifact -- see
+        -- NVC_ARRAY_DEMUX_ARTIFACT.
         arr_idx_rgn_logic_p : process (all) is
             variable chan_v      : std_logic_vector(META_CHAN_NUM_W -1 downto 0);
             variable pcie_addr_v : std_logic_vector(META_PCIE_ADDR_W -1 downto 0);
@@ -912,16 +833,9 @@ begin
         end process;
     end generate;
 
-    -- =============================================================================================
-    -- Read address / channel effective sources
-    -- =============================================================================================
-    -- With SPLIT_READ_PORTS, region-slot P maps 1:1 to read port A/B. Without it (or for the
-    -- 1-region/SDP configuration), both region-slots are broadcast from port A, so both TDP ports of
-    -- a 2-region array are attempted for the same logical read.
-    -- In FLAT mode the wide RD_ADDR_* carries the channel-select in its top log2(CHANNELS) bits and
-    -- the intra-channel byte address in its low POINTER_WIDTH bits; RD_CHAN_* is ignored. In
-    -- partitioned mode RD_ADDR_* is exactly the intra-channel byte address (POINTER_WIDTH wide, so
-    -- the low-bits slice is the whole vector) and RD_CHAN_* selects the channel.
+    -- Read address/channel sources: SPLIT_READ_PORTS maps slot P to port A/B; else both
+    -- broadcast from port A. FLAT: RD_ADDR_*'s top bits select the channel, RD_CHAN_* ignored.
+    -- Partitioned: RD_ADDR_* is the intra-channel address.
     rd_eff_split_g : if (SPLIT_READ_PORTS and MFB_REGIONS = 2) generate
         rd_addr_eff(0) <= RD_ADDR_A(POINTER_WIDTH -1 downto 0);
         rd_addr_eff(1) <= RD_ADDR_B(POINTER_WIDTH -1 downto 0);
@@ -972,9 +886,7 @@ begin
         end process;
     end generate;
 
-    -- =============================================================================================
     -- Cycle 1 registers: per-region-slot channel and intra-row offset/parity
-    -- =============================================================================================
     rd_pipe_reg_p : process (CLK) is
     begin
         if (rising_edge(CLK)) then
@@ -986,21 +898,17 @@ begin
         end if;
     end process;
 
-    -- =============================================================================================
-    -- Cycle 1: select the memory array by the registered channel, then assemble the requested word
-    -- from the even/odd banks of that array
-    -- =============================================================================================
+    -- Cycle 1: select the memory array by the registered channel, then assemble the requested
+    -- word from the even/odd banks of that array
     rd_arr_mux_g : for p in 0 to (MFB_REGIONS -1) generate
         rd_data_bank0_mux(p) <= rd_data_bram_bank(0)(to_integer(unsigned(rd_chan_p_reg(p)(log2(MEM_ARRAYS) + log2(CHANS_PER_ARRAY) -1 downto log2(CHANS_PER_ARRAY)))))(p);
         rd_data_bank1_mux(p) <= rd_data_bram_bank(1)(to_integer(unsigned(rd_chan_p_reg(p)(log2(MEM_ARRAYS) + log2(CHANS_PER_ARRAY) -1 downto log2(CHANS_PER_ARRAY)))))(p);
         rd_data_assembled(p) <= assemble_bank_bytes(rd_row_lsb_reg(p), rd_off_reg(p), rd_data_bank0_mux(p), rd_data_bank1_mux(p));
     end generate;
 
-    -- =============================================================================================
     -- Demultiplexers / output stage
-    -- =============================================================================================
-    -- The split port configuration is only possible for the 2-region variant since this uses
-    -- dual-port memory arrays for write (the 1-region variant uses an SDP configuration)
+    -- The split port configuration is only possible for the 2-region variant, which uses
+    -- dual-port memory arrays for write (the 1-region variant uses an SDP configuration).
     split_port_logic_g : if (SPLIT_READ_PORTS and MFB_REGIONS = 2) generate
 
         bram_demux_p : process (all) is

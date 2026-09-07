@@ -109,10 +109,8 @@ def per_queue_reg_addr(reg: IuventusPerQueueRegMap, qid: int) -> int:
     return PER_Q_BASE + qid * PER_Q_STRIDE + int(reg)
 
 
-# Base offset and per-queue slot stride of the PER-QUEUE COUNTER 2D register block (must match
-# nvme_sw_manager.vhd's PER_Q_CNTR_BASE/PER_Q_CNTR_STRIDE constants exactly). A SEPARATE, parallel
-# 2D block from IuventusPerQueueRegMap above -- PER_Q_STRIDE (0x40) has no room left for these 8
-# more 32-bit fields alongside the 12 already there.
+# Base offset and per-queue slot stride of the PER-QUEUE 2D register block. Queue 0 is q=0 of it
+# -- there is no separate/legacy register set for queue 0.
 PER_Q_CNTR_BASE = 0x800
 PER_Q_CNTR_STRIDE = 0x40
 

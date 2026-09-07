@@ -20,11 +20,6 @@ from cocotbext.ofm.mfb.utils import get_mfb_params, random_tuple_iterator
 from cocotbext.ofm.mfb.transaction import MfbTransaction
 from cocotbext.ofm.pcie.PcieHeaders import CQMfbMeta
 
-# NOTE: There were many achievements in this implementation of a general MFB Driver that also inserts
-# some gaps between packets if vld_gen is not null. Although there are many of its parts written
-# with an explaining commentary, some parts originate from a testing and its reasoning remains
-# unknown. We attribute these to divine providence.
-
 class MFBDriver(ValidatedBusDriver):
     _signals = ["data", "sof_pos", "eof_pos", "sof", "eof", "src_rdy", "dst_rdy"]
     _optional_signals = ["meta", "be"]
@@ -178,10 +173,8 @@ class MFBDriver(ValidatedBusDriver):
             self.log.debug(f"Meta: (len {len(meta)} bits)\n{hex(meta)}")
             self.log.debug(f"BE: {hex(be)}")
 
-        # --------------------------------------------------------------------------------
-        # Parse packet data into separate bus words while varying valid and
-        # invalid cycles (if valid/invalid generator is not None)
-        # --------------------------------------------------------------------------------
+        # Parse packet data into separate bus words while varying valid and invalid cycles (if a
+        # valid/invalid generator is given).
         # Bit index in the input data
         inp_data_blk_idx = 0
         pkt_finished = False
@@ -232,10 +225,9 @@ class MFBDriver(ValidatedBusDriver):
                     self.log.debug(f"Bus range to write [{bus_idx_high} : {bus_idx_low}]")
                     self.log.debug(f"Range of input data [{inp_data_blk_idx*self._blk_bit_width + data_rest_len -1} : {inp_data_blk_idx*self._blk_bit_width}]")
                     if data_bytes is not None:
-                        # Fast path: block boundaries are byte-aligned (blk_bit_width and
-                        # data_rest_len are multiples of item_width=8), so slice the raw bytes
-                        # (cheap) and convert just this block, instead of re-slicing the whole
-                        # payload LogicArray on every block (which is O(n^2) over the packet).
+                        # Fast path: block boundaries are byte-aligned (blk_bit_width/data_rest_len are
+                        # multiples of item_width=8): slice the raw bytes and convert just this block,
+                        # instead of re-slicing the whole payload LogicArray per block (O(n^2) over the packet).
                         byte_lo = (inp_data_blk_idx*self._blk_bit_width) // 8
                         byte_hi = byte_lo + (data_rest_len // 8)
                         self._data_int[bus_idx_high : bus_idx_low] \
@@ -287,11 +279,7 @@ class MFBDriver(ValidatedBusDriver):
                 self._wordQ.appendleft((self._data_int, self._meta_int, self._sof_int, self._eof_int, self._sof_pos_int, self._eof_pos_int, self._src_rdy_int, self._be_int))
                 self._clr_internal_bus()
 
-            # --------------------------------------------------------------------------------
             # Consume invalid blocks
-            # --------------------------------------------------------------------------------
-            # NOTE: This branch needs a thorough check for over-engineering. Some of its parts
-            # can be redundant or can be rewritten.
             if no_vld_blocks:
                 inv_finished = False
 
@@ -300,22 +288,18 @@ class MFBDriver(ValidatedBusDriver):
                     self.log.debug(f"--------------------------------------------------------------------")
                     self.log.debug(f"Consuming invalid blocks {self.off=}, {self._last_rgn_idx=}, {self._last_blk_idx=}")
 
-                    # 1. If packet finishes in the word, count invalid cycles from the current word's remaining
-                    # blocks
-                    # 2. If packet does not finish in the word it fills it all up so the invalid blocks are counted from
-                    # the next word
-                    #
-                    # In both cases, the last_rgn_idx and last_blk_idx point right!
+                    # Packet finishes in this word: count remaining invalid blocks from here. Otherwise the word
+                    # fills up and invalid blocks are counted from the next word. Either way, last_rgn_idx/last_blk_idx
+                    # end up correct.
                     for rgn_idx in range(self._last_rgn_idx, self._regions):
                         for blk_idx in range(self._last_blk_idx, self._region_size):
                             self.off -= 1
 
                             if self.off <= 0:
                                 inv_finished = True
-                                # If packet finished, the next packet can begin in the middle of a region after all
-                                # invalid blocks have been dispatched, meaning there can be both whole invalid words but also
-                                # partially invalid. Otherwise, we are still in the middle of a packet which
-                                # means that only whole words can be send as invalid.
+                                # If the packet finished, the next packet can start mid-region once invalid blocks
+                                # are dispatched, so both whole and partially invalid words are possible; otherwise
+                                # (mid-packet) only whole invalid words can be sent.
                                 if pkt_finished:
                                     self._last_blk_idx = (blk_idx + 1) % self._region_size
 
@@ -333,12 +317,9 @@ class MFBDriver(ValidatedBusDriver):
                         self._last_rgn_idx = 0
 
                     self.log.debug(f"The counting of invalid or partially invalid word finished: {self._last_rgn_idx=}, {self._last_blk_idx=}, {inv_finished=}")
-                    # Rationale: The problem is always, what to do with partially
-                    # valid words. It packet finished in the previous word and there are no further valid blocks, the counting
-                    # of invalid blocks begins there already but this word is not written to the wordQ in this branch UNLESS
-                    # the packet ended in the last block of that word. Afterwards, every following word is written..
-                    # The second situation is when the packet did not finish yet, yet there are no valid blocks and the next word
-                    # needs to be rendered invalid which ist then written to the wordQ in this branch.
+                    # Partially-valid words: a finished packet with no valid blocks left starts invalid counting
+                    # here, queuing the word only once it ended in the last block (later words are always queued);
+                    # mid-packet, the next word is simply invalid and queued here.
                     if (not pkt_finished) or (pkt_finished and no_space):
                         self.log.debug(f"Invalid word written to queue...")
                         self._wordQ.appendleft((self._data_int, self._meta_int, self._sof_int, self._eof_int, self._sof_pos_int, self._eof_pos_int, self._src_rdy_int, self._be_int))
