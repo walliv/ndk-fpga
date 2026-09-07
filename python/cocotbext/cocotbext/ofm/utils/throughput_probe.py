@@ -235,6 +235,10 @@ class ThroughputProbe(Probe):
                  name: str | None = None, callback=None):
         super().__init__(interface, period, time_units, log_intervals, name, callback)
         self._total_item_cnt = 0
+        # Simulation time this probe began counting: get_sim_time() is absolute across all
+        # @cocotb.test()s of a run, while item_cnt starts at zero per probe -- so a rate against
+        # absolute time would charge later tests for earlier tests' runtime.
+        self._probe_epoch_sec = get_sim_time(unit="sec")
         self._clear_log_values()
         self._throughput_units = throughput_units.lower()
 
@@ -347,14 +351,23 @@ class ThroughputProbe(Probe):
 
         return delta_vld_items/delta_total_items
 
+    def _elapsed_sec(self) -> float:
+        """Seconds this probe has been counting for, never the absolute simulation time.
+
+        Returns a positive number even at time zero so the rate getters cannot divide by zero when
+        called before any clock edge.
+        """
+        elapsed = get_sim_time(unit="sec") - self._probe_epoch_sec
+        return elapsed if elapsed > 0 else float("inf")
+
     def _get_average_throughput(self) -> float:
         """
-        Current average throughput calculated from all items and simulation time.
+        Current average throughput calculated from all items and the time this probe has run.
 
         Returns:
             average throughput in base units (either Items/s, b/s or B/s depending on which units are set).
         """
-        return self._interface.item_cnt/get_sim_time(unit="sec")
+        return self._interface.item_cnt/self._elapsed_sec()
 
     def _get_max_throughput(self) -> float:
         """
@@ -366,7 +379,7 @@ class ThroughputProbe(Probe):
             all the transactions have been already received but the simulation hasn't ended yet. The best accuracy can be
             achieved in the middle of the simulation.
         """
-        return self._total_item_cnt/get_sim_time(unit="sec")
+        return self._total_item_cnt/self._elapsed_sec()
 
     def _get_average_efficiency(self) -> float:
         """
