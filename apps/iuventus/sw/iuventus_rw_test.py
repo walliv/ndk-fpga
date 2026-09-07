@@ -2,6 +2,7 @@
 
 import sys
 import json
+import statistics
 import fcntl
 from datetime import datetime
 import os
@@ -753,6 +754,30 @@ PROF_CLASS_REGS = [("DISP_SQ", 0x0A4), ("ALLOC_WAIT", 0x0AC), ("DISP_TAG", 0x0B4
 PROF_SIZES = [(7, "4K"), (31, "16K"), (255, "128K")]
 
 
+# Short enough that several windows close inside one profile point: the counter's default interval
+# free-runs for ~2.1 s, which against a 3 s settle can straddle the point's start and score the
+# ramp as if it were steady state.
+EVCR_PROFILE_INTERVAL = 1 << 20
+
+
+def _evcr_rate(test, seconds, sleep_fn):
+    """Median EVENT_COUNTER rate over the windows that close while the load runs.
+
+    The rate is TOTAL_EVENTS/(TOTAL_CYCLES*clk_period), both read from the core, so the host sleep
+    below is a settle delay and never a divisor -- a wall-clock rate silently absorbs every pause
+    the host takes between reads.
+    """
+    samples, last = [], None
+    slices = max(1, int(seconds / 0.25))
+    for _ in range(slices):
+        sleep_fn(seconds / slices)
+        pair = (test.evcr_total_events, test.evcr_total_cycles)
+        if pair != last and pair[0] and pair[1]:
+            samples.append(pair[0] / (pair[1] * test.clk_period))
+        last = pair
+    return statistics.median(samples) if samples else 0.0
+
+
 def run_stall_profile(test, queues: int, settle_seconds: float = 3.0, results_file=None,
                       sleep_fn=sleep, verbose: bool = True):
     """CLI '-p': DMA stall-class breakdown across read/write x rand/seq x 4K/16K/128K.
@@ -760,7 +785,7 @@ def run_stall_profile(test, queues: int, settle_seconds: float = 3.0, results_fi
     Requires firmware built with PROFILE_EN -- without it every counter reads zero. Emits rows in
     the exact shape doc/measurements/plot_stall_profile.py's r() helper takes.
 
-    The five classes do NOT partition a cycle: an idle cycle (S_IDLE with no request) sets no bit
+    IOPS comes from the core's EVENT_COUNTER, not a host clock. The five classes do NOT partition a cycle: an idle cycle (S_IDLE with no request) sets no bit
     and is never counted, so the percentages are shares of CLASSIFIED cycles -- the time the DMA
     had work in hand, which is the quantity that locates a bottleneck.
     """
@@ -784,17 +809,18 @@ def run_stall_profile(test, queues: int, settle_seconds: float = 3.0, results_fi
             for size, blk in PROF_SIZES:
                 # _throughput_point_start sets contig_test on both paths: contiguous stream.
                 _throughput_point_start(test, mode, addressing, size)
+                test.evcr_interval_cycles = EVCR_PROFILE_INTERVAL
                 sleep_fn(0.5)
-                before = snap(); reg.sample_cntrs(); succ0 = reg.succ_cpls
-                sleep_fn(settle_seconds)
-                after = snap(); reg.sample_cntrs(); succ1 = reg.succ_cpls
+                before = snap()
+                rate = _evcr_rate(test, settle_seconds, sleep_fn)
+                after = snap()
                 _throughput_point_stop(test, mode, sleep_fn=sleep_fn)
                 sleep_fn(0.5)
 
                 delta = {k: after[k] - before[k] for k, _ in PROF_CLASS_REGS}
                 total = sum(delta.values()) or 1
                 pct = {k: round(100.0 * v / total, 1) for k, v in delta.items()}
-                iops = int((succ1 - succ0) / settle_seconds) if settle_seconds else 0
+                iops = int(rate)
                 rows.append(dict(N=queues, mode=mode, addressing=addressing, blk=blk,
                                  iops=iops, pct=pct))
                 if verbose:
