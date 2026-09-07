@@ -1,9 +1,8 @@
 -- mi_addr_space_pkg.vhd: Package with MI address space definition
--- Copyright (c) 2026 Universitaet Heidelberg, Institut fuer Technische Informatik (ZITI)
--- Author(s): Vladislav Valek <vladislav.valek@stud.uni-heidelberg.de>
+-- Copyright (C) 2021 CESNET z. s. p. o.
+-- Author(s): Jakub Cabal <cabal@cesnet.cz>
 --
--- SPDX-License-Identifier: CERN-OHL-P-2.0
-
+-- SPDX-License-Identifier: BSD-3-Clause
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;

@@ -382,12 +382,9 @@ begin
     end generate;
 
     -- =====================================================================
-
     -- =====================================================================
     --  Packet register 0
     -- =====================================================================
-
-    -- Only accept new input when no almost full is active
     reg0_dst_rdy <= reg1_dst_rdy and (nor oshk_afull) and (not gshk_afull);
 
     reg0_pr : process (CLK)
@@ -412,12 +409,9 @@ begin
     end process;
 
     -- =====================================================================
-
     -- =====================================================================
     --  Packet register 1
     -- =====================================================================
-
-    -- No additional condition
     reg1_dst_rdy <= reg2_dst_rdy;
 
     reg1_pr : process (CLK)
@@ -469,12 +463,9 @@ begin
     );
 
     -- =====================================================================
-
     -- =====================================================================
     --  Packet register 2
     -- =====================================================================
-
-    -- No additional condition
     reg2_dst_rdy <= reg3_dst_rdy;
 
     reg2_pr : process (CLK)
@@ -525,12 +516,9 @@ begin
     SPACE_GLB_WR_PTR <= std_logic_vector(space_wr_ptr_reg);
 
     -- =====================================================================
-
     -- =====================================================================
     --  Packet register 3
     -- =====================================================================
-
-    -- No additional condition
     reg3_dst_rdy <= reg4_dst_rdy;
 
     reg3_pr : process (CLK)
@@ -573,12 +561,9 @@ begin
     reg3_enough_space <= '1' when reg3_len_sum <= free_space_cnt_reg else '0';
 
     -- =====================================================================
-
     -- =====================================================================
     --  Packet register 4
     -- =====================================================================
-
-    -- Only allow propagation when there is enough free space
     reg4_dst_rdy <= reg3_enough_space;
 
     reg4_pr : process (CLK)
@@ -717,13 +702,9 @@ begin
     end generate;
 
     -- =====================================================================
-
     -- =====================================================================
     --  Global output Shakedown
     -- =====================================================================
-    -- There is one Shakedown for the global output. This should store the same
-    -- number of packets as all the Stream shakedowns combined.
-
     out_glb_shake_en_gen : if (GLOBAL_OUT_EN) generate
 
         out_glb_shake_true_dst_rdy_gen : if (not GLOBAL_OUT_AFULL) generate
@@ -810,13 +791,9 @@ begin
     end generate;
 
     -- =====================================================================
-
     -- =====================================================================
     --  Free Space counter
     -- =====================================================================
-    -- This register holds the size of actually free space to control
-    -- space full status.
-
     free_space_pr : process (CLK)
         variable tmp_space : unsigned(log2(SPACE_SIZE+1)-log2(ALIGN)-1 downto 0);
     begin

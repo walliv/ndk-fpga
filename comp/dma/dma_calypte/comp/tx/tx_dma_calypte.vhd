@@ -72,11 +72,7 @@ entity TX_DMA_CALYPTE is
         USR_TX_MFB_SRC_RDY : out std_logic;
         USR_TX_MFB_DST_RDY : in  std_logic;
 
-        -- =========================================================================================
-        -- PCIe Completer Request MFB interface
-        --
-        -- Receives transactions from the PCIe domain
-        -- =========================================================================================
+        -- PCIe Completer Request MFB interface: receives transactions from the PCIe domain.
         PCIE_CQ_MFB_DATA    : in  std_logic_vector(PCIE_CQ_MFB_REGIONS*PCIE_CQ_MFB_REGION_SIZE*PCIE_CQ_MFB_BLOCK_SIZE*PCIE_CQ_MFB_ITEM_WIDTH-1 downto 0);
         PCIE_CQ_MFB_META    : in  std_logic_vector(PCIE_CQ_MFB_REGIONS*PCIE_CQ_META_WIDTH -1 downto 0);
         PCIE_CQ_MFB_SOF     : in  std_logic_vector(PCIE_CQ_MFB_REGIONS -1 downto 0);
@@ -86,11 +82,7 @@ entity TX_DMA_CALYPTE is
         PCIE_CQ_MFB_SRC_RDY : in  std_logic;
         PCIE_CQ_MFB_DST_RDY : out std_logic := '1';
 
-        -- =========================================================================================
-        -- Debugging signals
-        --
-        -- WARNING: Not suited to be used by the users of this controller
-        -- =========================================================================================
+        -- Debugging signals -- WARNING: not intended for use by consumers of this controller.
         ST_SP_DBG_CHAN : out std_logic_vector(log2(CHANNELS) -1 downto 0);
         ST_SP_DBG_META : out std_logic_vector(ST_SP_DBG_SIGNAL_W -1 downto 0);
 
