@@ -87,6 +87,7 @@ class DMAIuventusConfig:
     fence_accepted          : int
     fence_drained           : int
     fence_target            : int
+    design_err              : int
 
     ERROR_CODES = [
         ("000", "01", "Invalid Opcode"),
@@ -176,6 +177,10 @@ class DMAIuventusConfig:
             elif name == "last_cq_entry":
                 # Align multi-line output for deserialized CQEntry
                 formatted_val = pformat(str(val), indent=4, width=80).replace("\n", "\n" + " " * (max_len + 3))
+            elif name == "design_err":
+                wedged = [q for q in range(32) if (val >> q) & 1]
+                formatted_val = (f"{hex(val)}" if not wedged
+                                 else f"{hex(val)}\t*** QUEUE(S) WEDGED: {wedged} ***")
             elif name == "tag_fifo_status":
                 formatted_val = f"{val}/2048"
             elif name in ["cq_wr_unalign_start", "cq_wr_unalign_size", "cq_wr_over16beats"]:
@@ -471,24 +476,25 @@ class DMAIuventusRegAccess(nfb.BaseComp):
     def wr_pages_free_min(self) -> int:
         return (self._comp.read32(IuventusMiRegMap.WR_PAGES_FREE.value) >> 16) & 0xFFFF
 
-    # Read-drain observability: a page frees only once its drain delivers the data, so a
-    # completed READ whose drain never finishes holds pages forever. These separate "lost before
-    # the drain" from "stuck in the drain".
-    @property
-    def rd_cpl_occupancy(self) -> int:
-        return self._comp.read32(IuventusMiRegMap.RD_DRAIN_DBG.value) & 0xFFFF
+    # --- Read-drain observability ---
+    # A wedged queue is not always visible in completion-level indicators; see design_err /
+    # queue_wedged() below for per-queue detection.
 
     @property
-    def rd_cpl_occupancy_max(self) -> int:
-        return (self._comp.read32(IuventusMiRegMap.RD_DRAIN_DBG.value) >> 16) & 0x7FFF
+    def design_err(self) -> int:
+        return self._comp.read32(IuventusMiRegMap.DESIGN_ERR.value)
+
+    def queue_wedged(self, qid: int) -> bool:
+        return bool((self.design_err >> qid) & 1)
 
     @property
-    def rd_drain_waiting(self) -> bool:
-        return bool((self._comp.read32(IuventusMiRegMap.RD_DRAIN_DBG.value) >> 31) & 1)
+    def wedged_queues(self) -> list:
+        err = self.design_err
+        return [q for q in range(32) if (err >> q) & 1]
 
-    # --- Per-queue SSD-facing stat counters (PER_Q_CNTR_BASE block) ---
-    # Read-only; qid is the queue index (0..NUM_QUEUES-1) -- see IuventusPerQueueCntrRegMap's
-    # docstring for why sq_pcie_rds has no per-queue counterpart.
+    # --- Per-queue SSD-facing stat counters (PER_Q_CNTR_BASE) ---
+    # Read-only, via sample_cntrs() like every counter here. `qid` is 0..NUM_QUEUES-1; see
+    # IuventusPerQueueCntrRegMap's docstring for why sq_pcie_rds has no per-queue counterpart.
     def pq_succ_cpls(self, qid: int) -> int:
         return self._comp.read64(per_queue_cntr_reg_addr(IuventusPerQueueCntrRegMap.SUCC_CPLS_L, qid))
 

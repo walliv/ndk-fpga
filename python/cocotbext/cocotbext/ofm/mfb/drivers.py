@@ -67,6 +67,7 @@ class MFBDriver(ValidatedBusDriver):
         self._clr_internal_bus()
 
         self._wordQ = deque()
+        self._sending = False
 
     def _clr_physical_bus(self):
         if hasattr(self.bus, 'meta'):
@@ -104,6 +105,16 @@ class MFBDriver(ValidatedBusDriver):
         self._eof_pos_int = LogicArray(0, self._regions*max(1, self._eof_pos_w_pr))
         self._src_rdy_int = Logic("0")
 
+    def abort(self):
+        """Drop a half-built frame and park the bus, for a bench whose DUT was reset mid-frame.
+        A cancelled send() leaves words queued and a partial word in the accumulator, which the
+        next send would dispatch as a frame ending with no beginning."""
+        self._wordQ.clear()
+        self._clr_internal_bus()
+        self._clr_physical_bus()
+        self._last_blk_idx = 0
+        self._last_rgn_idx = 0
+
     async def _wait_ready(self):
         await ReadOnly()
         while not bool(self.bus.dst_rdy.value):
@@ -112,6 +123,20 @@ class MFBDriver(ValidatedBusDriver):
             await ReadOnly()
 
     async def _driver_send(self, trans : Union[MfbTransaction, LogicArray, bytes], sync: bool = True, **kwargs : Any) -> None:
+        # One send at a time: the word accumulator and (rgn, blk) cursor are per-instance, so
+        # concurrent sends interleave bus writes in one timestep and the later write silently wins,
+        # costing a frame its SOF. append() is serialised by _send_thread.
+        if self._sending:
+            raise RuntimeError(
+                f"MFBDriver({self.name}): send() called while another send is in flight. Await the "
+                f"previous send, or use append(), which _send_thread serialises.")
+        self._sending = True
+        try:
+            await self._driver_send_impl(trans, sync=sync, **kwargs)
+        finally:
+            self._sending = False
+
+    async def _driver_send_impl(self, trans, sync: bool = True, **kwargs : Any) -> None:
         ce = RisingEdge(self.clock)
 
         # --------------------------------------------------------------------------------

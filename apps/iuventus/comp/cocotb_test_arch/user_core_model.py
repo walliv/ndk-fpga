@@ -14,9 +14,9 @@ from dataclasses import dataclass
 REGION_BEAT_BYTES = 64
 SECT_SIZE = 512
 
-# LFSR_SIMPLE_RANDOM_GEN(DATA_WIDTH=21) taps, per lfsr_simple_random_gen.vhd's fce_get_taps table
-# for DATA_WIDTH=21: XNOR_TAPS = (0, 0, 21, 19). Evaluated in the RTL's own loop order (i=3 downto
-# 0, i.e. tap 19 first, then tap 21); taps are 1-based bit positions (bit index = tap - 1).
+# LFSR_SIMPLE_RANDOM_GEN(DATA_WIDTH=21) taps, per fce_get_taps: XNOR_TAPS=(0,0,21,19), evaluated in
+# the RTL's loop order (i=3 downto 0: tap 19 first, then 21); taps are 1-based bit positions (bit
+# index = tap - 1).
 _LFSR21_TAPS = (19, 21)
 _LFSR21_SEED = int("000011010110011100001", 2)
 _LFSR21_MASK = (1 << 21) - 1

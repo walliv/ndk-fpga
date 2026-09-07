@@ -105,9 +105,10 @@ class IuventusMiRegMap(IntEnum):
     # interpretation together with FENCE_CLIP_CNTR.
     FENCE_AFULL_CNTR_L          = 0x12C
     FENCE_AFULL_CNTR_H          = 0x130
-    # {31 = read-drain FSM waiting on WRBUFF_RD_REQ_FNS, 30:16 = deepest rd_cpl
-    # occupancy ever, 15:0 = occupancy now}. See the DMA core's RD_DRAIN_DBG_O.
-    RD_DRAIN_DBG                = 0x13C
+    # Fault bitmap: bit q = queue q wedged, sticky until reset. Deliberately not in CPL_ERR_MASK,
+    # which only carries SSD completion codes -- a wedged queue never completes anything, so it
+    # could never appear there.
+    DESIGN_ERR                  = 0x13C
 
 
 # Base offset and per-queue slot stride of the PER-QUEUE 2D register block. Queue 0 is q=0 of it
