@@ -135,10 +135,8 @@ if {$PARAMS(PCIE_ENDPOINT_MODE) == 0} {
         CONFIG.axisten_if_width {256_bit}
 }
 
-# DMA Hyperion (type 6): enable PF0 BAR2 as a 64-bit prefetchable 16 GB window for direct HBM writes.
-# Prefetchable is required so the host can place this multi-GB BAR in the 64-bit above-4 GB window
-# (a non-prefetchable BAR is confined to the bridge's 32-bit window and cannot exceed 4 GB).
-# The host maps BAR2 to the full HBM address space; the H2C AXI adapter uses addr[33:0] as AWADDR.
+# DMA Hyperion (type 6): PF0 BAR2 is a 64-bit prefetchable 16 GB window for direct HBM writes.
+# Prefetchable is required to place it above 4 GB; the H2C AXI adapter uses addr[33:0] as AWADDR.
 if {$PARAMS(DMA_TYPE) == 6} {
     lappend config_list \
         CONFIG.pf0_bar2_enabled {true} \

@@ -34,28 +34,9 @@ endef
 
 GEN_MK_NAME ?= $(OUTPUT_NAME).$(SYNTH).mk
 
-# The generated .mk file $(GEN_MK_NAME) contains the $(MOD) variable
-# (a list of all source filenames) and some dynamically TCL generated targets.
-#
-# All targets, which depends on $(MOD) variable, must be called in two phases:
-# 1. Main run of make:
-# - target depends on $(GEN_MK_NAME) only (this will generate the file)
-# - target executes recursion of make
-# 2. Recursive run of make:
-# - already generated file $(GEN_MK_NAME) is included
-# - $(MOD) variable can be used to determine dependencies
-#- real target is executed
-#
-# Rule for $(GEN_MK_NAME) is better than previous approach (in which the file
-# was generated always, in the parse phase of the main Makefile):
-# - it reflects target-specific assignments
-# - output of the process of generation $(GEN_MK_NAME) can be printed to user
-# - allows user to include this Makefile system even some Modules.tcl not yet exists
-
-# a) In the recursive run of make include the generated file $(GEN_MK_NAME)
-# - all real rules must be specified in main Makefile and wrapped in similar condition
-# b) In the main run of make create a rule for the $(GEN_MK_NAME) and rule for all targets, which needs $(GEN_MK_NAME)
-#   - user must specify all those targets in the $(GEN_MK_TARGETS) variable within main Makefile
+# $(GEN_MK_NAME) holds $(MOD) (source list) plus TCL-generated targets. Two-phase make: phase 1
+# depends only on it and recurses; phase 2 includes it, using $(MOD) for the real target. List
+# phase-2 targets in $(GEN_MK_TARGETS).
 ifneq ($(GEN_MK_TARGET),)
 include $(GEN_MK_NAME)
 
@@ -81,12 +62,8 @@ ifneq ($(RANDOM_SEED),)
 COCOTB_RUN_ARGS += COCOTB_RANDOM_SEED=$(RANDOM_SEED)
 endif
 
-# Debug / NVC options
-# When DEBUG_ENABLE=true, waveform/introspection flags are added to the
-# relevant nvc step: --no-collapse at elaboration (keep all signals visible),
-# -w and --dump-arrays at run (dump the waveform incl. array-typed signals).
-# With DEBUG_ENABLE=false (default) none of these are emitted, so simulation
-# runs without the substantial waveform-dumping overhead.
+# Debug/NVC options: DEBUG_ENABLE=true adds waveform flags to nvc (--no-collapse at elaboration,
+# -w/--dump-arrays at run); false (default) omits them, avoiding the waveform-dump overhead.
 DEBUG_ENABLE?=false
 ifeq ($(DEBUG_ENABLE),true)
 NVC_ELAB_ARGS += --no-collapse
@@ -138,11 +115,9 @@ nvc-elab: $(MOD)
 	nvc --work=nvcwork -H 1G -M 16G --std=2008 -a --relaxed $(filter %.vhd,$(MOD))
 	nvc --work=nvcwork -H 1G -M 16G -e -O3 $(NVC_ELAB_ARGS) $(TOP_LEVEL_ENT_LC)
 
-# nvc-run: run only, reusing an already-built nvcwork/ (no analyze/elaborate).
-# For fast iteration on cocotb Python (models/tests) — which nvc loads at run time,
-# so the elaborated design does not change. Run `make nvc-elab` (or `make nvc-sim`)
-# once, then `COCOTB_TESTCASE=<name> make nvc-run` per Python edit (skips the ~50 s
-# analyze+elaborate). Requires nvcwork/ to already exist from a prior elaboration.
+# nvc-run: run only, reusing an already-built nvcwork/ (no analyze/elaborate) -- for fast
+# iteration on cocotb Python, which nvc loads at run time. Run `make nvc-elab` once, then
+# `COCOTB_TESTCASE=<name> make nvc-run` per edit.
 nvc-run: $(MOD)
 	$(eval TOP_LEVEL_ENT_LC:=$(shell echo $(TOP_LEVEL_ENT) | tr '[:upper:]' '[:lower:]'))
 	$(NVC_RUN_ENV) $(COCOTB_ENV) nvc --work=nvcwork -H 1G -M 16G -r $(NVC_RUN_ARGS) $(TOP_LEVEL_ENT_LC) --ieee-warnings=off $(NVC_LOAD)

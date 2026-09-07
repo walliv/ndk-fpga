@@ -23,11 +23,16 @@ See trans_buffer_model.py for the reference model and NVC_ARRAY_DEMUX_ARTIFACT n
 discovered nvc-1.21.0-specific simulation artifact and how the stimulus generator avoids it.
 
 Environment knobs:
-  TB_TXN_GAP -- "1" (default) keeps the historical behavior of inserting one no-op word after
-    every generated write transaction (see NVC_ARRAY_DEMUX_ARTIFACT below). Set to "0" to disable
-    those inserted gaps so back-to-back transactions can be driven at true line rate; this is only
-    a mitigation for a bug in the *old* per-byte-demux RTL and is not required for the banked
-    architecture, but is kept opt-in (default on) so the same testbench still covers both.
+  TB_TXN_GAP -- "1" (default) inserts one no-op word after every generated write transaction,
+    mitigating the per-byte-demux artifact described at NVC_ARRAY_DEMUX_ARTIFACT below. Not
+    required by the banked architecture, but kept opt-in (default on) so the same testbench
+    covers both. Set to "0" to drive back-to-back transactions at true line rate.
+  TB_FLAT -- must match the generic the DUT was elaborated with: "1" for a MEM_PARTITIONING=FALSE
+    (flat) elaboration, "0" (default) for partitioned. Selects which test set runs and how the
+    reference model is built; partitioned tests are skipped in flat mode and vice versa. Run both:
+      make sim-elab                                          && make sim-run       # partitioned
+      make sim-elab NVC_ELAB_ARGS="-g MEM_PARTITIONING=false \
+          -g CHANNELS=2 -g POINTER_WIDTH=18"                  && TB_FLAT=1 make sim-run  # flat
 """
 
 import os
@@ -45,13 +50,7 @@ CLK_PERIOD_NS = 4
 # See "Environment knobs" above.
 TB_TXN_GAP = os.environ.get("TB_TXN_GAP", "1") != "0"
 
-# TB_FLAT selects which test set runs and how the reference model is built. It MUST match the
-# generic the DUT was elaborated with: TB_FLAT="1" for a MEM_PARTITIONING=FALSE (flat/unpartitioned)
-# elaboration, "0" (default) for the partitioned elaboration. The partitioned directed/random tests
-# are skipped in flat mode and the flat tests are skipped in partitioned mode. Run both:
-#   make sim-elab                                              && make sim-run                # partitioned
-#   make sim-elab NVC_ELAB_ARGS="-g MEM_PARTITIONING=false \
-#       -g CHANNELS=2 -g POINTER_WIDTH=18"                     && TB_FLAT=1 make sim-run       # flat
+# See "Environment knobs" above.
 TB_FLAT = os.environ.get("TB_FLAT", "0") == "1"
 
 # Read data is only guaranteed valid ~6 cycles after the write word that produced it has been
@@ -59,10 +58,9 @@ TB_FLAT = os.environ.get("TB_FLAT", "0") == "1"
 # margin.
 WRITE_SETTLE_MARGIN = 20
 
-# The model/DUT instance persists for the whole simulation run (multiple @cocotb.test(skip=TB_FLAT)
-# functions execute against the *same* elaborated design and the same BRAM content -- RESET only
-# clears pipeline registers, not BRAM contents). Keep a single model object per run so its view of
-# the buffer content stays in sync with the DUT across tests.
+# The model/DUT persists for the whole run: @cocotb.test functions share one elaborated design and
+# BRAM content (RESET only clears pipeline registers), so keep one model object per run to stay in
+# sync with the DUT.
 _model = None
 
 
@@ -89,11 +87,8 @@ def encode_meta(addr_dw: int, chan: int, be: int, chan_width: int) -> int:
     return val
 
 
-# =================================================================================================
-# Stimulus generation -- builds lists of "word" dicts, each representing one accepted
-# (SRC_RDY='1') PCIE_MFB write word. Only the legal patterns described in the task spec are
-# produced here.
-# =================================================================================================
+# Stimulus generation: builds lists of "word" dicts, each one accepted (SRC_RDY='1') PCIE_MFB
+# write word, using only the legal patterns from the task spec.
 
 def _word(sof0, sof1, meta0, meta1, data64: bytes):
     assert len(data64) == MFB_BYTES
@@ -200,42 +195,9 @@ def rand_bytes(n):
     return bytes(random.randrange(256) for _ in range(n))
 
 
-# =================================================================================================
-# NVC_ARRAY_DEMUX_ARTIFACT
-#
-# Discovered while developing this testbench (nvc 1.21.0, this exact DUT, MEM_ARRAYS>1 configs
-# only -- i.e. the default CHANNELS=8/POINTER_WIDTH=16 config, which has MEM_ARRAYS=2):
-#
-# Two consecutive SOF0-only, fully-byte-enabled (BE=all ones, i.e. an address/DW-aligned first
-# word with byte_offset=0 and a payload of >=64 B) write words, whose SOF-carried META_MEM_ARR_IDX
-# bit *differs* between them (i.e. their target channels resolve to *different* memory arrays),
-# cause the RTL's write_be array-demux (wr_bram_data_demux_p, the "MEM_ARRAYS > 1" generate
-# branch in tx_dma_pcie_trans_buffer.vhd) to route the *second* word's data into the *first*
-# word's memory array under nvc, silently corrupting a different channel's storage (verified with
-# internal-signal probing: mem_arr_idx_next correctly evaluates to the new array index, yet the
-# wr_be_bram_demux(<idx>)(0) assignment in the very same process/cycle uses the *old* array index).
-# The RTL source was read carefully; per VHDL semantics wr_bram_data_demux_p's "if
-# pcie_mfb_sof_inp_reg(i)='1' then wr_be_bram_demux(to_integer(unsigned(pcie_mfb_meta_arr(i)
-# (META_MEM_ARR_IDX))))(i) <= ..." branch should read pcie_mfb_meta_arr directly (not any
-# register) and is therefore expected to be correct every cycle regardless of write history; the
-# failure only appears under nvc and disappears if any word without a "fully enabled" SOF0 (e.g.
-# a no-op/DMA-header word, BE=0) is interposed. This looks like an nvc front-end bug in resolving
-# a doubly-dynamically-indexed 1-bit slice (`pcie_mfb_meta_arr(i)(META_MEM_ARR_IDX)`, itself a
-# single-bit natural-range subtype) used as a `to_integer(unsigned(...))` array index, reusing a
-# stale evaluation from an earlier delta. It reproduces identically at -O0 and -O3.
-#
-# This is NOT worked around by modifying the RTL (out of scope / forbidden by the task). Instead,
-# every multi-word helper below inserts one no-op ("DMA header", BE=0) word after each generated
-# transaction; empirically this reliably prevents the stale-index reuse. This only matters for the
-# MEM_ARRAYS>1 default config; the CHANNELS=32/POINTER_WIDTH=13 config used to prove genericity
-# has MEM_ARRAYS=1 (see tx_dma_pcie_trans_buffer.vhd's CHANS_PER_ARRAY/MEM_ARRAYS constants) and
-# does not instantiate the affected generate branch at all.
-# =================================================================================================
+# nvc 1.21.0 misroutes the write demux when two fully-byte-enabled SOF0 words differ in
+# META_MEM_ARR_IDX; TB_TXN_GAP=1 avoids it. See readme.rst, "nvc array-demux artifact".
 
-
-# =================================================================================================
-# Driver / reader
-# =================================================================================================
 
 class Testbench:
     def __init__(self, dut):
@@ -584,20 +546,6 @@ async def test_wraparound(dut):
     assert got2 == exp2, f"wraparound read-window mismatch: got={got2.hex()} exp={exp2.hex()}"
 
 
-# =================================================================================================
-# Randomized verification
-#
-# test_random_soak: pure random legal MFB write stimulus (random channels/addresses/lengths/byte
-#   enables/idle gaps), modeled in lockstep, with single-shot retried reads interleaved into the
-#   still-running write stream (exercising the write-priority BRAM stall/retry path) plus a final
-#   read-back pass.
-#
-# test_random_read_patterns: a second, independently-seeded random write batch, then the same
-#   data is read back through *three* different read-side access patterns (single retried reads,
-#   pipelined back-to-back burst reads, and burst reads interleaved with a concurrent write
-#   stream) to specifically exercise read-pattern diversity on RD_*_A.
-# =================================================================================================
-
 def _gen_random_transaction(tb, chan, length):
     """Pick a random legal pattern (a: region-0 anchored, d: region-1-only, c: dual-SOF) for a
     transaction of `length` bytes on `chan` (and, for pattern c, an independent short region-0
@@ -628,6 +576,9 @@ def _gen_random_transaction(tb, chan, length):
 
 @cocotb.test(skip=TB_FLAT)
 async def test_random_soak(dut):
+    """Pure random legal MFB write stimulus, modeled in lockstep, with single-shot retried reads
+    interleaved into the still-running write stream (exercising the write-priority BRAM
+    stall/retry path), plus a final read-back pass."""
     random.seed(RANDOM_SEED + 4)
     tb = Testbench(dut)
     await tb.start_clock()
@@ -816,10 +767,9 @@ async def test_random_read_patterns(dut):
         assert window[:len(data)] == data, f"burst-read pattern mismatch chan={chan} start={start} len={len(data)}"
     cocotb.log.info(f"test_random_read_patterns: burst-read pattern verified {len(reqs)} windows")
 
-    # --- Pattern 3: burst reads interleaved with a concurrent (independent) write stream ----
-    # A fresh batch of transactions is streamed in the background while we simultaneously issue
-    # pipelined burst reads of the *earlier* (already-settled) entries -- exercising write-
-    # priority stalls under back-to-back read pressure.
+    # Pattern 3: stream a fresh batch of transactions in the background while issuing pipelined
+    # burst reads of earlier, already-settled entries, exercising write-priority stalls under
+    # back-to-back read pressure.
     extra_words = []
     for _ in range(200):
         chan = random.randrange(tb.channels)
@@ -914,16 +864,8 @@ async def test_byte_overlap_line_rate(dut):
         await check(chan_b, 0x41, d2, "d-cross-chan-t2")
 
 
-# =================================================================================================
-# Flat (unpartitioned) addressing tests -- MEM_PARTITIONING=FALSE (TB_FLAT="1")
-#
-# In this mode the DUT ignores the channel index (write META channel field and RD_CHAN_*) and the
-# whole CHANNELS*2**POINTER_WIDTH-byte array is one contiguous space addressed by the address field
-# alone (write META PCIe DWord address / the widened RD_ADDR_* byte address). The reference model
-# (partitioned=False) mirrors this with a single flat buffer. To positively prove the channel index
-# is ignored, every write/read below drives a deliberately arbitrary ("noise") channel value that
-# does NOT correspond to the physical region the address selects.
-# =================================================================================================
+# MEM_PARTITIONING=FALSE (TB_FLAT="1"): the whole array is one flat space, so a channel's
+# pointer addresses any region and the channel index no longer selects the physical region.
 
 def _noise_chan(channels):
     return random.randrange(channels) if channels > 1 else 0

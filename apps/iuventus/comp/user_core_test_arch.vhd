@@ -71,9 +71,9 @@ architecture TEST of USER_CORE is
     signal wr_mfb_pkt_cnt_reg      : unsigned(15 downto 0);
     signal wr_mfb_word_cnt_reg     : unsigned(15 downto 0);
 
-    -- Read-side QID round-robin: min/max queue for the range and burst (number of read requests
-    -- sent to a queue before advancing to the next one), mirroring MFB_GENERATOR_MI32 semantics.
-    -- Default (0,0) keeps every read request on queue 0 until software configures the range.
+    -- Read-side QID round-robin: min/max queue for the range and burst (read requests sent to a
+    -- queue before advancing), mirroring MFB_GENERATOR_MI32 semantics. Default (0,0) keeps every
+    -- read on queue 0 until configured.
     signal rd_ch_min_reg   : std_logic_vector(QID_W -1 downto 0);
     signal rd_ch_max_reg   : std_logic_vector(QID_W -1 downto 0);
     signal rd_burst_reg    : std_logic_vector(15 downto 0);
@@ -81,11 +81,9 @@ architecture TEST of USER_CORE is
     signal rd_burst_cntr   : unsigned(15 downto 0);
     -- Round-robin QID for the read-request submit interface; forced to 0 when NUM_QUEUES = 1.
     signal gen_rd_req_qid  : std_logic_vector(QID_W -1 downto 0);
-    -- Round-robin candidate queue selected THIS cycle by rd_qid_select_p: the next queue at/after
-    -- rd_qid_cntr, wrapping within [rd_ch_min_reg, rd_ch_max_reg], whose SQ currently has room
-    -- (NVME_RD_REQ_QUEUE_RDY). Presented as gen_rd_req_qid instead of the raw rd_qid_cntr so a
-    -- full queue is skipped rather than livelocking the round-robin on it (OP_CTRL is a
-    -- single-issue serial FSM; presenting a full queue would stall every other queue too).
+    -- Round-robin candidate this cycle: next queue at/after rd_qid_cntr in [rd_ch_min_reg,
+    -- rd_ch_max_reg] with SQ room, skipping a full one rather than livelocking (OP_CTRL is
+    -- single-issue, so a full queue stalls every queue).
     signal rd_qid_cand     : unsigned(QID_W -1 downto 0);
     -- '1' when rd_qid_cand is actually ready (some queue in [min,max] currently has room); '0'
     -- when every queue in range is full -- gates NVME_RD_REQ_VLD off so the generator holds
@@ -103,10 +101,9 @@ architecture TEST of USER_CORE is
     signal gen_mfb_src_rdy : std_logic;
     signal gen_mfb_dst_rdy : std_logic;
 
-    -- Write-side QID pipeline: MFB_GENERATOR_MI32's built-in round-robin channel (CHANNELS_WIDTH
-    -- set to QID_W) is used directly as the target QID. Its raw per-region meta ([channel|length])
-    -- is threaded through MFB_RECONFIGURATOR alongside the data/SOF/EOF so that the channel value
-    -- stays aligned with the (possibly re-timed/FIFO-buffered) frame it belongs to.
+    -- Write-side QID: MFB_GENERATOR_MI32's round-robin channel (CHANNELS_WIDTH=QID_W) is the
+    -- target QID. Its per-region [channel|length] meta threads through MFB_RECONFIGURATOR with
+    -- the data/SOF/EOF so the channel stays aligned with its frame.
     signal gen_mfb_meta          : std_logic_vector(DMA_MFB_REGIONS*(QID_W + GEN_LENGTH_WIDTH) -1 downto 0);
     signal gen_mfb_qid           : std_logic_vector(DMA_MFB_REGIONS*QID_W -1 downto 0);
     signal gen_nvme_wr_qid       : std_logic_vector(DMA_MFB_REGIONS*QID_W -1 downto 0);
@@ -438,12 +435,9 @@ begin
         end if;
     end process;
 
-    -- Read-side QID round-robin range and burst registers.
-    -- 0x58 RD_CH_MINMAX: [QID_W-1:0] = rd_ch_min, [16+QID_W-1:16] = rd_ch_max (mirrors the write
-    --                    side's MFB_GENERATOR_MI32 ch_min/ch_max register format at 0x0C).
-    -- 0x5C RD_BURST:     [15:0] = number of read requests sent to a queue before advancing to the
-    --                    next one (default 1). Both reset to (0,0)/1 => queue 0 only until
-    --                    software configures the range.
+    -- Read-side QID range/burst registers. 0x58 RD_CH_MINMAX: [QID_W-1:0]=rd_ch_min,
+    -- [16+QID_W-1:16]=rd_ch_max (mirrors 0x0C). 0x5C RD_BURST: [15:0]=requests per queue before
+    -- advancing (default 1); reset (0,0)/1 => queue 0 only.
     rd_ch_minmax_reg_p : process (DMA_CLK)
     begin
         if (rising_edge(DMA_CLK)) then
@@ -469,9 +463,8 @@ begin
     end process;
 
     -- Combinational round-robin scan: pick the next ready queue at/after rd_qid_cntr within
-    -- [rd_ch_min_reg, rd_ch_max_reg] (wrapping); see rd_qid_cand's declaration comment. At
-    -- NUM_QUEUES = 1 this always resolves to queue 0, with rd_qid_cand_rdy mirroring
-    -- NVME_RD_REQ_QUEUE_RDY(0).
+    -- [rd_ch_min_reg, rd_ch_max_reg] (wrapping). At NUM_QUEUES=1 this always resolves to queue 0,
+    -- rd_qid_cand_rdy mirroring core_rd_req_rdy(0).
     rd_qid_select_p : process (all)
         variable cand_v  : unsigned(QID_W -1 downto 0);
         variable found_v : std_logic;
@@ -507,11 +500,9 @@ begin
         rd_qid_cand_rdy <= found_v;
     end process;
 
-    -- Round-robin QID counter for read requests: advances by one queue every rd_burst accepted
-    -- requests, wrapping from rd_ch_max back to rd_ch_min. Tracks the queue actually used
-    -- (rd_qid_cand, which may have skipped ahead of the raw rd_qid_cntr -- see rd_qid_select_p)
-    -- rather than the raw counter, so the round-robin keeps making progress even when the
-    -- nominal next queue is (still) full.
+    -- Read QID counter advances one queue per rd_burst accepted requests, wrapping rd_ch_max
+    -- to rd_ch_min; tracks the queue actually used (rd_qid_cand, may skip ahead) so it
+    -- progresses even when the nominal next queue is full.
     rd_qid_rr_p : process (DMA_CLK)
     begin
         if (rising_edge(DMA_CLK)) then
@@ -638,9 +629,9 @@ begin
                            nvme_rd_req_lba_ptr_reg when (tst_finished = '1' and contig_test = '0') else
                            std_logic_vector(resize(std_logic_vector(tst_addr), NVME_RD_REQ_LBA_PTR'length));
     NVME_RD_REQ_LBA_NUM <= chk_rd_req_lba_num when (integ_en = '1') else nvme_rd_req_lba_num_reg;
-    -- Non-blocking round-robin: withhold VLD (rather than offering a request to a queue that
-    -- would just stall) when no queue in [rd_ch_min..rd_ch_max] currently has SQ room -- see
-    -- rd_qid_cand_rdy's declaration comment. The checker path (integ_en='1') is unaffected.
+    -- Non-blocking round-robin: withhold VLD instead of offering a request to a queue that would
+    -- stall, when no queue in [rd_ch_min..rd_ch_max] has SQ room -- see rd_qid_cand_rdy. The
+    -- checker path (integ_en='1') is unaffected.
     NVME_RD_REQ_VLD     <= chk_rd_req_vld     when (integ_en = '1') else (gen_nvme_rd_req_vld and rd_qid_cand_rdy);
     -- Read-request QID: round-robin counter for the throughput generator, queue 0 / rd_ch_min for
     -- the checker; both are forced to 0 above when NUM_QUEUES = 1.
@@ -649,10 +640,9 @@ begin
     gen_wr_meta_lba <= nvme_wr_req_lba_ptr_reg when (tst_finished = '1' and contig_test = '0') else
                        std_logic_vector(resize(std_logic_vector(tst_addr), NVME_RD_REQ_LBA_PTR'length));
 
-    -- Assemble the widened write meta per region: [QID (high QID_W bits) | LBA_PTR (low
-    -- SQE_LBA_PTR_W bits)]. The LBA content itself is not region-indexed (single active address
-    -- counter/register), matching this test architecture's existing single-active-target design;
-    -- only the QID differs per region, taken from the throughput generator's round-robin channel.
+    -- Widened write meta: [QID (high QID_W bits) | LBA_PTR (low SQE_LBA_PTR_W bits)]. LBA is
+    -- not region-indexed (one active address register); only QID differs per region, from the
+    -- generator's round-robin channel.
     nvme_wr_mfb_meta_g : for r in 0 to DMA_MFB_REGIONS -1 generate
         NVME_WR_MFB_META((r+1)*(SQE_LBA_PTR_W + QID_W) -1 downto r*(SQE_LBA_PTR_W + QID_W)) <=
             (checker_qid & chk_wr_meta) when (integ_en = '1') else
@@ -888,12 +878,8 @@ begin
     -- (unconfigured) channel default.
     gen_nvme_wr_qid_mskd <= (others => '0') when (NUM_QUEUES = 1) else gen_nvme_wr_qid;
 
-    -- =============================================================================
-    -- Latency measurement
-    --
-    -- WARNING: Presumes that the size of the NVMe storage be at least 512 GiB because
-    -- the addresses count with this range
-    -- =============================================================================
+    -- Latency measurement -- assumes the NVMe storage is at least 512 GiB, since addresses are
+    -- counted across that range.
     data_logger_i : entity work.DATA_LOGGER
     generic map (
         MI_DATA_WIDTH => MI_WIDTH,
@@ -1033,10 +1019,9 @@ begin
             if (DMA_RST = '1' or data_logger_rst = '1' or tst_trigg = '1') then
                 seq_addr_cntr <= resize(unsigned(nvme_rd_req_lba_ptr_reg), seq_addr_cntr'length);
             elsif (NVME_OP_STAT_VLD = '1' and (tst_finished = '0' or contig_test = '1')) then
-                -- NVME_RD_REQ_LBA_NUM is a 0-based LBA count (0 => 1 LBA), so the number of LBAs
-                -- actually accessed is lba_num + 1. Advance the sequential address by that full
-                -- count so successive reads/writes are contiguous and never overlap (the SQE's own
-                -- NLB field stays 0-based; only the address step is corrected here).
+                -- NVME_RD_REQ_LBA_NUM is 0-based (0 => 1 LBA), so LBAs accessed = lba_num+1;
+                -- advance the address by that count to stay contiguous (SQE's NLB stays 0-based;
+                -- only the address step is corrected).
                 seq_addr_cntr <= seq_addr_cntr + resize(unsigned(nvme_rd_req_lba_num_reg), seq_addr_cntr'length) + 1;
             end if;
         end if;

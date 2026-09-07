@@ -104,11 +104,9 @@ entity USER_CORE is
         NVME_RD_MFB_SRC_RDY : in  std_logic;
         NVME_RD_MFB_DST_RDY : out std_logic;
 
-        -- =========================================================================================
         -- Write interface
         --
-        -- Althougn the data size seems unlimited, the maximum is 128 KiB, or 256 LBAs/32 pages
-        -- =========================================================================================
+        -- Data size is not unlimited: the maximum is 128 KiB, or 256 LBAs/32 pages
         NVME_WR_MFB_DATA    : out std_logic_vector(DMA_MFB_REGIONS*DMA_MFB_REGION_SIZE*DMA_MFB_BLOCK_SIZE*DMA_MFB_ITEM_WIDTH-1 downto 0);
         -- Per region: bits [SQE_LBA_PTR_W-1:0] = LBA address to which data should be written;
         -- bits [SQE_LBA_PTR_W+QID_W-1:SQE_LBA_PTR_W] = Queue Identifier this write request targets

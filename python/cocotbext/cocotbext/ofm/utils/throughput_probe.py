@@ -153,7 +153,8 @@ class ThroughputProbe(Probe):
             raise ValueError(f"Unknown throughput units '{self._throughput_units}'. Possible units are: 'items', 'bits', 'bytes'.")
 
     def log_average_throughput(self, throughput_units: str = None) -> None:
-        """Prints out average throughput and efficiency."""
+        """Efficiency is reported beside the rate because a rate alone cannot show whether the
+        bus was idle or merely slow."""
         throughput, throughput_units = self._convert_throughput_units(self._get_average_throughput(), throughput_units)
         self.log.info(f"Average throughput: {round(throughput, 4):,} {throughput_units}/s, Average efficiency: {round(self._get_average_efficiency()*100, 4)}%")
 

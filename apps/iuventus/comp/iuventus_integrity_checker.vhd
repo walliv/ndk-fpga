@@ -11,16 +11,9 @@ use ieee.numeric_std.all;
 use work.math_pack.all;
 use work.type_pack.all;
 
--- Reuses the classic memory-tester flow (cf. MEM_TESTER / HBM_TESTER): write a reproducible,
--- address-derived pattern to a range of LBAs through the DMA-Iuventus WRITE path, then read the
--- same LBAs back through the READ path and compare each returned beat against the regenerated
--- pattern in fabric. A single command is kept outstanding at a time (QD1 "incremental" mode) so a
--- returned RD_MFB frame -- which carries no LBA tag -- is unambiguously the LBA just requested.
---
--- The pattern embeds the LBA in every 64-bit word, so a mismatch flags both bit corruption and a
--- wrong-block return. ERR_CNT accumulates mismatching beats; the first mismatch is latched for
--- software inspection. All control/status is exposed to the enclosing test core over simple
--- register-style ports (no MI here -- the test core owns the MI decode).
+-- Writes an address-derived pattern to LBAs, reads it back, compares each beat; QD1 makes a
+-- returned RD_MFB frame (no LBA tag) unambiguous. The LBA embedded in every word flags both
+-- corruption and wrong-block returns. Control/status only.
 entity IUVENTUS_INTEGRITY_CHECKER is
     generic (
         -- User MFB geometry (REGIONS is fixed to 1). DATA width = REGION_SIZE*BLOCK_SIZE*ITEM_WIDTH.
@@ -73,10 +66,9 @@ entity IUVENTUS_INTEGRITY_CHECKER is
 
         -- ---- Operation completion (one pulse per finished NVMe command) ----------------------
         OP_STAT_VLD    : in  std_logic;
-        -- op_ctrl's completion code for that pulse: "00"=SUCCESS, "01"=generic failure, "10"=LBA
-        -- Out of Range. Any non-"00" code aborts the current sweep (S_WR_WAIT / S_RD_DATA -> S_DONE
-        -- with STS_OP_ERR set) so an OOR/failed command can never wedge the FSM waiting for a CQE
-        -- that succeeded internally or read-back data that will never drain.
+        -- op_ctrl's completion code: "00"=SUCCESS, "01"=generic failure, "10"=LBA Out of
+        -- Range. A non-"00" code aborts the sweep (-> S_DONE, STS_OP_ERR) so a failed command
+        -- can't wedge the FSM on a CQE or read-back that never drains.
         OP_STAT_CODE   : in  std_logic_vector(1 downto 0);
 
         -- ---- DMA-Iuventus READ data path (SSD -> host) --------------------------------------
@@ -96,9 +88,8 @@ architecture FULL of IUVENTUS_INTEGRITY_CHECKER is
     constant WORDS_BEAT : natural := DATA_W/64;                                      -- 64-bit words per beat
     constant BEAT_IDX_W : natural := max(1, log2(SECT_BEATS));
 
-    -- Address-derived reference pattern for one 512-bit beat. Each 64-bit word j carries the LBA
-    -- (byte address >> 9 -> low 32 bits) in its high half and the sector-global 64-bit word index
-    -- in its low half, so any bit flip or wrong-block return produces a mismatch.
+    -- Address-derived reference pattern per 512-bit beat: 64-bit word j carries the LBA (address >> 9)
+    -- in its high half and the sector-global word index in its low half, catching bit flips and wrong-block reads.
     function ref_beat (lba : unsigned; beat : unsigned) return std_logic_vector is
         variable res     : std_logic_vector(DATA_W -1 downto 0) := (others => '0');
         variable widx    : unsigned(31 downto 0);
@@ -263,10 +254,10 @@ begin
                                 beat_idx <= beat_idx + 1;
                             end if;
                         elsif (OP_STAT_VLD = '1' and OP_STAT_CODE /= OP_STAT_SUCCESS) then
-                            -- OOR / device error read: op_ctrl completes it internally and never
-                            -- drains WRBUFF, so RD_MFB data will NEVER arrive -- abort instead of
-                            -- hanging in S_RD_DATA (a successful read's OP_STAT carries "00" and is
-                            -- ignored here; its data is consumed by the RD_MFB_SRC_RDY branch above).
+                            -- OOR / device error read: op_ctrl completes it internally without
+                            -- draining WRBUFF, so RD_MFB data never arrives -- abort instead of
+                            -- hanging in S_RD_DATA (a successful read's OP_STAT is "00", ignored
+                            -- here).
                             op_err <= '1';
                             state  <= S_DONE;
                         end if;

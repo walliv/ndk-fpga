@@ -573,14 +573,9 @@ class LatencyMeter(DataLogger):
             self.rst()
 
 
-# --- Importable run-logic, factored out of main() below --------------------------------------
-# These functions take an ALREADY-OPEN IuventusTest (`test`) / LatencyMeter (`lmeter`) /
-# LatencyMeterOutput (`lm_output`) plus already-parsed parameters -- no argparse, no nfb.open()
-# -- so both main()'s CLI handlers and non-CLI callers (e.g. a cocotb testbench driving these
-# exact same code paths against a simulated USER_CORE DUT) can call them identically. main()'s own
-# behavior (registers poked, prints, files written) is unchanged: it simply calls into these
-# instead of running the equivalent code inline.
-
+# --- Importable run-logic, factored out of main() below ---
+# These take an ALREADY-OPEN IuventusTest/LatencyMeter plus parsed parameters -- no argparse, no
+# nfb.open() -- so main()'s CLI handlers and a cocotb testbench drive the same code paths.
 def run_read_dispatch(test: IuventusTest, lba_ptr: int, lba_num: int) -> None:
     """CLI '-r LBA_PTR LBA_NUM': dispatch one manual read request."""
     test.disp_rd_req(lba_ptr, lba_num)
