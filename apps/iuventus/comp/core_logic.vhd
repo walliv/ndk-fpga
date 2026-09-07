@@ -104,8 +104,6 @@ architecture FULL of CORE_LOGIC is
     constant HEARTBEAT_CNT_W    : natural := 27;
     constant CLK_COUNT          : natural := 3;
     constant DMA_STREAMS        : natural := PCIE_ENDPOINTS;
-    constant PCIE_MPS           : natural := 256;
-    constant PCIE_MRRS          : natural := 512;
     constant IS_USP_PCIE_EP     : boolean := (PCIE_MOD_ARCH = "USP" or PCIE_MOD_ARCH = "USP_PCIE4" or PCIE_MOD_ARCH = "USP_PCIE4C");
     constant RESET_WIDTH        : natural := 10;
     constant FPGA_ID_WIDTH      : natural := tsel(DEVICE = "ULTRASCALE", 96, 64);
@@ -140,6 +138,82 @@ architecture FULL of CORE_LOGIC is
     -- Number of independent SQ/CQ queues (one per SSD) the DMA_IUVENTUS core and USER_CORE are
     -- built with. QUEUE_DEPTH is left at its DMA_IUVENTUS default (16) here.
     constant NUM_QUEUES : natural := 4;
+
+    -- HBM invariant: one bank per AXI port, both directions on its own channels, and no port
+    -- addresses another's pseudo-channel -- the AXI switch is off (hbm_ip.ip.tcl), so a
+    -- cross-port access silently hits the wrong bank. Data ports run at 450 MHz.
+    constant HBM_PORTS       : natural := 32;
+    constant HBM_DATA_WIDTH  : natural := 256;
+    constant HBM_ADDR_WIDTH  : natural := 34;
+    constant HBM_BURST_WIDTH : natural := 2;
+    constant HBM_ID_WIDTH    : natural := 6;
+    constant HBM_LEN_WIDTH   : natural := 4;
+    constant HBM_SIZE_WIDTH  : natural := 3;
+    constant HBM_RESP_WIDTH  : natural := 2;
+    -- Stack 0 is ports 0..15, stack 1 is 16..31. The smoke port sits at 16 -- the first port of
+    -- stack 1 -- so every connected port lives in one stack and stack 0 is left entirely unused.
+    constant HBM_SMOKE_PORT  : natural := 16;
+
+    -- One port per bank, both directions; Global Addressing off (PG276). Ports 24..26 sit
+    -- under X6Y0, 28..30 under X7Y0, giving each buffer its own column instead of stacking
+    -- all four masters over the most congested fabric in SLR0.
+    constant HBM_WRBUFF_WR_PORT0 : natural := 26;
+    constant HBM_WRBUFF_WR_PORT1 : natural := 25;
+    constant HBM_WRBUFF_RD_PORT0 : natural := HBM_WRBUFF_WR_PORT0;
+    constant HBM_WRBUFF_RD_PORT1 : natural := HBM_WRBUFF_WR_PORT1;
+    constant HBM_RDBUFF_WR_PORT0 : natural := 19;
+    constant HBM_RDBUFF_WR_PORT1 : natural := 20;
+    constant HBM_RDBUFF_RD_PORT0 : natural := HBM_RDBUFF_WR_PORT0;
+    constant HBM_RDBUFF_RD_PORT1 : natural := HBM_RDBUFF_WR_PORT1;
+
+    -- Every port addresses only its own pseudo-channel, so every base is 0. The former
+    -- hbm_port_base_f(idx) = idx * 0x2000_0000 global map is gone with the switch that needed it.
+    constant HBM_ZERO_BASE : std_logic_vector(34-1 downto 0) := (others => '0');
+    constant HBM_WRBUFF_WR_PORT0_BASE : std_logic_vector(34-1 downto 0) := HBM_ZERO_BASE;
+    constant HBM_WRBUFF_WR_PORT1_BASE : std_logic_vector(34-1 downto 0) := HBM_ZERO_BASE;
+    constant HBM_WRBUFF_RD_PORT0_BASE : std_logic_vector(34-1 downto 0) := HBM_ZERO_BASE;
+    constant HBM_WRBUFF_RD_PORT1_BASE : std_logic_vector(34-1 downto 0) := HBM_ZERO_BASE;
+    constant HBM_RDBUFF_WR_PORT0_BASE : std_logic_vector(34-1 downto 0) := HBM_ZERO_BASE;
+    constant HBM_RDBUFF_WR_PORT1_BASE : std_logic_vector(34-1 downto 0) := HBM_ZERO_BASE;
+    constant HBM_RDBUFF_RD_PORT0_BASE : std_logic_vector(34-1 downto 0) := HBM_ZERO_BASE;
+    constant HBM_RDBUFF_RD_PORT1_BASE : std_logic_vector(34-1 downto 0) := HBM_ZERO_BASE;
+
+    -- True only for the smoke port: the DMA-driven ports (28..31) are excluded so the smoke-test
+    -- demux cannot collide with them. PORT_SEL's fallback maps to the smoke port, which is also
+    -- its reset value.
+    function hbm_port_wired_f (idx : natural) return boolean is
+    begin
+        return (idx = HBM_SMOKE_PORT);
+    end function;
+
+    -- Ports the DMA drives directly, rather than through the smoke-test demux. Membership is by
+    -- EQUALITY, never a PORT0..PORT1 range: the two numbers per buffer are independent and need
+    -- not ascend. A port missing here is tied off and never returns BRESP.
+    function hbm_dma_driven_port_f (idx : natural) return boolean is
+    begin
+        return idx = HBM_WRBUFF_WR_PORT0 or idx = HBM_WRBUFF_WR_PORT1 or
+               idx = HBM_RDBUFF_WR_PORT0 or idx = HBM_RDBUFF_WR_PORT1;
+    end function;
+
+    -- Every DMA port drives BOTH directions, so this is simply "is it a DMA port". Kept as a
+    -- named function because AXI_PIPE still takes separate WRITE_EN/READ_EN.
+    function hbm_read_port_f (idx : natural) return boolean is
+    begin
+        return hbm_dma_driven_port_f(idx);
+    end function;
+
+    -- Ports on the 450 MHz HBM clock (mmcm_450_i): the same set as hbm_dma_driven_port_f, named
+    -- separately since clock domain and AXI-driver are logically distinct even though they
+    -- coincide. Take port numbers from the constants above, not this comment.
+    function hbm_450_port_f (idx : natural) return boolean is
+    begin
+        return hbm_dma_driven_port_f(idx);
+    end function;
+
+    -- AXI_PIPE stages per active data port on the 450 MHz side (hbm_axi_cdc_bridge_i -> hbm_ip, see
+    -- hbm_450_pipe_i) help close timing; stage count is a tunable top-level knob. Added latency is
+    -- acceptable; lost throughput is not.
+    constant HBM_450_PIPE_STAGES : natural := 2;
 
     -- DMA MFB RQ parameters
     constant PCIE_RQ_MFB_REGIONS     : natural := pcie_mfb_regions_calc_f("RQ");
@@ -257,19 +331,25 @@ architecture FULL of CORE_LOGIC is
 
     signal nvme_rd_req_lba_num : slv_array_t(DMA_STREAMS-1 downto 0)(7 downto 0);
     signal nvme_rd_req_lba_ptr : slv_array_t(DMA_STREAMS-1 downto 0)(SQE_LBA_PTR_W -1 downto 0);
-    signal nvme_rd_req_vld     : std_logic_vector(DMA_STREAMS-1 downto 0);
-    signal nvme_rd_req_rdy     : std_logic_vector(DMA_STREAMS-1 downto 0);
+    signal nvme_rd_req_vld     : slv_array_t(DMA_STREAMS-1 downto 0)(NUM_QUEUES -1 downto 0);
+    signal nvme_rd_req_rdy     : slv_array_t(DMA_STREAMS-1 downto 0)(NUM_QUEUES -1 downto 0);
     signal nvme_rd_req_qid     : slv_array_t(DMA_STREAMS-1 downto 0)(maximum(1, log2(NUM_QUEUES)) -1 downto 0);
-    -- Per-queue "DMA can accept a read" (mirrors the DMA core's SQ_HAS_SPACE), passed to
-    -- USER_CORE so its round-robin generator can skip a full queue -- see
-    -- NVME_RD_REQ_QUEUE_RDY.
-    signal nvme_rd_req_queue_rdy : slv_array_t(DMA_STREAMS-1 downto 0)(NUM_QUEUES -1 downto 0);
+    -- Tag the accepted read was submitted under, qualified by CID_VLD. Published a few cycles
+    -- after the accept, so it names the last accepted read rather than the current handshake.
+    signal nvme_rd_req_cid     : slv_array_t(DMA_STREAMS-1 downto 0)(CQ_ENTRY_CMD_ID_W -1 downto 0);
+    signal nvme_rd_req_cid_vld : std_logic_vector(DMA_STREAMS-1 downto 0);
 
     signal nvme_op_stat_type : std_logic_vector(DMA_STREAMS-1 downto 0);
     signal nvme_op_stat_code : slv_array_t(DMA_STREAMS-1 downto 0)(1 downto 0);
     signal nvme_op_stat_vld  : std_logic_vector(DMA_STREAMS-1 downto 0);
+    -- Identity of the reported command. CID is per-queue, so it names a command only together
+    -- with QID; neither is meaningful for an LBA-out-of-range rejection.
+    signal nvme_op_stat_qid  : slv_array_t(DMA_STREAMS-1 downto 0)(maximum(1, log2(NUM_QUEUES)) -1 downto 0);
+    signal nvme_op_stat_cid  : slv_array_t(DMA_STREAMS-1 downto 0)(CQ_ENTRY_CMD_ID_W -1 downto 0);
 
     signal nvme_rd_mfb_data    : slv_array_t(DMA_STREAMS -1 downto 0)(DMA_MFB_REGIONS*DMA_MFB_REGION_SIZE*DMA_MFB_BLOCK_SIZE*DMA_MFB_ITEM_WIDTH-1 downto 0);
+    -- Per region: QID above CID, naming the command whose data this frame carries.
+    signal nvme_rd_mfb_meta    : slv_array_t(DMA_STREAMS -1 downto 0)(DMA_MFB_REGIONS*(maximum(1, log2(NUM_QUEUES)) + CQ_ENTRY_CMD_ID_W) -1 downto 0);
     signal nvme_rd_mfb_sof     : slv_array_t(DMA_STREAMS -1 downto 0)(DMA_MFB_REGIONS-1 downto 0);
     signal nvme_rd_mfb_eof     : slv_array_t(DMA_STREAMS -1 downto 0)(DMA_MFB_REGIONS-1 downto 0);
     signal nvme_rd_mfb_sof_pos : slv_array_t(DMA_STREAMS -1 downto 0)(DMA_MFB_REGIONS*max(1, log2(DMA_MFB_REGION_SIZE))-1 downto 0);
@@ -285,6 +365,1206 @@ architecture FULL of CORE_LOGIC is
     signal nvme_wr_mfb_eof_pos : slv_array_t(DMA_STREAMS -1 downto 0)(DMA_MFB_REGIONS*max(1, log2(DMA_MFB_REGION_SIZE*DMA_MFB_BLOCK_SIZE))-1 downto 0);
     signal nvme_wr_mfb_src_rdy : std_logic_vector(DMA_STREAMS -1 downto 0);
     signal nvme_wr_mfb_dst_rdy : std_logic_vector(DMA_STREAMS -1 downto 0);
+
+    -- HBM AXI3 per-port clock/reset + IP-ready/init-done (Phase 0 smoke test)
+    signal hbm_axi_aclk     : std_logic_vector(HBM_PORTS -1 downto 0);
+    signal hbm_axi_areset_n : std_logic_vector(HBM_PORTS -1 downto 0);
+    signal hbm_ready        : std_logic_vector(1 downto 0);
+    signal hbm_ready_sync   : std_logic_vector(1 downto 0);
+    signal hbm_cattrip_int  : std_logic_vector(1 downto 0);
+    signal hbm_init_done    : std_logic;
+
+    -- Dedicated 450 MHz port clock (MMCME4_BASE from SYSCLK) drives the DMA-driven data ports
+    -- (hbm_450_port_f). hbm_450_arstn is the synchronized reset counterpart of pll_locked/global_reset,
+    -- active-low to match hbm_axi_areset_n's polarity.
+    signal hbm_450_clkfbout : std_logic;
+    signal hbm_450_clk_raw : std_logic;
+    signal hbm_450_clk     : std_logic;
+    signal hbm_450_locked  : std_logic;
+    signal hbm_450_rst_r   : std_logic_vector(0 downto 0);
+    signal hbm_450_arstn   : std_logic;
+
+    signal hbm_axi_araddr  : slv_array_t(HBM_PORTS-1 downto 0)(HBM_ADDR_WIDTH-1 downto 0);
+    signal hbm_axi_arburst : slv_array_t(HBM_PORTS-1 downto 0)(HBM_BURST_WIDTH-1 downto 0);
+    signal hbm_axi_arid    : slv_array_t(HBM_PORTS-1 downto 0)(HBM_ID_WIDTH-1 downto 0);
+    signal hbm_axi_arlen   : slv_array_t(HBM_PORTS-1 downto 0)(HBM_LEN_WIDTH-1 downto 0);
+    signal hbm_axi_arsize  : slv_array_t(HBM_PORTS-1 downto 0)(HBM_SIZE_WIDTH-1 downto 0);
+    signal hbm_axi_arvalid : std_logic_vector(HBM_PORTS-1 downto 0);
+    signal hbm_axi_arready : std_logic_vector(HBM_PORTS-1 downto 0);
+
+    signal hbm_axi_rdata        : slv_array_t(HBM_PORTS-1 downto 0)(HBM_DATA_WIDTH-1 downto 0);
+    signal hbm_axi_rdata_parity : slv_array_t(HBM_PORTS-1 downto 0)((HBM_DATA_WIDTH/8)-1 downto 0);
+    signal hbm_axi_rid          : slv_array_t(HBM_PORTS-1 downto 0)(HBM_ID_WIDTH-1 downto 0);
+    signal hbm_axi_rlast        : std_logic_vector(HBM_PORTS-1 downto 0);
+    signal hbm_axi_rresp        : slv_array_t(HBM_PORTS-1 downto 0)(HBM_RESP_WIDTH-1 downto 0);
+    signal hbm_axi_rvalid       : std_logic_vector(HBM_PORTS-1 downto 0);
+    signal hbm_axi_rready       : std_logic_vector(HBM_PORTS-1 downto 0);
+
+    signal hbm_axi_awaddr  : slv_array_t(HBM_PORTS-1 downto 0)(HBM_ADDR_WIDTH-1 downto 0);
+    signal hbm_axi_awburst : slv_array_t(HBM_PORTS-1 downto 0)(HBM_BURST_WIDTH-1 downto 0);
+    signal hbm_axi_awid    : slv_array_t(HBM_PORTS-1 downto 0)(HBM_ID_WIDTH-1 downto 0);
+    signal hbm_axi_awlen   : slv_array_t(HBM_PORTS-1 downto 0)(HBM_LEN_WIDTH-1 downto 0);
+    signal hbm_axi_awsize  : slv_array_t(HBM_PORTS-1 downto 0)(HBM_SIZE_WIDTH-1 downto 0);
+    signal hbm_axi_awvalid : std_logic_vector(HBM_PORTS-1 downto 0);
+    signal hbm_axi_awready : std_logic_vector(HBM_PORTS-1 downto 0);
+
+    signal hbm_axi_wdata        : slv_array_t(HBM_PORTS-1 downto 0)(HBM_DATA_WIDTH-1 downto 0);
+    signal hbm_axi_wdata_parity : slv_array_t(HBM_PORTS-1 downto 0)((HBM_DATA_WIDTH/8)-1 downto 0);
+    signal hbm_axi_wlast        : std_logic_vector(HBM_PORTS-1 downto 0);
+    signal hbm_axi_wstrb        : slv_array_t(HBM_PORTS-1 downto 0)((HBM_DATA_WIDTH/8)-1 downto 0);
+    signal hbm_axi_wvalid       : std_logic_vector(HBM_PORTS-1 downto 0);
+    signal hbm_axi_wready       : std_logic_vector(HBM_PORTS-1 downto 0);
+
+    signal hbm_axi_bid    : slv_array_t(HBM_PORTS-1 downto 0)(HBM_ID_WIDTH-1 downto 0);
+    signal hbm_axi_bresp  : slv_array_t(HBM_PORTS-1 downto 0)(HBM_RESP_WIDTH-1 downto 0);
+    signal hbm_axi_bvalid : std_logic_vector(HBM_PORTS-1 downto 0);
+    signal hbm_axi_bready : std_logic_vector(HBM_PORTS-1 downto 0);
+
+    -- 450 MHz AXI from DMA_IUVENTUS (already clock-crossed), feeding each active port's AXI_PIPE,
+    -- sized HBM_PORTS wide. cdc_axi_* is the pipe's M_AXI (bridge-side); hbm_axi_* is its S_AXI
+    -- (hbm_ip-side), one stage per port, all in the 450 MHz domain.
+    signal cdc_axi_araddr  : slv_array_t(HBM_PORTS-1 downto 0)(HBM_ADDR_WIDTH-1 downto 0);
+    signal cdc_axi_arburst : slv_array_t(HBM_PORTS-1 downto 0)(HBM_BURST_WIDTH-1 downto 0);
+    signal cdc_axi_arid    : slv_array_t(HBM_PORTS-1 downto 0)(HBM_ID_WIDTH-1 downto 0);
+    signal cdc_axi_arlen   : slv_array_t(HBM_PORTS-1 downto 0)(HBM_LEN_WIDTH-1 downto 0);
+    signal cdc_axi_arsize  : slv_array_t(HBM_PORTS-1 downto 0)(HBM_SIZE_WIDTH-1 downto 0);
+    signal cdc_axi_arvalid : std_logic_vector(HBM_PORTS-1 downto 0);
+    signal cdc_axi_arready : std_logic_vector(HBM_PORTS-1 downto 0);
+
+    signal cdc_axi_rdata  : slv_array_t(HBM_PORTS-1 downto 0)(HBM_DATA_WIDTH-1 downto 0);
+    signal cdc_axi_rid    : slv_array_t(HBM_PORTS-1 downto 0)(HBM_ID_WIDTH-1 downto 0);
+    signal cdc_axi_rlast  : std_logic_vector(HBM_PORTS-1 downto 0);
+    signal cdc_axi_rresp  : slv_array_t(HBM_PORTS-1 downto 0)(HBM_RESP_WIDTH-1 downto 0);
+    signal cdc_axi_rvalid : std_logic_vector(HBM_PORTS-1 downto 0);
+    signal cdc_axi_rready : std_logic_vector(HBM_PORTS-1 downto 0);
+
+    signal cdc_axi_awaddr  : slv_array_t(HBM_PORTS-1 downto 0)(HBM_ADDR_WIDTH-1 downto 0);
+    signal cdc_axi_awburst : slv_array_t(HBM_PORTS-1 downto 0)(HBM_BURST_WIDTH-1 downto 0);
+    signal cdc_axi_awid    : slv_array_t(HBM_PORTS-1 downto 0)(HBM_ID_WIDTH-1 downto 0);
+    signal cdc_axi_awlen   : slv_array_t(HBM_PORTS-1 downto 0)(HBM_LEN_WIDTH-1 downto 0);
+    signal cdc_axi_awsize  : slv_array_t(HBM_PORTS-1 downto 0)(HBM_SIZE_WIDTH-1 downto 0);
+    signal cdc_axi_awvalid : std_logic_vector(HBM_PORTS-1 downto 0);
+    signal cdc_axi_awready : std_logic_vector(HBM_PORTS-1 downto 0);
+
+    signal cdc_axi_wdata  : slv_array_t(HBM_PORTS-1 downto 0)(HBM_DATA_WIDTH-1 downto 0);
+    signal cdc_axi_wlast  : std_logic_vector(HBM_PORTS-1 downto 0);
+    signal cdc_axi_wstrb  : slv_array_t(HBM_PORTS-1 downto 0)((HBM_DATA_WIDTH/8)-1 downto 0);
+    signal cdc_axi_wvalid : std_logic_vector(HBM_PORTS-1 downto 0);
+    signal cdc_axi_wready : std_logic_vector(HBM_PORTS-1 downto 0);
+
+    signal cdc_axi_bid    : slv_array_t(HBM_PORTS-1 downto 0)(HBM_ID_WIDTH-1 downto 0);
+    signal cdc_axi_bresp  : slv_array_t(HBM_PORTS-1 downto 0)(HBM_RESP_WIDTH-1 downto 0);
+    signal cdc_axi_bvalid : std_logic_vector(HBM_PORTS-1 downto 0);
+    signal cdc_axi_bready : std_logic_vector(HBM_PORTS-1 downto 0);
+
+    -- HBM_SMOKE_TEST's single AXI group, demuxed onto the wired port selected by PORT_SEL
+    -- (see hbm_port_wiring_g). Software must only change PORT_SEL while both FSMs are idle.
+    signal smk_awaddr       : std_logic_vector(HBM_ADDR_WIDTH -1 downto 0);
+    signal smk_awburst      : std_logic_vector(HBM_BURST_WIDTH -1 downto 0);
+    signal smk_awid         : std_logic_vector(HBM_ID_WIDTH -1 downto 0);
+    signal smk_awlen        : std_logic_vector(HBM_LEN_WIDTH -1 downto 0);
+    signal smk_awsize       : std_logic_vector(HBM_SIZE_WIDTH -1 downto 0);
+    signal smk_awvalid      : std_logic;
+    signal smk_awready      : std_logic;
+    signal smk_wdata        : std_logic_vector(HBM_DATA_WIDTH -1 downto 0);
+    signal smk_wdata_parity : std_logic_vector((HBM_DATA_WIDTH/8) -1 downto 0);
+    signal smk_wlast        : std_logic;
+    signal smk_wstrb        : std_logic_vector((HBM_DATA_WIDTH/8) -1 downto 0);
+    signal smk_wvalid       : std_logic;
+    signal smk_wready       : std_logic;
+    signal smk_bid          : std_logic_vector(HBM_ID_WIDTH -1 downto 0);
+    signal smk_bresp        : std_logic_vector(HBM_RESP_WIDTH -1 downto 0);
+    signal smk_bvalid       : std_logic;
+    signal smk_bready       : std_logic;
+    signal smk_araddr       : std_logic_vector(HBM_ADDR_WIDTH -1 downto 0);
+    signal smk_arburst      : std_logic_vector(HBM_BURST_WIDTH -1 downto 0);
+    signal smk_arid         : std_logic_vector(HBM_ID_WIDTH -1 downto 0);
+    signal smk_arlen        : std_logic_vector(HBM_LEN_WIDTH -1 downto 0);
+    signal smk_arsize       : std_logic_vector(HBM_SIZE_WIDTH -1 downto 0);
+    signal smk_arvalid      : std_logic;
+    signal smk_arready      : std_logic;
+    signal smk_rdata        : std_logic_vector(HBM_DATA_WIDTH -1 downto 0);
+    signal smk_rdata_parity : std_logic_vector((HBM_DATA_WIDTH/8) -1 downto 0);
+    signal smk_rid          : std_logic_vector(HBM_ID_WIDTH -1 downto 0);
+    signal smk_rlast        : std_logic;
+    signal smk_rresp        : std_logic_vector(HBM_RESP_WIDTH -1 downto 0);
+    signal smk_rvalid       : std_logic;
+    signal smk_rready       : std_logic;
+    signal smk_port_sel     : std_logic_vector(4 downto 0);
+    signal smk_sel_port     : natural range 0 to HBM_PORTS-1;
+
+    component hbm_ip
+        port (
+            HBM_REF_CLK_0       : in  std_logic;
+            HBM_REF_CLK_1       : in  std_logic;
+            AXI_00_ACLK         : in  std_logic;
+            AXI_00_ARESET_N     : in  std_logic;
+            AXI_00_ARADDR       : in  std_logic_vector(33 downto 0);
+            AXI_00_ARBURST      : in  std_logic_vector(1 downto 0);
+            AXI_00_ARID         : in  std_logic_vector(5 downto 0);
+            AXI_00_ARLEN        : in  std_logic_vector(3 downto 0);
+            AXI_00_ARSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_00_ARVALID      : in  std_logic;
+            AXI_00_AWADDR       : in  std_logic_vector(33 downto 0);
+            AXI_00_AWBURST      : in  std_logic_vector(1 downto 0);
+            AXI_00_AWID         : in  std_logic_vector(5 downto 0);
+            AXI_00_AWLEN        : in  std_logic_vector(3 downto 0);
+            AXI_00_AWSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_00_AWVALID      : in  std_logic;
+            AXI_00_RREADY       : in  std_logic;
+            AXI_00_BREADY       : in  std_logic;
+            AXI_00_WDATA        : in  std_logic_vector(255 downto 0);
+            AXI_00_WLAST        : in  std_logic;
+            AXI_00_WSTRB        : in  std_logic_vector(31 downto 0);
+            AXI_00_WDATA_PARITY : in  std_logic_vector(31 downto 0);
+            AXI_00_WVALID       : in  std_logic;
+            AXI_01_ACLK         : in  std_logic;
+            AXI_01_ARESET_N     : in  std_logic;
+            AXI_01_ARADDR       : in  std_logic_vector(33 downto 0);
+            AXI_01_ARBURST      : in  std_logic_vector(1 downto 0);
+            AXI_01_ARID         : in  std_logic_vector(5 downto 0);
+            AXI_01_ARLEN        : in  std_logic_vector(3 downto 0);
+            AXI_01_ARSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_01_ARVALID      : in  std_logic;
+            AXI_01_AWADDR       : in  std_logic_vector(33 downto 0);
+            AXI_01_AWBURST      : in  std_logic_vector(1 downto 0);
+            AXI_01_AWID         : in  std_logic_vector(5 downto 0);
+            AXI_01_AWLEN        : in  std_logic_vector(3 downto 0);
+            AXI_01_AWSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_01_AWVALID      : in  std_logic;
+            AXI_01_RREADY       : in  std_logic;
+            AXI_01_BREADY       : in  std_logic;
+            AXI_01_WDATA        : in  std_logic_vector(255 downto 0);
+            AXI_01_WLAST        : in  std_logic;
+            AXI_01_WSTRB        : in  std_logic_vector(31 downto 0);
+            AXI_01_WDATA_PARITY : in  std_logic_vector(31 downto 0);
+            AXI_01_WVALID       : in  std_logic;
+            AXI_02_ACLK         : in  std_logic;
+            AXI_02_ARESET_N     : in  std_logic;
+            AXI_02_ARADDR       : in  std_logic_vector(33 downto 0);
+            AXI_02_ARBURST      : in  std_logic_vector(1 downto 0);
+            AXI_02_ARID         : in  std_logic_vector(5 downto 0);
+            AXI_02_ARLEN        : in  std_logic_vector(3 downto 0);
+            AXI_02_ARSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_02_ARVALID      : in  std_logic;
+            AXI_02_AWADDR       : in  std_logic_vector(33 downto 0);
+            AXI_02_AWBURST      : in  std_logic_vector(1 downto 0);
+            AXI_02_AWID         : in  std_logic_vector(5 downto 0);
+            AXI_02_AWLEN        : in  std_logic_vector(3 downto 0);
+            AXI_02_AWSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_02_AWVALID      : in  std_logic;
+            AXI_02_RREADY       : in  std_logic;
+            AXI_02_BREADY       : in  std_logic;
+            AXI_02_WDATA        : in  std_logic_vector(255 downto 0);
+            AXI_02_WLAST        : in  std_logic;
+            AXI_02_WSTRB        : in  std_logic_vector(31 downto 0);
+            AXI_02_WDATA_PARITY : in  std_logic_vector(31 downto 0);
+            AXI_02_WVALID       : in  std_logic;
+            AXI_03_ACLK         : in  std_logic;
+            AXI_03_ARESET_N     : in  std_logic;
+            AXI_03_ARADDR       : in  std_logic_vector(33 downto 0);
+            AXI_03_ARBURST      : in  std_logic_vector(1 downto 0);
+            AXI_03_ARID         : in  std_logic_vector(5 downto 0);
+            AXI_03_ARLEN        : in  std_logic_vector(3 downto 0);
+            AXI_03_ARSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_03_ARVALID      : in  std_logic;
+            AXI_03_AWADDR       : in  std_logic_vector(33 downto 0);
+            AXI_03_AWBURST      : in  std_logic_vector(1 downto 0);
+            AXI_03_AWID         : in  std_logic_vector(5 downto 0);
+            AXI_03_AWLEN        : in  std_logic_vector(3 downto 0);
+            AXI_03_AWSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_03_AWVALID      : in  std_logic;
+            AXI_03_RREADY       : in  std_logic;
+            AXI_03_BREADY       : in  std_logic;
+            AXI_03_WDATA        : in  std_logic_vector(255 downto 0);
+            AXI_03_WLAST        : in  std_logic;
+            AXI_03_WSTRB        : in  std_logic_vector(31 downto 0);
+            AXI_03_WDATA_PARITY : in  std_logic_vector(31 downto 0);
+            AXI_03_WVALID       : in  std_logic;
+            AXI_04_ACLK         : in  std_logic;
+            AXI_04_ARESET_N     : in  std_logic;
+            AXI_04_ARADDR       : in  std_logic_vector(33 downto 0);
+            AXI_04_ARBURST      : in  std_logic_vector(1 downto 0);
+            AXI_04_ARID         : in  std_logic_vector(5 downto 0);
+            AXI_04_ARLEN        : in  std_logic_vector(3 downto 0);
+            AXI_04_ARSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_04_ARVALID      : in  std_logic;
+            AXI_04_AWADDR       : in  std_logic_vector(33 downto 0);
+            AXI_04_AWBURST      : in  std_logic_vector(1 downto 0);
+            AXI_04_AWID         : in  std_logic_vector(5 downto 0);
+            AXI_04_AWLEN        : in  std_logic_vector(3 downto 0);
+            AXI_04_AWSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_04_AWVALID      : in  std_logic;
+            AXI_04_RREADY       : in  std_logic;
+            AXI_04_BREADY       : in  std_logic;
+            AXI_04_WDATA        : in  std_logic_vector(255 downto 0);
+            AXI_04_WLAST        : in  std_logic;
+            AXI_04_WSTRB        : in  std_logic_vector(31 downto 0);
+            AXI_04_WDATA_PARITY : in  std_logic_vector(31 downto 0);
+            AXI_04_WVALID       : in  std_logic;
+            AXI_05_ACLK         : in  std_logic;
+            AXI_05_ARESET_N     : in  std_logic;
+            AXI_05_ARADDR       : in  std_logic_vector(33 downto 0);
+            AXI_05_ARBURST      : in  std_logic_vector(1 downto 0);
+            AXI_05_ARID         : in  std_logic_vector(5 downto 0);
+            AXI_05_ARLEN        : in  std_logic_vector(3 downto 0);
+            AXI_05_ARSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_05_ARVALID      : in  std_logic;
+            AXI_05_AWADDR       : in  std_logic_vector(33 downto 0);
+            AXI_05_AWBURST      : in  std_logic_vector(1 downto 0);
+            AXI_05_AWID         : in  std_logic_vector(5 downto 0);
+            AXI_05_AWLEN        : in  std_logic_vector(3 downto 0);
+            AXI_05_AWSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_05_AWVALID      : in  std_logic;
+            AXI_05_RREADY       : in  std_logic;
+            AXI_05_BREADY       : in  std_logic;
+            AXI_05_WDATA        : in  std_logic_vector(255 downto 0);
+            AXI_05_WLAST        : in  std_logic;
+            AXI_05_WSTRB        : in  std_logic_vector(31 downto 0);
+            AXI_05_WDATA_PARITY : in  std_logic_vector(31 downto 0);
+            AXI_05_WVALID       : in  std_logic;
+            AXI_06_ACLK         : in  std_logic;
+            AXI_06_ARESET_N     : in  std_logic;
+            AXI_06_ARADDR       : in  std_logic_vector(33 downto 0);
+            AXI_06_ARBURST      : in  std_logic_vector(1 downto 0);
+            AXI_06_ARID         : in  std_logic_vector(5 downto 0);
+            AXI_06_ARLEN        : in  std_logic_vector(3 downto 0);
+            AXI_06_ARSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_06_ARVALID      : in  std_logic;
+            AXI_06_AWADDR       : in  std_logic_vector(33 downto 0);
+            AXI_06_AWBURST      : in  std_logic_vector(1 downto 0);
+            AXI_06_AWID         : in  std_logic_vector(5 downto 0);
+            AXI_06_AWLEN        : in  std_logic_vector(3 downto 0);
+            AXI_06_AWSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_06_AWVALID      : in  std_logic;
+            AXI_06_RREADY       : in  std_logic;
+            AXI_06_BREADY       : in  std_logic;
+            AXI_06_WDATA        : in  std_logic_vector(255 downto 0);
+            AXI_06_WLAST        : in  std_logic;
+            AXI_06_WSTRB        : in  std_logic_vector(31 downto 0);
+            AXI_06_WDATA_PARITY : in  std_logic_vector(31 downto 0);
+            AXI_06_WVALID       : in  std_logic;
+            AXI_07_ACLK         : in  std_logic;
+            AXI_07_ARESET_N     : in  std_logic;
+            AXI_07_ARADDR       : in  std_logic_vector(33 downto 0);
+            AXI_07_ARBURST      : in  std_logic_vector(1 downto 0);
+            AXI_07_ARID         : in  std_logic_vector(5 downto 0);
+            AXI_07_ARLEN        : in  std_logic_vector(3 downto 0);
+            AXI_07_ARSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_07_ARVALID      : in  std_logic;
+            AXI_07_AWADDR       : in  std_logic_vector(33 downto 0);
+            AXI_07_AWBURST      : in  std_logic_vector(1 downto 0);
+            AXI_07_AWID         : in  std_logic_vector(5 downto 0);
+            AXI_07_AWLEN        : in  std_logic_vector(3 downto 0);
+            AXI_07_AWSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_07_AWVALID      : in  std_logic;
+            AXI_07_RREADY       : in  std_logic;
+            AXI_07_BREADY       : in  std_logic;
+            AXI_07_WDATA        : in  std_logic_vector(255 downto 0);
+            AXI_07_WLAST        : in  std_logic;
+            AXI_07_WSTRB        : in  std_logic_vector(31 downto 0);
+            AXI_07_WDATA_PARITY : in  std_logic_vector(31 downto 0);
+            AXI_07_WVALID       : in  std_logic;
+            AXI_08_ACLK         : in  std_logic;
+            AXI_08_ARESET_N     : in  std_logic;
+            AXI_08_ARADDR       : in  std_logic_vector(33 downto 0);
+            AXI_08_ARBURST      : in  std_logic_vector(1 downto 0);
+            AXI_08_ARID         : in  std_logic_vector(5 downto 0);
+            AXI_08_ARLEN        : in  std_logic_vector(3 downto 0);
+            AXI_08_ARSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_08_ARVALID      : in  std_logic;
+            AXI_08_AWADDR       : in  std_logic_vector(33 downto 0);
+            AXI_08_AWBURST      : in  std_logic_vector(1 downto 0);
+            AXI_08_AWID         : in  std_logic_vector(5 downto 0);
+            AXI_08_AWLEN        : in  std_logic_vector(3 downto 0);
+            AXI_08_AWSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_08_AWVALID      : in  std_logic;
+            AXI_08_RREADY       : in  std_logic;
+            AXI_08_BREADY       : in  std_logic;
+            AXI_08_WDATA        : in  std_logic_vector(255 downto 0);
+            AXI_08_WLAST        : in  std_logic;
+            AXI_08_WSTRB        : in  std_logic_vector(31 downto 0);
+            AXI_08_WDATA_PARITY : in  std_logic_vector(31 downto 0);
+            AXI_08_WVALID       : in  std_logic;
+            AXI_09_ACLK         : in  std_logic;
+            AXI_09_ARESET_N     : in  std_logic;
+            AXI_09_ARADDR       : in  std_logic_vector(33 downto 0);
+            AXI_09_ARBURST      : in  std_logic_vector(1 downto 0);
+            AXI_09_ARID         : in  std_logic_vector(5 downto 0);
+            AXI_09_ARLEN        : in  std_logic_vector(3 downto 0);
+            AXI_09_ARSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_09_ARVALID      : in  std_logic;
+            AXI_09_AWADDR       : in  std_logic_vector(33 downto 0);
+            AXI_09_AWBURST      : in  std_logic_vector(1 downto 0);
+            AXI_09_AWID         : in  std_logic_vector(5 downto 0);
+            AXI_09_AWLEN        : in  std_logic_vector(3 downto 0);
+            AXI_09_AWSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_09_AWVALID      : in  std_logic;
+            AXI_09_RREADY       : in  std_logic;
+            AXI_09_BREADY       : in  std_logic;
+            AXI_09_WDATA        : in  std_logic_vector(255 downto 0);
+            AXI_09_WLAST        : in  std_logic;
+            AXI_09_WSTRB        : in  std_logic_vector(31 downto 0);
+            AXI_09_WDATA_PARITY : in  std_logic_vector(31 downto 0);
+            AXI_09_WVALID       : in  std_logic;
+            AXI_10_ACLK         : in  std_logic;
+            AXI_10_ARESET_N     : in  std_logic;
+            AXI_10_ARADDR       : in  std_logic_vector(33 downto 0);
+            AXI_10_ARBURST      : in  std_logic_vector(1 downto 0);
+            AXI_10_ARID         : in  std_logic_vector(5 downto 0);
+            AXI_10_ARLEN        : in  std_logic_vector(3 downto 0);
+            AXI_10_ARSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_10_ARVALID      : in  std_logic;
+            AXI_10_AWADDR       : in  std_logic_vector(33 downto 0);
+            AXI_10_AWBURST      : in  std_logic_vector(1 downto 0);
+            AXI_10_AWID         : in  std_logic_vector(5 downto 0);
+            AXI_10_AWLEN        : in  std_logic_vector(3 downto 0);
+            AXI_10_AWSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_10_AWVALID      : in  std_logic;
+            AXI_10_RREADY       : in  std_logic;
+            AXI_10_BREADY       : in  std_logic;
+            AXI_10_WDATA        : in  std_logic_vector(255 downto 0);
+            AXI_10_WLAST        : in  std_logic;
+            AXI_10_WSTRB        : in  std_logic_vector(31 downto 0);
+            AXI_10_WDATA_PARITY : in  std_logic_vector(31 downto 0);
+            AXI_10_WVALID       : in  std_logic;
+            AXI_11_ACLK         : in  std_logic;
+            AXI_11_ARESET_N     : in  std_logic;
+            AXI_11_ARADDR       : in  std_logic_vector(33 downto 0);
+            AXI_11_ARBURST      : in  std_logic_vector(1 downto 0);
+            AXI_11_ARID         : in  std_logic_vector(5 downto 0);
+            AXI_11_ARLEN        : in  std_logic_vector(3 downto 0);
+            AXI_11_ARSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_11_ARVALID      : in  std_logic;
+            AXI_11_AWADDR       : in  std_logic_vector(33 downto 0);
+            AXI_11_AWBURST      : in  std_logic_vector(1 downto 0);
+            AXI_11_AWID         : in  std_logic_vector(5 downto 0);
+            AXI_11_AWLEN        : in  std_logic_vector(3 downto 0);
+            AXI_11_AWSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_11_AWVALID      : in  std_logic;
+            AXI_11_RREADY       : in  std_logic;
+            AXI_11_BREADY       : in  std_logic;
+            AXI_11_WDATA        : in  std_logic_vector(255 downto 0);
+            AXI_11_WLAST        : in  std_logic;
+            AXI_11_WSTRB        : in  std_logic_vector(31 downto 0);
+            AXI_11_WDATA_PARITY : in  std_logic_vector(31 downto 0);
+            AXI_11_WVALID       : in  std_logic;
+            AXI_12_ACLK         : in  std_logic;
+            AXI_12_ARESET_N     : in  std_logic;
+            AXI_12_ARADDR       : in  std_logic_vector(33 downto 0);
+            AXI_12_ARBURST      : in  std_logic_vector(1 downto 0);
+            AXI_12_ARID         : in  std_logic_vector(5 downto 0);
+            AXI_12_ARLEN        : in  std_logic_vector(3 downto 0);
+            AXI_12_ARSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_12_ARVALID      : in  std_logic;
+            AXI_12_AWADDR       : in  std_logic_vector(33 downto 0);
+            AXI_12_AWBURST      : in  std_logic_vector(1 downto 0);
+            AXI_12_AWID         : in  std_logic_vector(5 downto 0);
+            AXI_12_AWLEN        : in  std_logic_vector(3 downto 0);
+            AXI_12_AWSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_12_AWVALID      : in  std_logic;
+            AXI_12_RREADY       : in  std_logic;
+            AXI_12_BREADY       : in  std_logic;
+            AXI_12_WDATA        : in  std_logic_vector(255 downto 0);
+            AXI_12_WLAST        : in  std_logic;
+            AXI_12_WSTRB        : in  std_logic_vector(31 downto 0);
+            AXI_12_WDATA_PARITY : in  std_logic_vector(31 downto 0);
+            AXI_12_WVALID       : in  std_logic;
+            AXI_13_ACLK         : in  std_logic;
+            AXI_13_ARESET_N     : in  std_logic;
+            AXI_13_ARADDR       : in  std_logic_vector(33 downto 0);
+            AXI_13_ARBURST      : in  std_logic_vector(1 downto 0);
+            AXI_13_ARID         : in  std_logic_vector(5 downto 0);
+            AXI_13_ARLEN        : in  std_logic_vector(3 downto 0);
+            AXI_13_ARSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_13_ARVALID      : in  std_logic;
+            AXI_13_AWADDR       : in  std_logic_vector(33 downto 0);
+            AXI_13_AWBURST      : in  std_logic_vector(1 downto 0);
+            AXI_13_AWID         : in  std_logic_vector(5 downto 0);
+            AXI_13_AWLEN        : in  std_logic_vector(3 downto 0);
+            AXI_13_AWSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_13_AWVALID      : in  std_logic;
+            AXI_13_RREADY       : in  std_logic;
+            AXI_13_BREADY       : in  std_logic;
+            AXI_13_WDATA        : in  std_logic_vector(255 downto 0);
+            AXI_13_WLAST        : in  std_logic;
+            AXI_13_WSTRB        : in  std_logic_vector(31 downto 0);
+            AXI_13_WDATA_PARITY : in  std_logic_vector(31 downto 0);
+            AXI_13_WVALID       : in  std_logic;
+            AXI_14_ACLK         : in  std_logic;
+            AXI_14_ARESET_N     : in  std_logic;
+            AXI_14_ARADDR       : in  std_logic_vector(33 downto 0);
+            AXI_14_ARBURST      : in  std_logic_vector(1 downto 0);
+            AXI_14_ARID         : in  std_logic_vector(5 downto 0);
+            AXI_14_ARLEN        : in  std_logic_vector(3 downto 0);
+            AXI_14_ARSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_14_ARVALID      : in  std_logic;
+            AXI_14_AWADDR       : in  std_logic_vector(33 downto 0);
+            AXI_14_AWBURST      : in  std_logic_vector(1 downto 0);
+            AXI_14_AWID         : in  std_logic_vector(5 downto 0);
+            AXI_14_AWLEN        : in  std_logic_vector(3 downto 0);
+            AXI_14_AWSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_14_AWVALID      : in  std_logic;
+            AXI_14_RREADY       : in  std_logic;
+            AXI_14_BREADY       : in  std_logic;
+            AXI_14_WDATA        : in  std_logic_vector(255 downto 0);
+            AXI_14_WLAST        : in  std_logic;
+            AXI_14_WSTRB        : in  std_logic_vector(31 downto 0);
+            AXI_14_WDATA_PARITY : in  std_logic_vector(31 downto 0);
+            AXI_14_WVALID       : in  std_logic;
+            AXI_15_ACLK         : in  std_logic;
+            AXI_15_ARESET_N     : in  std_logic;
+            AXI_15_ARADDR       : in  std_logic_vector(33 downto 0);
+            AXI_15_ARBURST      : in  std_logic_vector(1 downto 0);
+            AXI_15_ARID         : in  std_logic_vector(5 downto 0);
+            AXI_15_ARLEN        : in  std_logic_vector(3 downto 0);
+            AXI_15_ARSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_15_ARVALID      : in  std_logic;
+            AXI_15_AWADDR       : in  std_logic_vector(33 downto 0);
+            AXI_15_AWBURST      : in  std_logic_vector(1 downto 0);
+            AXI_15_AWID         : in  std_logic_vector(5 downto 0);
+            AXI_15_AWLEN        : in  std_logic_vector(3 downto 0);
+            AXI_15_AWSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_15_AWVALID      : in  std_logic;
+            AXI_15_RREADY       : in  std_logic;
+            AXI_15_BREADY       : in  std_logic;
+            AXI_15_WDATA        : in  std_logic_vector(255 downto 0);
+            AXI_15_WLAST        : in  std_logic;
+            AXI_15_WSTRB        : in  std_logic_vector(31 downto 0);
+            AXI_15_WDATA_PARITY : in  std_logic_vector(31 downto 0);
+            AXI_15_WVALID       : in  std_logic;
+            AXI_16_ACLK         : in  std_logic;
+            AXI_16_ARESET_N     : in  std_logic;
+            AXI_16_ARADDR       : in  std_logic_vector(33 downto 0);
+            AXI_16_ARBURST      : in  std_logic_vector(1 downto 0);
+            AXI_16_ARID         : in  std_logic_vector(5 downto 0);
+            AXI_16_ARLEN        : in  std_logic_vector(3 downto 0);
+            AXI_16_ARSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_16_ARVALID      : in  std_logic;
+            AXI_16_AWADDR       : in  std_logic_vector(33 downto 0);
+            AXI_16_AWBURST      : in  std_logic_vector(1 downto 0);
+            AXI_16_AWID         : in  std_logic_vector(5 downto 0);
+            AXI_16_AWLEN        : in  std_logic_vector(3 downto 0);
+            AXI_16_AWSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_16_AWVALID      : in  std_logic;
+            AXI_16_RREADY       : in  std_logic;
+            AXI_16_BREADY       : in  std_logic;
+            AXI_16_WDATA        : in  std_logic_vector(255 downto 0);
+            AXI_16_WLAST        : in  std_logic;
+            AXI_16_WSTRB        : in  std_logic_vector(31 downto 0);
+            AXI_16_WDATA_PARITY : in  std_logic_vector(31 downto 0);
+            AXI_16_WVALID       : in  std_logic;
+            AXI_17_ACLK         : in  std_logic;
+            AXI_17_ARESET_N     : in  std_logic;
+            AXI_17_ARADDR       : in  std_logic_vector(33 downto 0);
+            AXI_17_ARBURST      : in  std_logic_vector(1 downto 0);
+            AXI_17_ARID         : in  std_logic_vector(5 downto 0);
+            AXI_17_ARLEN        : in  std_logic_vector(3 downto 0);
+            AXI_17_ARSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_17_ARVALID      : in  std_logic;
+            AXI_17_AWADDR       : in  std_logic_vector(33 downto 0);
+            AXI_17_AWBURST      : in  std_logic_vector(1 downto 0);
+            AXI_17_AWID         : in  std_logic_vector(5 downto 0);
+            AXI_17_AWLEN        : in  std_logic_vector(3 downto 0);
+            AXI_17_AWSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_17_AWVALID      : in  std_logic;
+            AXI_17_RREADY       : in  std_logic;
+            AXI_17_BREADY       : in  std_logic;
+            AXI_17_WDATA        : in  std_logic_vector(255 downto 0);
+            AXI_17_WLAST        : in  std_logic;
+            AXI_17_WSTRB        : in  std_logic_vector(31 downto 0);
+            AXI_17_WDATA_PARITY : in  std_logic_vector(31 downto 0);
+            AXI_17_WVALID       : in  std_logic;
+            AXI_18_ACLK         : in  std_logic;
+            AXI_18_ARESET_N     : in  std_logic;
+            AXI_18_ARADDR       : in  std_logic_vector(33 downto 0);
+            AXI_18_ARBURST      : in  std_logic_vector(1 downto 0);
+            AXI_18_ARID         : in  std_logic_vector(5 downto 0);
+            AXI_18_ARLEN        : in  std_logic_vector(3 downto 0);
+            AXI_18_ARSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_18_ARVALID      : in  std_logic;
+            AXI_18_AWADDR       : in  std_logic_vector(33 downto 0);
+            AXI_18_AWBURST      : in  std_logic_vector(1 downto 0);
+            AXI_18_AWID         : in  std_logic_vector(5 downto 0);
+            AXI_18_AWLEN        : in  std_logic_vector(3 downto 0);
+            AXI_18_AWSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_18_AWVALID      : in  std_logic;
+            AXI_18_RREADY       : in  std_logic;
+            AXI_18_BREADY       : in  std_logic;
+            AXI_18_WDATA        : in  std_logic_vector(255 downto 0);
+            AXI_18_WLAST        : in  std_logic;
+            AXI_18_WSTRB        : in  std_logic_vector(31 downto 0);
+            AXI_18_WDATA_PARITY : in  std_logic_vector(31 downto 0);
+            AXI_18_WVALID       : in  std_logic;
+            AXI_19_ACLK         : in  std_logic;
+            AXI_19_ARESET_N     : in  std_logic;
+            AXI_19_ARADDR       : in  std_logic_vector(33 downto 0);
+            AXI_19_ARBURST      : in  std_logic_vector(1 downto 0);
+            AXI_19_ARID         : in  std_logic_vector(5 downto 0);
+            AXI_19_ARLEN        : in  std_logic_vector(3 downto 0);
+            AXI_19_ARSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_19_ARVALID      : in  std_logic;
+            AXI_19_AWADDR       : in  std_logic_vector(33 downto 0);
+            AXI_19_AWBURST      : in  std_logic_vector(1 downto 0);
+            AXI_19_AWID         : in  std_logic_vector(5 downto 0);
+            AXI_19_AWLEN        : in  std_logic_vector(3 downto 0);
+            AXI_19_AWSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_19_AWVALID      : in  std_logic;
+            AXI_19_RREADY       : in  std_logic;
+            AXI_19_BREADY       : in  std_logic;
+            AXI_19_WDATA        : in  std_logic_vector(255 downto 0);
+            AXI_19_WLAST        : in  std_logic;
+            AXI_19_WSTRB        : in  std_logic_vector(31 downto 0);
+            AXI_19_WDATA_PARITY : in  std_logic_vector(31 downto 0);
+            AXI_19_WVALID       : in  std_logic;
+            AXI_20_ACLK         : in  std_logic;
+            AXI_20_ARESET_N     : in  std_logic;
+            AXI_20_ARADDR       : in  std_logic_vector(33 downto 0);
+            AXI_20_ARBURST      : in  std_logic_vector(1 downto 0);
+            AXI_20_ARID         : in  std_logic_vector(5 downto 0);
+            AXI_20_ARLEN        : in  std_logic_vector(3 downto 0);
+            AXI_20_ARSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_20_ARVALID      : in  std_logic;
+            AXI_20_AWADDR       : in  std_logic_vector(33 downto 0);
+            AXI_20_AWBURST      : in  std_logic_vector(1 downto 0);
+            AXI_20_AWID         : in  std_logic_vector(5 downto 0);
+            AXI_20_AWLEN        : in  std_logic_vector(3 downto 0);
+            AXI_20_AWSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_20_AWVALID      : in  std_logic;
+            AXI_20_RREADY       : in  std_logic;
+            AXI_20_BREADY       : in  std_logic;
+            AXI_20_WDATA        : in  std_logic_vector(255 downto 0);
+            AXI_20_WLAST        : in  std_logic;
+            AXI_20_WSTRB        : in  std_logic_vector(31 downto 0);
+            AXI_20_WDATA_PARITY : in  std_logic_vector(31 downto 0);
+            AXI_20_WVALID       : in  std_logic;
+            AXI_21_ACLK         : in  std_logic;
+            AXI_21_ARESET_N     : in  std_logic;
+            AXI_21_ARADDR       : in  std_logic_vector(33 downto 0);
+            AXI_21_ARBURST      : in  std_logic_vector(1 downto 0);
+            AXI_21_ARID         : in  std_logic_vector(5 downto 0);
+            AXI_21_ARLEN        : in  std_logic_vector(3 downto 0);
+            AXI_21_ARSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_21_ARVALID      : in  std_logic;
+            AXI_21_AWADDR       : in  std_logic_vector(33 downto 0);
+            AXI_21_AWBURST      : in  std_logic_vector(1 downto 0);
+            AXI_21_AWID         : in  std_logic_vector(5 downto 0);
+            AXI_21_AWLEN        : in  std_logic_vector(3 downto 0);
+            AXI_21_AWSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_21_AWVALID      : in  std_logic;
+            AXI_21_RREADY       : in  std_logic;
+            AXI_21_BREADY       : in  std_logic;
+            AXI_21_WDATA        : in  std_logic_vector(255 downto 0);
+            AXI_21_WLAST        : in  std_logic;
+            AXI_21_WSTRB        : in  std_logic_vector(31 downto 0);
+            AXI_21_WDATA_PARITY : in  std_logic_vector(31 downto 0);
+            AXI_21_WVALID       : in  std_logic;
+            AXI_22_ACLK         : in  std_logic;
+            AXI_22_ARESET_N     : in  std_logic;
+            AXI_22_ARADDR       : in  std_logic_vector(33 downto 0);
+            AXI_22_ARBURST      : in  std_logic_vector(1 downto 0);
+            AXI_22_ARID         : in  std_logic_vector(5 downto 0);
+            AXI_22_ARLEN        : in  std_logic_vector(3 downto 0);
+            AXI_22_ARSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_22_ARVALID      : in  std_logic;
+            AXI_22_AWADDR       : in  std_logic_vector(33 downto 0);
+            AXI_22_AWBURST      : in  std_logic_vector(1 downto 0);
+            AXI_22_AWID         : in  std_logic_vector(5 downto 0);
+            AXI_22_AWLEN        : in  std_logic_vector(3 downto 0);
+            AXI_22_AWSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_22_AWVALID      : in  std_logic;
+            AXI_22_RREADY       : in  std_logic;
+            AXI_22_BREADY       : in  std_logic;
+            AXI_22_WDATA        : in  std_logic_vector(255 downto 0);
+            AXI_22_WLAST        : in  std_logic;
+            AXI_22_WSTRB        : in  std_logic_vector(31 downto 0);
+            AXI_22_WDATA_PARITY : in  std_logic_vector(31 downto 0);
+            AXI_22_WVALID       : in  std_logic;
+            AXI_23_ACLK         : in  std_logic;
+            AXI_23_ARESET_N     : in  std_logic;
+            AXI_23_ARADDR       : in  std_logic_vector(33 downto 0);
+            AXI_23_ARBURST      : in  std_logic_vector(1 downto 0);
+            AXI_23_ARID         : in  std_logic_vector(5 downto 0);
+            AXI_23_ARLEN        : in  std_logic_vector(3 downto 0);
+            AXI_23_ARSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_23_ARVALID      : in  std_logic;
+            AXI_23_AWADDR       : in  std_logic_vector(33 downto 0);
+            AXI_23_AWBURST      : in  std_logic_vector(1 downto 0);
+            AXI_23_AWID         : in  std_logic_vector(5 downto 0);
+            AXI_23_AWLEN        : in  std_logic_vector(3 downto 0);
+            AXI_23_AWSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_23_AWVALID      : in  std_logic;
+            AXI_23_RREADY       : in  std_logic;
+            AXI_23_BREADY       : in  std_logic;
+            AXI_23_WDATA        : in  std_logic_vector(255 downto 0);
+            AXI_23_WLAST        : in  std_logic;
+            AXI_23_WSTRB        : in  std_logic_vector(31 downto 0);
+            AXI_23_WDATA_PARITY : in  std_logic_vector(31 downto 0);
+            AXI_23_WVALID       : in  std_logic;
+            AXI_24_ACLK         : in  std_logic;
+            AXI_24_ARESET_N     : in  std_logic;
+            AXI_24_ARADDR       : in  std_logic_vector(33 downto 0);
+            AXI_24_ARBURST      : in  std_logic_vector(1 downto 0);
+            AXI_24_ARID         : in  std_logic_vector(5 downto 0);
+            AXI_24_ARLEN        : in  std_logic_vector(3 downto 0);
+            AXI_24_ARSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_24_ARVALID      : in  std_logic;
+            AXI_24_AWADDR       : in  std_logic_vector(33 downto 0);
+            AXI_24_AWBURST      : in  std_logic_vector(1 downto 0);
+            AXI_24_AWID         : in  std_logic_vector(5 downto 0);
+            AXI_24_AWLEN        : in  std_logic_vector(3 downto 0);
+            AXI_24_AWSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_24_AWVALID      : in  std_logic;
+            AXI_24_RREADY       : in  std_logic;
+            AXI_24_BREADY       : in  std_logic;
+            AXI_24_WDATA        : in  std_logic_vector(255 downto 0);
+            AXI_24_WLAST        : in  std_logic;
+            AXI_24_WSTRB        : in  std_logic_vector(31 downto 0);
+            AXI_24_WDATA_PARITY : in  std_logic_vector(31 downto 0);
+            AXI_24_WVALID       : in  std_logic;
+            AXI_25_ACLK         : in  std_logic;
+            AXI_25_ARESET_N     : in  std_logic;
+            AXI_25_ARADDR       : in  std_logic_vector(33 downto 0);
+            AXI_25_ARBURST      : in  std_logic_vector(1 downto 0);
+            AXI_25_ARID         : in  std_logic_vector(5 downto 0);
+            AXI_25_ARLEN        : in  std_logic_vector(3 downto 0);
+            AXI_25_ARSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_25_ARVALID      : in  std_logic;
+            AXI_25_AWADDR       : in  std_logic_vector(33 downto 0);
+            AXI_25_AWBURST      : in  std_logic_vector(1 downto 0);
+            AXI_25_AWID         : in  std_logic_vector(5 downto 0);
+            AXI_25_AWLEN        : in  std_logic_vector(3 downto 0);
+            AXI_25_AWSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_25_AWVALID      : in  std_logic;
+            AXI_25_RREADY       : in  std_logic;
+            AXI_25_BREADY       : in  std_logic;
+            AXI_25_WDATA        : in  std_logic_vector(255 downto 0);
+            AXI_25_WLAST        : in  std_logic;
+            AXI_25_WSTRB        : in  std_logic_vector(31 downto 0);
+            AXI_25_WDATA_PARITY : in  std_logic_vector(31 downto 0);
+            AXI_25_WVALID       : in  std_logic;
+            AXI_26_ACLK         : in  std_logic;
+            AXI_26_ARESET_N     : in  std_logic;
+            AXI_26_ARADDR       : in  std_logic_vector(33 downto 0);
+            AXI_26_ARBURST      : in  std_logic_vector(1 downto 0);
+            AXI_26_ARID         : in  std_logic_vector(5 downto 0);
+            AXI_26_ARLEN        : in  std_logic_vector(3 downto 0);
+            AXI_26_ARSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_26_ARVALID      : in  std_logic;
+            AXI_26_AWADDR       : in  std_logic_vector(33 downto 0);
+            AXI_26_AWBURST      : in  std_logic_vector(1 downto 0);
+            AXI_26_AWID         : in  std_logic_vector(5 downto 0);
+            AXI_26_AWLEN        : in  std_logic_vector(3 downto 0);
+            AXI_26_AWSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_26_AWVALID      : in  std_logic;
+            AXI_26_RREADY       : in  std_logic;
+            AXI_26_BREADY       : in  std_logic;
+            AXI_26_WDATA        : in  std_logic_vector(255 downto 0);
+            AXI_26_WLAST        : in  std_logic;
+            AXI_26_WSTRB        : in  std_logic_vector(31 downto 0);
+            AXI_26_WDATA_PARITY : in  std_logic_vector(31 downto 0);
+            AXI_26_WVALID       : in  std_logic;
+            AXI_27_ACLK         : in  std_logic;
+            AXI_27_ARESET_N     : in  std_logic;
+            AXI_27_ARADDR       : in  std_logic_vector(33 downto 0);
+            AXI_27_ARBURST      : in  std_logic_vector(1 downto 0);
+            AXI_27_ARID         : in  std_logic_vector(5 downto 0);
+            AXI_27_ARLEN        : in  std_logic_vector(3 downto 0);
+            AXI_27_ARSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_27_ARVALID      : in  std_logic;
+            AXI_27_AWADDR       : in  std_logic_vector(33 downto 0);
+            AXI_27_AWBURST      : in  std_logic_vector(1 downto 0);
+            AXI_27_AWID         : in  std_logic_vector(5 downto 0);
+            AXI_27_AWLEN        : in  std_logic_vector(3 downto 0);
+            AXI_27_AWSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_27_AWVALID      : in  std_logic;
+            AXI_27_RREADY       : in  std_logic;
+            AXI_27_BREADY       : in  std_logic;
+            AXI_27_WDATA        : in  std_logic_vector(255 downto 0);
+            AXI_27_WLAST        : in  std_logic;
+            AXI_27_WSTRB        : in  std_logic_vector(31 downto 0);
+            AXI_27_WDATA_PARITY : in  std_logic_vector(31 downto 0);
+            AXI_27_WVALID       : in  std_logic;
+            AXI_28_ACLK         : in  std_logic;
+            AXI_28_ARESET_N     : in  std_logic;
+            AXI_28_ARADDR       : in  std_logic_vector(33 downto 0);
+            AXI_28_ARBURST      : in  std_logic_vector(1 downto 0);
+            AXI_28_ARID         : in  std_logic_vector(5 downto 0);
+            AXI_28_ARLEN        : in  std_logic_vector(3 downto 0);
+            AXI_28_ARSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_28_ARVALID      : in  std_logic;
+            AXI_28_AWADDR       : in  std_logic_vector(33 downto 0);
+            AXI_28_AWBURST      : in  std_logic_vector(1 downto 0);
+            AXI_28_AWID         : in  std_logic_vector(5 downto 0);
+            AXI_28_AWLEN        : in  std_logic_vector(3 downto 0);
+            AXI_28_AWSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_28_AWVALID      : in  std_logic;
+            AXI_28_RREADY       : in  std_logic;
+            AXI_28_BREADY       : in  std_logic;
+            AXI_28_WDATA        : in  std_logic_vector(255 downto 0);
+            AXI_28_WLAST        : in  std_logic;
+            AXI_28_WSTRB        : in  std_logic_vector(31 downto 0);
+            AXI_28_WDATA_PARITY : in  std_logic_vector(31 downto 0);
+            AXI_28_WVALID       : in  std_logic;
+            AXI_29_ACLK         : in  std_logic;
+            AXI_29_ARESET_N     : in  std_logic;
+            AXI_29_ARADDR       : in  std_logic_vector(33 downto 0);
+            AXI_29_ARBURST      : in  std_logic_vector(1 downto 0);
+            AXI_29_ARID         : in  std_logic_vector(5 downto 0);
+            AXI_29_ARLEN        : in  std_logic_vector(3 downto 0);
+            AXI_29_ARSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_29_ARVALID      : in  std_logic;
+            AXI_29_AWADDR       : in  std_logic_vector(33 downto 0);
+            AXI_29_AWBURST      : in  std_logic_vector(1 downto 0);
+            AXI_29_AWID         : in  std_logic_vector(5 downto 0);
+            AXI_29_AWLEN        : in  std_logic_vector(3 downto 0);
+            AXI_29_AWSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_29_AWVALID      : in  std_logic;
+            AXI_29_RREADY       : in  std_logic;
+            AXI_29_BREADY       : in  std_logic;
+            AXI_29_WDATA        : in  std_logic_vector(255 downto 0);
+            AXI_29_WLAST        : in  std_logic;
+            AXI_29_WSTRB        : in  std_logic_vector(31 downto 0);
+            AXI_29_WDATA_PARITY : in  std_logic_vector(31 downto 0);
+            AXI_29_WVALID       : in  std_logic;
+            AXI_30_ACLK         : in  std_logic;
+            AXI_30_ARESET_N     : in  std_logic;
+            AXI_30_ARADDR       : in  std_logic_vector(33 downto 0);
+            AXI_30_ARBURST      : in  std_logic_vector(1 downto 0);
+            AXI_30_ARID         : in  std_logic_vector(5 downto 0);
+            AXI_30_ARLEN        : in  std_logic_vector(3 downto 0);
+            AXI_30_ARSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_30_ARVALID      : in  std_logic;
+            AXI_30_AWADDR       : in  std_logic_vector(33 downto 0);
+            AXI_30_AWBURST      : in  std_logic_vector(1 downto 0);
+            AXI_30_AWID         : in  std_logic_vector(5 downto 0);
+            AXI_30_AWLEN        : in  std_logic_vector(3 downto 0);
+            AXI_30_AWSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_30_AWVALID      : in  std_logic;
+            AXI_30_RREADY       : in  std_logic;
+            AXI_30_BREADY       : in  std_logic;
+            AXI_30_WDATA        : in  std_logic_vector(255 downto 0);
+            AXI_30_WLAST        : in  std_logic;
+            AXI_30_WSTRB        : in  std_logic_vector(31 downto 0);
+            AXI_30_WDATA_PARITY : in  std_logic_vector(31 downto 0);
+            AXI_30_WVALID       : in  std_logic;
+            AXI_31_ACLK         : in  std_logic;
+            AXI_31_ARESET_N     : in  std_logic;
+            AXI_31_ARADDR       : in  std_logic_vector(33 downto 0);
+            AXI_31_ARBURST      : in  std_logic_vector(1 downto 0);
+            AXI_31_ARID         : in  std_logic_vector(5 downto 0);
+            AXI_31_ARLEN        : in  std_logic_vector(3 downto 0);
+            AXI_31_ARSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_31_ARVALID      : in  std_logic;
+            AXI_31_AWADDR       : in  std_logic_vector(33 downto 0);
+            AXI_31_AWBURST      : in  std_logic_vector(1 downto 0);
+            AXI_31_AWID         : in  std_logic_vector(5 downto 0);
+            AXI_31_AWLEN        : in  std_logic_vector(3 downto 0);
+            AXI_31_AWSIZE       : in  std_logic_vector(2 downto 0);
+            AXI_31_AWVALID      : in  std_logic;
+            AXI_31_RREADY       : in  std_logic;
+            AXI_31_BREADY       : in  std_logic;
+            AXI_31_WDATA        : in  std_logic_vector(255 downto 0);
+            AXI_31_WLAST        : in  std_logic;
+            AXI_31_WSTRB        : in  std_logic_vector(31 downto 0);
+            AXI_31_WDATA_PARITY : in  std_logic_vector(31 downto 0);
+            AXI_31_WVALID       : in  std_logic;
+            APB_0_PCLK          : in  std_logic;
+            APB_0_PRESET_N      : in  std_logic;
+            APB_1_PCLK          : in  std_logic;
+            APB_1_PRESET_N      : in  std_logic;
+            AXI_00_ARREADY      : out std_logic;
+            AXI_00_AWREADY      : out std_logic;
+            AXI_00_RDATA_PARITY : out std_logic_vector(31 downto 0);
+            AXI_00_RDATA        : out std_logic_vector(255 downto 0);
+            AXI_00_RID          : out std_logic_vector(5 downto 0);
+            AXI_00_RLAST        : out std_logic;
+            AXI_00_RRESP        : out std_logic_vector(1 downto 0);
+            AXI_00_RVALID       : out std_logic;
+            AXI_00_WREADY       : out std_logic;
+            AXI_00_BID          : out std_logic_vector(5 downto 0);
+            AXI_00_BRESP        : out std_logic_vector(1 downto 0);
+            AXI_00_BVALID       : out std_logic;
+            AXI_01_ARREADY      : out std_logic;
+            AXI_01_AWREADY      : out std_logic;
+            AXI_01_RDATA_PARITY : out std_logic_vector(31 downto 0);
+            AXI_01_RDATA        : out std_logic_vector(255 downto 0);
+            AXI_01_RID          : out std_logic_vector(5 downto 0);
+            AXI_01_RLAST        : out std_logic;
+            AXI_01_RRESP        : out std_logic_vector(1 downto 0);
+            AXI_01_RVALID       : out std_logic;
+            AXI_01_WREADY       : out std_logic;
+            AXI_01_BID          : out std_logic_vector(5 downto 0);
+            AXI_01_BRESP        : out std_logic_vector(1 downto 0);
+            AXI_01_BVALID       : out std_logic;
+            AXI_02_ARREADY      : out std_logic;
+            AXI_02_AWREADY      : out std_logic;
+            AXI_02_RDATA_PARITY : out std_logic_vector(31 downto 0);
+            AXI_02_RDATA        : out std_logic_vector(255 downto 0);
+            AXI_02_RID          : out std_logic_vector(5 downto 0);
+            AXI_02_RLAST        : out std_logic;
+            AXI_02_RRESP        : out std_logic_vector(1 downto 0);
+            AXI_02_RVALID       : out std_logic;
+            AXI_02_WREADY       : out std_logic;
+            AXI_02_BID          : out std_logic_vector(5 downto 0);
+            AXI_02_BRESP        : out std_logic_vector(1 downto 0);
+            AXI_02_BVALID       : out std_logic;
+            AXI_03_ARREADY      : out std_logic;
+            AXI_03_AWREADY      : out std_logic;
+            AXI_03_RDATA_PARITY : out std_logic_vector(31 downto 0);
+            AXI_03_RDATA        : out std_logic_vector(255 downto 0);
+            AXI_03_RID          : out std_logic_vector(5 downto 0);
+            AXI_03_RLAST        : out std_logic;
+            AXI_03_RRESP        : out std_logic_vector(1 downto 0);
+            AXI_03_RVALID       : out std_logic;
+            AXI_03_WREADY       : out std_logic;
+            AXI_03_BID          : out std_logic_vector(5 downto 0);
+            AXI_03_BRESP        : out std_logic_vector(1 downto 0);
+            AXI_03_BVALID       : out std_logic;
+            AXI_04_ARREADY      : out std_logic;
+            AXI_04_AWREADY      : out std_logic;
+            AXI_04_RDATA_PARITY : out std_logic_vector(31 downto 0);
+            AXI_04_RDATA        : out std_logic_vector(255 downto 0);
+            AXI_04_RID          : out std_logic_vector(5 downto 0);
+            AXI_04_RLAST        : out std_logic;
+            AXI_04_RRESP        : out std_logic_vector(1 downto 0);
+            AXI_04_RVALID       : out std_logic;
+            AXI_04_WREADY       : out std_logic;
+            AXI_04_BID          : out std_logic_vector(5 downto 0);
+            AXI_04_BRESP        : out std_logic_vector(1 downto 0);
+            AXI_04_BVALID       : out std_logic;
+            AXI_05_ARREADY      : out std_logic;
+            AXI_05_AWREADY      : out std_logic;
+            AXI_05_RDATA_PARITY : out std_logic_vector(31 downto 0);
+            AXI_05_RDATA        : out std_logic_vector(255 downto 0);
+            AXI_05_RID          : out std_logic_vector(5 downto 0);
+            AXI_05_RLAST        : out std_logic;
+            AXI_05_RRESP        : out std_logic_vector(1 downto 0);
+            AXI_05_RVALID       : out std_logic;
+            AXI_05_WREADY       : out std_logic;
+            AXI_05_BID          : out std_logic_vector(5 downto 0);
+            AXI_05_BRESP        : out std_logic_vector(1 downto 0);
+            AXI_05_BVALID       : out std_logic;
+            AXI_06_ARREADY      : out std_logic;
+            AXI_06_AWREADY      : out std_logic;
+            AXI_06_RDATA_PARITY : out std_logic_vector(31 downto 0);
+            AXI_06_RDATA        : out std_logic_vector(255 downto 0);
+            AXI_06_RID          : out std_logic_vector(5 downto 0);
+            AXI_06_RLAST        : out std_logic;
+            AXI_06_RRESP        : out std_logic_vector(1 downto 0);
+            AXI_06_RVALID       : out std_logic;
+            AXI_06_WREADY       : out std_logic;
+            AXI_06_BID          : out std_logic_vector(5 downto 0);
+            AXI_06_BRESP        : out std_logic_vector(1 downto 0);
+            AXI_06_BVALID       : out std_logic;
+            AXI_07_ARREADY      : out std_logic;
+            AXI_07_AWREADY      : out std_logic;
+            AXI_07_RDATA_PARITY : out std_logic_vector(31 downto 0);
+            AXI_07_RDATA        : out std_logic_vector(255 downto 0);
+            AXI_07_RID          : out std_logic_vector(5 downto 0);
+            AXI_07_RLAST        : out std_logic;
+            AXI_07_RRESP        : out std_logic_vector(1 downto 0);
+            AXI_07_RVALID       : out std_logic;
+            AXI_07_WREADY       : out std_logic;
+            AXI_07_BID          : out std_logic_vector(5 downto 0);
+            AXI_07_BRESP        : out std_logic_vector(1 downto 0);
+            AXI_07_BVALID       : out std_logic;
+            AXI_08_ARREADY      : out std_logic;
+            AXI_08_AWREADY      : out std_logic;
+            AXI_08_RDATA_PARITY : out std_logic_vector(31 downto 0);
+            AXI_08_RDATA        : out std_logic_vector(255 downto 0);
+            AXI_08_RID          : out std_logic_vector(5 downto 0);
+            AXI_08_RLAST        : out std_logic;
+            AXI_08_RRESP        : out std_logic_vector(1 downto 0);
+            AXI_08_RVALID       : out std_logic;
+            AXI_08_WREADY       : out std_logic;
+            AXI_08_BID          : out std_logic_vector(5 downto 0);
+            AXI_08_BRESP        : out std_logic_vector(1 downto 0);
+            AXI_08_BVALID       : out std_logic;
+            AXI_09_ARREADY      : out std_logic;
+            AXI_09_AWREADY      : out std_logic;
+            AXI_09_RDATA_PARITY : out std_logic_vector(31 downto 0);
+            AXI_09_RDATA        : out std_logic_vector(255 downto 0);
+            AXI_09_RID          : out std_logic_vector(5 downto 0);
+            AXI_09_RLAST        : out std_logic;
+            AXI_09_RRESP        : out std_logic_vector(1 downto 0);
+            AXI_09_RVALID       : out std_logic;
+            AXI_09_WREADY       : out std_logic;
+            AXI_09_BID          : out std_logic_vector(5 downto 0);
+            AXI_09_BRESP        : out std_logic_vector(1 downto 0);
+            AXI_09_BVALID       : out std_logic;
+            AXI_10_ARREADY      : out std_logic;
+            AXI_10_AWREADY      : out std_logic;
+            AXI_10_RDATA_PARITY : out std_logic_vector(31 downto 0);
+            AXI_10_RDATA        : out std_logic_vector(255 downto 0);
+            AXI_10_RID          : out std_logic_vector(5 downto 0);
+            AXI_10_RLAST        : out std_logic;
+            AXI_10_RRESP        : out std_logic_vector(1 downto 0);
+            AXI_10_RVALID       : out std_logic;
+            AXI_10_WREADY       : out std_logic;
+            AXI_10_BID          : out std_logic_vector(5 downto 0);
+            AXI_10_BRESP        : out std_logic_vector(1 downto 0);
+            AXI_10_BVALID       : out std_logic;
+            AXI_11_ARREADY      : out std_logic;
+            AXI_11_AWREADY      : out std_logic;
+            AXI_11_RDATA_PARITY : out std_logic_vector(31 downto 0);
+            AXI_11_RDATA        : out std_logic_vector(255 downto 0);
+            AXI_11_RID          : out std_logic_vector(5 downto 0);
+            AXI_11_RLAST        : out std_logic;
+            AXI_11_RRESP        : out std_logic_vector(1 downto 0);
+            AXI_11_RVALID       : out std_logic;
+            AXI_11_WREADY       : out std_logic;
+            AXI_11_BID          : out std_logic_vector(5 downto 0);
+            AXI_11_BRESP        : out std_logic_vector(1 downto 0);
+            AXI_11_BVALID       : out std_logic;
+            AXI_12_ARREADY      : out std_logic;
+            AXI_12_AWREADY      : out std_logic;
+            AXI_12_RDATA_PARITY : out std_logic_vector(31 downto 0);
+            AXI_12_RDATA        : out std_logic_vector(255 downto 0);
+            AXI_12_RID          : out std_logic_vector(5 downto 0);
+            AXI_12_RLAST        : out std_logic;
+            AXI_12_RRESP        : out std_logic_vector(1 downto 0);
+            AXI_12_RVALID       : out std_logic;
+            AXI_12_WREADY       : out std_logic;
+            AXI_12_BID          : out std_logic_vector(5 downto 0);
+            AXI_12_BRESP        : out std_logic_vector(1 downto 0);
+            AXI_12_BVALID       : out std_logic;
+            AXI_13_ARREADY      : out std_logic;
+            AXI_13_AWREADY      : out std_logic;
+            AXI_13_RDATA_PARITY : out std_logic_vector(31 downto 0);
+            AXI_13_RDATA        : out std_logic_vector(255 downto 0);
+            AXI_13_RID          : out std_logic_vector(5 downto 0);
+            AXI_13_RLAST        : out std_logic;
+            AXI_13_RRESP        : out std_logic_vector(1 downto 0);
+            AXI_13_RVALID       : out std_logic;
+            AXI_13_WREADY       : out std_logic;
+            AXI_13_BID          : out std_logic_vector(5 downto 0);
+            AXI_13_BRESP        : out std_logic_vector(1 downto 0);
+            AXI_13_BVALID       : out std_logic;
+            AXI_14_ARREADY      : out std_logic;
+            AXI_14_AWREADY      : out std_logic;
+            AXI_14_RDATA_PARITY : out std_logic_vector(31 downto 0);
+            AXI_14_RDATA        : out std_logic_vector(255 downto 0);
+            AXI_14_RID          : out std_logic_vector(5 downto 0);
+            AXI_14_RLAST        : out std_logic;
+            AXI_14_RRESP        : out std_logic_vector(1 downto 0);
+            AXI_14_RVALID       : out std_logic;
+            AXI_14_WREADY       : out std_logic;
+            AXI_14_BID          : out std_logic_vector(5 downto 0);
+            AXI_14_BRESP        : out std_logic_vector(1 downto 0);
+            AXI_14_BVALID       : out std_logic;
+            AXI_15_ARREADY      : out std_logic;
+            AXI_15_AWREADY      : out std_logic;
+            AXI_15_RDATA_PARITY : out std_logic_vector(31 downto 0);
+            AXI_15_RDATA        : out std_logic_vector(255 downto 0);
+            AXI_15_RID          : out std_logic_vector(5 downto 0);
+            AXI_15_RLAST        : out std_logic;
+            AXI_15_RRESP        : out std_logic_vector(1 downto 0);
+            AXI_15_RVALID       : out std_logic;
+            AXI_15_WREADY       : out std_logic;
+            AXI_15_BID          : out std_logic_vector(5 downto 0);
+            AXI_15_BRESP        : out std_logic_vector(1 downto 0);
+            AXI_15_BVALID       : out std_logic;
+            AXI_16_ARREADY      : out std_logic;
+            AXI_16_AWREADY      : out std_logic;
+            AXI_16_RDATA_PARITY : out std_logic_vector(31 downto 0);
+            AXI_16_RDATA        : out std_logic_vector(255 downto 0);
+            AXI_16_RID          : out std_logic_vector(5 downto 0);
+            AXI_16_RLAST        : out std_logic;
+            AXI_16_RRESP        : out std_logic_vector(1 downto 0);
+            AXI_16_RVALID       : out std_logic;
+            AXI_16_WREADY       : out std_logic;
+            AXI_16_BID          : out std_logic_vector(5 downto 0);
+            AXI_16_BRESP        : out std_logic_vector(1 downto 0);
+            AXI_16_BVALID       : out std_logic;
+            AXI_17_ARREADY      : out std_logic;
+            AXI_17_AWREADY      : out std_logic;
+            AXI_17_RDATA_PARITY : out std_logic_vector(31 downto 0);
+            AXI_17_RDATA        : out std_logic_vector(255 downto 0);
+            AXI_17_RID          : out std_logic_vector(5 downto 0);
+            AXI_17_RLAST        : out std_logic;
+            AXI_17_RRESP        : out std_logic_vector(1 downto 0);
+            AXI_17_RVALID       : out std_logic;
+            AXI_17_WREADY       : out std_logic;
+            AXI_17_BID          : out std_logic_vector(5 downto 0);
+            AXI_17_BRESP        : out std_logic_vector(1 downto 0);
+            AXI_17_BVALID       : out std_logic;
+            AXI_18_ARREADY      : out std_logic;
+            AXI_18_AWREADY      : out std_logic;
+            AXI_18_RDATA_PARITY : out std_logic_vector(31 downto 0);
+            AXI_18_RDATA        : out std_logic_vector(255 downto 0);
+            AXI_18_RID          : out std_logic_vector(5 downto 0);
+            AXI_18_RLAST        : out std_logic;
+            AXI_18_RRESP        : out std_logic_vector(1 downto 0);
+            AXI_18_RVALID       : out std_logic;
+            AXI_18_WREADY       : out std_logic;
+            AXI_18_BID          : out std_logic_vector(5 downto 0);
+            AXI_18_BRESP        : out std_logic_vector(1 downto 0);
+            AXI_18_BVALID       : out std_logic;
+            AXI_19_ARREADY      : out std_logic;
+            AXI_19_AWREADY      : out std_logic;
+            AXI_19_RDATA_PARITY : out std_logic_vector(31 downto 0);
+            AXI_19_RDATA        : out std_logic_vector(255 downto 0);
+            AXI_19_RID          : out std_logic_vector(5 downto 0);
+            AXI_19_RLAST        : out std_logic;
+            AXI_19_RRESP        : out std_logic_vector(1 downto 0);
+            AXI_19_RVALID       : out std_logic;
+            AXI_19_WREADY       : out std_logic;
+            AXI_19_BID          : out std_logic_vector(5 downto 0);
+            AXI_19_BRESP        : out std_logic_vector(1 downto 0);
+            AXI_19_BVALID       : out std_logic;
+            AXI_20_ARREADY      : out std_logic;
+            AXI_20_AWREADY      : out std_logic;
+            AXI_20_RDATA_PARITY : out std_logic_vector(31 downto 0);
+            AXI_20_RDATA        : out std_logic_vector(255 downto 0);
+            AXI_20_RID          : out std_logic_vector(5 downto 0);
+            AXI_20_RLAST        : out std_logic;
+            AXI_20_RRESP        : out std_logic_vector(1 downto 0);
+            AXI_20_RVALID       : out std_logic;
+            AXI_20_WREADY       : out std_logic;
+            AXI_20_BID          : out std_logic_vector(5 downto 0);
+            AXI_20_BRESP        : out std_logic_vector(1 downto 0);
+            AXI_20_BVALID       : out std_logic;
+            AXI_21_ARREADY      : out std_logic;
+            AXI_21_AWREADY      : out std_logic;
+            AXI_21_RDATA_PARITY : out std_logic_vector(31 downto 0);
+            AXI_21_RDATA        : out std_logic_vector(255 downto 0);
+            AXI_21_RID          : out std_logic_vector(5 downto 0);
+            AXI_21_RLAST        : out std_logic;
+            AXI_21_RRESP        : out std_logic_vector(1 downto 0);
+            AXI_21_RVALID       : out std_logic;
+            AXI_21_WREADY       : out std_logic;
+            AXI_21_BID          : out std_logic_vector(5 downto 0);
+            AXI_21_BRESP        : out std_logic_vector(1 downto 0);
+            AXI_21_BVALID       : out std_logic;
+            AXI_22_ARREADY      : out std_logic;
+            AXI_22_AWREADY      : out std_logic;
+            AXI_22_RDATA_PARITY : out std_logic_vector(31 downto 0);
+            AXI_22_RDATA        : out std_logic_vector(255 downto 0);
+            AXI_22_RID          : out std_logic_vector(5 downto 0);
+            AXI_22_RLAST        : out std_logic;
+            AXI_22_RRESP        : out std_logic_vector(1 downto 0);
+            AXI_22_RVALID       : out std_logic;
+            AXI_22_WREADY       : out std_logic;
+            AXI_22_BID          : out std_logic_vector(5 downto 0);
+            AXI_22_BRESP        : out std_logic_vector(1 downto 0);
+            AXI_22_BVALID       : out std_logic;
+            AXI_23_ARREADY      : out std_logic;
+            AXI_23_AWREADY      : out std_logic;
+            AXI_23_RDATA_PARITY : out std_logic_vector(31 downto 0);
+            AXI_23_RDATA        : out std_logic_vector(255 downto 0);
+            AXI_23_RID          : out std_logic_vector(5 downto 0);
+            AXI_23_RLAST        : out std_logic;
+            AXI_23_RRESP        : out std_logic_vector(1 downto 0);
+            AXI_23_RVALID       : out std_logic;
+            AXI_23_WREADY       : out std_logic;
+            AXI_23_BID          : out std_logic_vector(5 downto 0);
+            AXI_23_BRESP        : out std_logic_vector(1 downto 0);
+            AXI_23_BVALID       : out std_logic;
+            AXI_24_ARREADY      : out std_logic;
+            AXI_24_AWREADY      : out std_logic;
+            AXI_24_RDATA_PARITY : out std_logic_vector(31 downto 0);
+            AXI_24_RDATA        : out std_logic_vector(255 downto 0);
+            AXI_24_RID          : out std_logic_vector(5 downto 0);
+            AXI_24_RLAST        : out std_logic;
+            AXI_24_RRESP        : out std_logic_vector(1 downto 0);
+            AXI_24_RVALID       : out std_logic;
+            AXI_24_WREADY       : out std_logic;
+            AXI_24_BID          : out std_logic_vector(5 downto 0);
+            AXI_24_BRESP        : out std_logic_vector(1 downto 0);
+            AXI_24_BVALID       : out std_logic;
+            AXI_25_ARREADY      : out std_logic;
+            AXI_25_AWREADY      : out std_logic;
+            AXI_25_RDATA_PARITY : out std_logic_vector(31 downto 0);
+            AXI_25_RDATA        : out std_logic_vector(255 downto 0);
+            AXI_25_RID          : out std_logic_vector(5 downto 0);
+            AXI_25_RLAST        : out std_logic;
+            AXI_25_RRESP        : out std_logic_vector(1 downto 0);
+            AXI_25_RVALID       : out std_logic;
+            AXI_25_WREADY       : out std_logic;
+            AXI_25_BID          : out std_logic_vector(5 downto 0);
+            AXI_25_BRESP        : out std_logic_vector(1 downto 0);
+            AXI_25_BVALID       : out std_logic;
+            AXI_26_ARREADY      : out std_logic;
+            AXI_26_AWREADY      : out std_logic;
+            AXI_26_RDATA_PARITY : out std_logic_vector(31 downto 0);
+            AXI_26_RDATA        : out std_logic_vector(255 downto 0);
+            AXI_26_RID          : out std_logic_vector(5 downto 0);
+            AXI_26_RLAST        : out std_logic;
+            AXI_26_RRESP        : out std_logic_vector(1 downto 0);
+            AXI_26_RVALID       : out std_logic;
+            AXI_26_WREADY       : out std_logic;
+            AXI_26_BID          : out std_logic_vector(5 downto 0);
+            AXI_26_BRESP        : out std_logic_vector(1 downto 0);
+            AXI_26_BVALID       : out std_logic;
+            AXI_27_ARREADY      : out std_logic;
+            AXI_27_AWREADY      : out std_logic;
+            AXI_27_RDATA_PARITY : out std_logic_vector(31 downto 0);
+            AXI_27_RDATA        : out std_logic_vector(255 downto 0);
+            AXI_27_RID          : out std_logic_vector(5 downto 0);
+            AXI_27_RLAST        : out std_logic;
+            AXI_27_RRESP        : out std_logic_vector(1 downto 0);
+            AXI_27_RVALID       : out std_logic;
+            AXI_27_WREADY       : out std_logic;
+            AXI_27_BID          : out std_logic_vector(5 downto 0);
+            AXI_27_BRESP        : out std_logic_vector(1 downto 0);
+            AXI_27_BVALID       : out std_logic;
+            AXI_28_ARREADY      : out std_logic;
+            AXI_28_AWREADY      : out std_logic;
+            AXI_28_RDATA_PARITY : out std_logic_vector(31 downto 0);
+            AXI_28_RDATA        : out std_logic_vector(255 downto 0);
+            AXI_28_RID          : out std_logic_vector(5 downto 0);
+            AXI_28_RLAST        : out std_logic;
+            AXI_28_RRESP        : out std_logic_vector(1 downto 0);
+            AXI_28_RVALID       : out std_logic;
+            AXI_28_WREADY       : out std_logic;
+            AXI_28_BID          : out std_logic_vector(5 downto 0);
+            AXI_28_BRESP        : out std_logic_vector(1 downto 0);
+            AXI_28_BVALID       : out std_logic;
+            AXI_29_ARREADY      : out std_logic;
+            AXI_29_AWREADY      : out std_logic;
+            AXI_29_RDATA_PARITY : out std_logic_vector(31 downto 0);
+            AXI_29_RDATA        : out std_logic_vector(255 downto 0);
+            AXI_29_RID          : out std_logic_vector(5 downto 0);
+            AXI_29_RLAST        : out std_logic;
+            AXI_29_RRESP        : out std_logic_vector(1 downto 0);
+            AXI_29_RVALID       : out std_logic;
+            AXI_29_WREADY       : out std_logic;
+            AXI_29_BID          : out std_logic_vector(5 downto 0);
+            AXI_29_BRESP        : out std_logic_vector(1 downto 0);
+            AXI_29_BVALID       : out std_logic;
+            AXI_30_ARREADY      : out std_logic;
+            AXI_30_AWREADY      : out std_logic;
+            AXI_30_RDATA_PARITY : out std_logic_vector(31 downto 0);
+            AXI_30_RDATA        : out std_logic_vector(255 downto 0);
+            AXI_30_RID          : out std_logic_vector(5 downto 0);
+            AXI_30_RLAST        : out std_logic;
+            AXI_30_RRESP        : out std_logic_vector(1 downto 0);
+            AXI_30_RVALID       : out std_logic;
+            AXI_30_WREADY       : out std_logic;
+            AXI_30_BID          : out std_logic_vector(5 downto 0);
+            AXI_30_BRESP        : out std_logic_vector(1 downto 0);
+            AXI_30_BVALID       : out std_logic;
+            AXI_31_ARREADY      : out std_logic;
+            AXI_31_AWREADY      : out std_logic;
+            AXI_31_RDATA_PARITY : out std_logic_vector(31 downto 0);
+            AXI_31_RDATA        : out std_logic_vector(255 downto 0);
+            AXI_31_RID          : out std_logic_vector(5 downto 0);
+            AXI_31_RLAST        : out std_logic;
+            AXI_31_RRESP        : out std_logic_vector(1 downto 0);
+            AXI_31_RVALID       : out std_logic;
+            AXI_31_WREADY       : out std_logic;
+            AXI_31_BID          : out std_logic_vector(5 downto 0);
+            AXI_31_BRESP        : out std_logic_vector(1 downto 0);
+            AXI_31_BVALID       : out std_logic;
+            APB_COMPLETE_0      : out std_logic;
+            APB_COMPLETE_1      : out std_logic;
+            DRAM_0_STAT_CATTRIP : out std_logic;
+            DRAM_0_STAT_TEMP    : out std_logic_vector(6 downto 0);
+            DRAM_1_STAT_CATTRIP : out std_logic;
+            DRAM_1_STAT_TEMP    : out std_logic_vector(6 downto 0)
+        );
+    end component;
 
 begin
     mmcm_i : component MMCME4_BASE
@@ -327,6 +1607,71 @@ begin
                 I => mmcm_usr_clks(clk_idx),
                 O => usr_clks(clk_idx));
     end generate;
+
+    -- Dedicated 450 MHz HBM port clock: MMCM fed from SYSCLK. VCO = 100 MHz * CLKFBOUT_MULT_F(13.5)
+    -- / DIVCLK_DIVIDE(1) = 1350 MHz, /CLKOUT0_DIVIDE_F(3.0) = 450 MHz. Drives DMA-driven ports'
+    -- AXI3 via hbm_axi_cdc_bridge_g; the smoke port stays on MI clock.
+    mmcm_450_i : component MMCME4_BASE
+        generic map (
+            BANDWIDTH        => "OPTIMIZED",
+            DIVCLK_DIVIDE    => 1,
+            -- Fvco 1350 MHz (100 x 13.5) for the same 450 MHz CLKOUT0: MMCM jitter falls as Fvco
+            -- rises, and DS923 puts MMCM_FVCOMIN/MAX at 800/1600 MHz, so 1350 sits well inside
+            -- range. CLKOUT1..6 stay /2 and are unconnected.
+            CLKFBOUT_MULT_F  => 13.5,
+            CLKOUT0_DIVIDE_F => 3.0,
+            CLKOUT1_DIVIDE   => 2,
+            CLKOUT2_DIVIDE   => 2,
+            CLKOUT3_DIVIDE   => 2,
+            CLKOUT4_DIVIDE   => 2,
+            CLKOUT5_DIVIDE   => 2,
+            CLKOUT6_DIVIDE   => 2,
+            CLKIN1_PERIOD    => SYSCLK_PERIOD
+        ) port map (
+            CLKFBOUT  => hbm_450_clkfbout,
+            CLKFBOUTB => open,
+            CLKOUT0   => hbm_450_clk_raw,
+            CLKOUT0B  => open,
+            CLKOUT1   => open,
+            CLKOUT1B  => open,
+            CLKOUT2   => open,
+            CLKOUT2B  => open,
+            CLKOUT3   => open,
+            CLKOUT3B  => open,
+            CLKOUT4   => open,
+            CLKOUT5   => open,
+            CLKOUT6   => open,
+            CLKFBIN   => hbm_450_clkfbout,
+            CLKIN1    => SYSCLK,
+            LOCKED    => hbm_450_locked,
+            PWRDWN    => '0',
+            RST       => SYSRST
+        );
+
+    -- Internal feedback loop (CLKFBOUT -> CLKFBIN, no BUFG) -- mirrors mmcm_i's own CLKFBOUT/
+    -- CLKFBIN loop exactly; CLKOUT0 is a separate, independently divided 450 MHz tap needing only
+    -- its own output BUFG, not a feedback role.
+    hbm_450_bufg_i : component BUFG
+        port map (
+            I => hbm_450_clk_raw,
+            O => hbm_450_clk);
+
+    -- Reset synchronization into the new 450 MHz domain (mirrors global_reset_i's own
+    -- SYSCLK-domain ASYNC_RESET pattern below): held asserted until BOTH the main SYSCLK PLL
+    -- (pll_locked) and this dedicated MMCM (hbm_450_locked) have locked.
+    hbm_450_rst_i : entity work.ASYNC_RESET
+        generic map (
+            TWO_REG  => FALSE,
+            OUT_REG  => TRUE,
+            REPLICAS => 1
+        )
+        port map (
+            CLK        => hbm_450_clk,
+            ASYNC_RST  => (not pll_locked) or (not hbm_450_locked),
+            OUT_RST(0) => hbm_450_rst_r(0)
+        );
+
+    hbm_450_arstn <= not hbm_450_rst_r(0);
 
     global_reset_i : entity work.ASYNC_RESET
         generic map (
@@ -421,9 +1766,14 @@ begin
             PCIE_TX_N       => PCIE_TX_N,
             PCIE_USER_CLK   => pcie_clks,
             PCIE_USER_RESET => pcie_rsts,
-            PCIE_LINK_UP    => pcie_link_up,
 
-            CARD_ID => pcie_fpga_id,
+            PCIE_LINK_UP        => pcie_link_up,
+            PCIE_MPS            => open,
+            PCIE_MRRS           => open,
+            PCIE_EXT_TAG_EN     => open,
+            PCIE_10B_TAG_REQ_EN => open,
+            PCIE_RCB_SIZE       => open,
+            CARD_ID             => pcie_fpga_id,
 
             DMA_CLK   => pcie_clks(0),
             DMA_RESET => pcie_rsts(0),
@@ -641,9 +1991,8 @@ begin
                 MI_SAME_CLK => FALSE,
 
                 NUM_QUEUES => NUM_QUEUES,
-                -- Timing-closure lever for N=4: per-queue tag/context/FIFO storage (x
-                -- NUM_QUEUES) congests the CQ/WRBUFF datapath. The register file lives in
-                -- NP_LUTRAM to bound area; QUEUE_DEPTH trades outstanding commands for congestion.
+                -- QUEUE_DEPTH: per-queue outstanding-command depth. Larger NUM_QUEUES x
+                -- QUEUE_DEPTH may need AggressiveExplore route + phys_opt to close timing.
                 QUEUE_DEPTH => 64,
                 -- Production keepalive width (2**28 DMA_CLK cycles, ~1 s); explicitly assigned
                 -- (equals DMA_IUVENTUS's own default) per the "always assign every generic" rule.
@@ -661,7 +2010,20 @@ begin
 
                 -- Enable the stall-class profiler, published as MI counters at 0x0A4..0x0C8.
                 -- Off by default; turned on to locate where the DMA spends stalled cycles.
-                PROFILE_EN => true
+                PROFILE_EN => true,
+
+                HBM_WRBUFF_WR_PORT0_BASE => HBM_WRBUFF_WR_PORT0_BASE,
+                HBM_WRBUFF_WR_PORT1_BASE => HBM_WRBUFF_WR_PORT1_BASE,
+                HBM_WRBUFF_RD_PORT0_BASE => HBM_WRBUFF_RD_PORT0_BASE,
+                HBM_WRBUFF_RD_PORT1_BASE => HBM_WRBUFF_RD_PORT1_BASE,
+
+                -- RDBUFF's own fill/drain port bases, same reuse pattern as WRBUFF's above. All
+                -- four MUST be driven with real values -- the entity's all-zero defaults are
+                -- elaboration-only (see DMA_IUVENTUS's own generic comment).
+                HBM_RDBUFF_WR_PORT0_BASE => HBM_RDBUFF_WR_PORT0_BASE,
+                HBM_RDBUFF_WR_PORT1_BASE => HBM_RDBUFF_WR_PORT1_BASE,
+                HBM_RDBUFF_RD_PORT0_BASE => HBM_RDBUFF_RD_PORT0_BASE,
+                HBM_RDBUFF_RD_PORT1_BASE => HBM_RDBUFF_RD_PORT1_BASE
             )
             port map (
                 CLK      => pcie_clks(str),
@@ -672,9 +2034,12 @@ begin
                 NVME_RD_REQ_VLD     => nvme_rd_req_vld(str),
                 NVME_RD_REQ_RDY     => nvme_rd_req_rdy(str),
                 NVME_RD_REQ_QID     => nvme_rd_req_qid(str),
-                NVME_RD_REQ_QUEUE_RDY => nvme_rd_req_queue_rdy(str),
+                NVME_RD_REQ_CID     => nvme_rd_req_cid(str),
+                NVME_RD_REQ_CID_VLD => nvme_rd_req_cid_vld(str),
 
                 OP_STAT_TYPE => nvme_op_stat_type(str),
+                OP_STAT_QID  => nvme_op_stat_qid(str),
+                OP_STAT_CID  => nvme_op_stat_cid(str),
                 OP_STAT_CODE => nvme_op_stat_code(str),
                 OP_STAT_VLD  => nvme_op_stat_vld(str),
 
@@ -688,6 +2053,7 @@ begin
                 WR_MFB_DST_RDY => nvme_wr_mfb_dst_rdy(str),
 
                 RD_MFB_DATA    => nvme_rd_mfb_data(str),
+                RD_MFB_META    => nvme_rd_mfb_meta(str),
                 RD_MFB_SOF     => nvme_rd_mfb_sof(str),
                 RD_MFB_EOF     => nvme_rd_mfb_eof(str),
                 RD_MFB_SOF_POS => nvme_rd_mfb_sof_pos(str),
@@ -732,7 +2098,151 @@ begin
                 MI_WR   => dma_mi_wr(str),
                 MI_DRD  => dma_mi_drd(str),
                 MI_ARDY => dma_mi_ardy(str),
-                MI_DRDY => dma_mi_drdy(str)
+                MI_DRDY => dma_mi_drdy(str),
+
+                -- WRBUFF fill/drain wire to fixed-index cdc_axi_* entries. Those indices are
+                -- singular, so this assumes DMA_STREAMS=1 -- a second stream would multi-drive
+                -- the same elements. The DMA presents AXI already in the HBM domain.
+                HBM_CLK   => hbm_450_clk,
+                HBM_RESET => hbm_450_rst_r(0),
+
+                HBM_WRBUFF_WR_AXI0_AWADDR  => cdc_axi_awaddr(HBM_WRBUFF_WR_PORT0),
+                HBM_WRBUFF_WR_AXI0_AWID    => cdc_axi_awid(HBM_WRBUFF_WR_PORT0),
+                HBM_WRBUFF_WR_AXI0_AWLEN   => cdc_axi_awlen(HBM_WRBUFF_WR_PORT0),
+                HBM_WRBUFF_WR_AXI0_AWSIZE  => cdc_axi_awsize(HBM_WRBUFF_WR_PORT0),
+                HBM_WRBUFF_WR_AXI0_AWBURST => cdc_axi_awburst(HBM_WRBUFF_WR_PORT0),
+                HBM_WRBUFF_WR_AXI0_AWVALID => cdc_axi_awvalid(HBM_WRBUFF_WR_PORT0),
+                HBM_WRBUFF_WR_AXI0_AWREADY => cdc_axi_awready(HBM_WRBUFF_WR_PORT0),
+                HBM_WRBUFF_WR_AXI0_WDATA   => cdc_axi_wdata(HBM_WRBUFF_WR_PORT0),
+                HBM_WRBUFF_WR_AXI0_WSTRB   => cdc_axi_wstrb(HBM_WRBUFF_WR_PORT0),
+                HBM_WRBUFF_WR_AXI0_WLAST   => cdc_axi_wlast(HBM_WRBUFF_WR_PORT0),
+                HBM_WRBUFF_WR_AXI0_WVALID  => cdc_axi_wvalid(HBM_WRBUFF_WR_PORT0),
+                HBM_WRBUFF_WR_AXI0_WREADY  => cdc_axi_wready(HBM_WRBUFF_WR_PORT0),
+                HBM_WRBUFF_WR_AXI0_BID     => cdc_axi_bid(HBM_WRBUFF_WR_PORT0),
+                HBM_WRBUFF_WR_AXI0_BRESP   => cdc_axi_bresp(HBM_WRBUFF_WR_PORT0),
+                HBM_WRBUFF_WR_AXI0_BVALID  => cdc_axi_bvalid(HBM_WRBUFF_WR_PORT0),
+                HBM_WRBUFF_WR_AXI0_BREADY  => cdc_axi_bready(HBM_WRBUFF_WR_PORT0),
+
+                HBM_WRBUFF_WR_AXI1_AWADDR  => cdc_axi_awaddr(HBM_WRBUFF_WR_PORT1),
+                HBM_WRBUFF_WR_AXI1_AWID    => cdc_axi_awid(HBM_WRBUFF_WR_PORT1),
+                HBM_WRBUFF_WR_AXI1_AWLEN   => cdc_axi_awlen(HBM_WRBUFF_WR_PORT1),
+                HBM_WRBUFF_WR_AXI1_AWSIZE  => cdc_axi_awsize(HBM_WRBUFF_WR_PORT1),
+                HBM_WRBUFF_WR_AXI1_AWBURST => cdc_axi_awburst(HBM_WRBUFF_WR_PORT1),
+                HBM_WRBUFF_WR_AXI1_AWVALID => cdc_axi_awvalid(HBM_WRBUFF_WR_PORT1),
+                HBM_WRBUFF_WR_AXI1_AWREADY => cdc_axi_awready(HBM_WRBUFF_WR_PORT1),
+                HBM_WRBUFF_WR_AXI1_WDATA   => cdc_axi_wdata(HBM_WRBUFF_WR_PORT1),
+                HBM_WRBUFF_WR_AXI1_WSTRB   => cdc_axi_wstrb(HBM_WRBUFF_WR_PORT1),
+                HBM_WRBUFF_WR_AXI1_WLAST   => cdc_axi_wlast(HBM_WRBUFF_WR_PORT1),
+                HBM_WRBUFF_WR_AXI1_WVALID  => cdc_axi_wvalid(HBM_WRBUFF_WR_PORT1),
+                HBM_WRBUFF_WR_AXI1_WREADY  => cdc_axi_wready(HBM_WRBUFF_WR_PORT1),
+                HBM_WRBUFF_WR_AXI1_BID     => cdc_axi_bid(HBM_WRBUFF_WR_PORT1),
+                HBM_WRBUFF_WR_AXI1_BRESP   => cdc_axi_bresp(HBM_WRBUFF_WR_PORT1),
+                HBM_WRBUFF_WR_AXI1_BVALID  => cdc_axi_bvalid(HBM_WRBUFF_WR_PORT1),
+                HBM_WRBUFF_WR_AXI1_BREADY  => cdc_axi_bready(HBM_WRBUFF_WR_PORT1),
+
+                -- Single WRBUFF-read AXI3 port group.
+                HBM_WRBUFF_RD_AXI0_ARADDR  => cdc_axi_araddr(HBM_WRBUFF_RD_PORT0),
+                HBM_WRBUFF_RD_AXI0_ARID    => cdc_axi_arid(HBM_WRBUFF_RD_PORT0),
+                HBM_WRBUFF_RD_AXI0_ARLEN   => cdc_axi_arlen(HBM_WRBUFF_RD_PORT0),
+                HBM_WRBUFF_RD_AXI0_ARSIZE  => cdc_axi_arsize(HBM_WRBUFF_RD_PORT0),
+                HBM_WRBUFF_RD_AXI0_ARBURST => cdc_axi_arburst(HBM_WRBUFF_RD_PORT0),
+                HBM_WRBUFF_RD_AXI0_ARVALID => cdc_axi_arvalid(HBM_WRBUFF_RD_PORT0),
+                HBM_WRBUFF_RD_AXI0_ARREADY => cdc_axi_arready(HBM_WRBUFF_RD_PORT0),
+                HBM_WRBUFF_RD_AXI0_RDATA   => cdc_axi_rdata(HBM_WRBUFF_RD_PORT0),
+                HBM_WRBUFF_RD_AXI0_RID     => cdc_axi_rid(HBM_WRBUFF_RD_PORT0),
+                HBM_WRBUFF_RD_AXI0_RRESP   => cdc_axi_rresp(HBM_WRBUFF_RD_PORT0),
+                HBM_WRBUFF_RD_AXI0_RLAST   => cdc_axi_rlast(HBM_WRBUFF_RD_PORT0),
+                HBM_WRBUFF_RD_AXI0_RVALID  => cdc_axi_rvalid(HBM_WRBUFF_RD_PORT0),
+                HBM_WRBUFF_RD_AXI0_RREADY  => cdc_axi_rready(HBM_WRBUFF_RD_PORT0),
+                HBM_WRBUFF_RD_AXI1_ARADDR  => cdc_axi_araddr(HBM_WRBUFF_RD_PORT1),
+                HBM_WRBUFF_RD_AXI1_ARID    => cdc_axi_arid(HBM_WRBUFF_RD_PORT1),
+                HBM_WRBUFF_RD_AXI1_ARLEN   => cdc_axi_arlen(HBM_WRBUFF_RD_PORT1),
+                HBM_WRBUFF_RD_AXI1_ARSIZE  => cdc_axi_arsize(HBM_WRBUFF_RD_PORT1),
+                HBM_WRBUFF_RD_AXI1_ARBURST => cdc_axi_arburst(HBM_WRBUFF_RD_PORT1),
+                HBM_WRBUFF_RD_AXI1_ARVALID => cdc_axi_arvalid(HBM_WRBUFF_RD_PORT1),
+                HBM_WRBUFF_RD_AXI1_ARREADY => cdc_axi_arready(HBM_WRBUFF_RD_PORT1),
+                HBM_WRBUFF_RD_AXI1_RDATA   => cdc_axi_rdata(HBM_WRBUFF_RD_PORT1),
+                HBM_WRBUFF_RD_AXI1_RID     => cdc_axi_rid(HBM_WRBUFF_RD_PORT1),
+                HBM_WRBUFF_RD_AXI1_RRESP   => cdc_axi_rresp(HBM_WRBUFF_RD_PORT1),
+                HBM_WRBUFF_RD_AXI1_RLAST   => cdc_axi_rlast(HBM_WRBUFF_RD_PORT1),
+                HBM_WRBUFF_RD_AXI1_RVALID  => cdc_axi_rvalid(HBM_WRBUFF_RD_PORT1),
+                HBM_WRBUFF_RD_AXI1_RREADY  => cdc_axi_rready(HBM_WRBUFF_RD_PORT1),
+
+                -- RDBUFF HBM fill/drain ports: same fixed-index cdc_axi_* pattern as WRBUFF above
+                -- (HBM_RDBUFF_WR_PORT0/1, HBM_RDBUFF_RD_PORT, see hbm_port_wiring_g/
+                -- hbm_axi_cdc_bridge_g); same DMA_STREAMS = 1 assumption applies here too.
+                HBM_RDBUFF_WR_AXI0_AWADDR  => cdc_axi_awaddr(HBM_RDBUFF_WR_PORT0),
+                HBM_RDBUFF_WR_AXI0_AWID    => cdc_axi_awid(HBM_RDBUFF_WR_PORT0),
+                HBM_RDBUFF_WR_AXI0_AWLEN   => cdc_axi_awlen(HBM_RDBUFF_WR_PORT0),
+                HBM_RDBUFF_WR_AXI0_AWSIZE  => cdc_axi_awsize(HBM_RDBUFF_WR_PORT0),
+                HBM_RDBUFF_WR_AXI0_AWBURST => cdc_axi_awburst(HBM_RDBUFF_WR_PORT0),
+                HBM_RDBUFF_WR_AXI0_AWVALID => cdc_axi_awvalid(HBM_RDBUFF_WR_PORT0),
+                HBM_RDBUFF_WR_AXI0_AWREADY => cdc_axi_awready(HBM_RDBUFF_WR_PORT0),
+                HBM_RDBUFF_WR_AXI0_WDATA   => cdc_axi_wdata(HBM_RDBUFF_WR_PORT0),
+                HBM_RDBUFF_WR_AXI0_WSTRB   => cdc_axi_wstrb(HBM_RDBUFF_WR_PORT0),
+                HBM_RDBUFF_WR_AXI0_WLAST   => cdc_axi_wlast(HBM_RDBUFF_WR_PORT0),
+                HBM_RDBUFF_WR_AXI0_WVALID  => cdc_axi_wvalid(HBM_RDBUFF_WR_PORT0),
+                HBM_RDBUFF_WR_AXI0_WREADY  => cdc_axi_wready(HBM_RDBUFF_WR_PORT0),
+                HBM_RDBUFF_WR_AXI0_BID     => cdc_axi_bid(HBM_RDBUFF_WR_PORT0),
+                HBM_RDBUFF_WR_AXI0_BRESP   => cdc_axi_bresp(HBM_RDBUFF_WR_PORT0),
+                HBM_RDBUFF_WR_AXI0_BVALID  => cdc_axi_bvalid(HBM_RDBUFF_WR_PORT0),
+                HBM_RDBUFF_WR_AXI0_BREADY  => cdc_axi_bready(HBM_RDBUFF_WR_PORT0),
+
+                HBM_RDBUFF_WR_AXI1_AWADDR  => cdc_axi_awaddr(HBM_RDBUFF_WR_PORT1),
+                HBM_RDBUFF_WR_AXI1_AWID    => cdc_axi_awid(HBM_RDBUFF_WR_PORT1),
+                HBM_RDBUFF_WR_AXI1_AWLEN   => cdc_axi_awlen(HBM_RDBUFF_WR_PORT1),
+                HBM_RDBUFF_WR_AXI1_AWSIZE  => cdc_axi_awsize(HBM_RDBUFF_WR_PORT1),
+                HBM_RDBUFF_WR_AXI1_AWBURST => cdc_axi_awburst(HBM_RDBUFF_WR_PORT1),
+                HBM_RDBUFF_WR_AXI1_AWVALID => cdc_axi_awvalid(HBM_RDBUFF_WR_PORT1),
+                HBM_RDBUFF_WR_AXI1_AWREADY => cdc_axi_awready(HBM_RDBUFF_WR_PORT1),
+                HBM_RDBUFF_WR_AXI1_WDATA   => cdc_axi_wdata(HBM_RDBUFF_WR_PORT1),
+                HBM_RDBUFF_WR_AXI1_WSTRB   => cdc_axi_wstrb(HBM_RDBUFF_WR_PORT1),
+                HBM_RDBUFF_WR_AXI1_WLAST   => cdc_axi_wlast(HBM_RDBUFF_WR_PORT1),
+                HBM_RDBUFF_WR_AXI1_WVALID  => cdc_axi_wvalid(HBM_RDBUFF_WR_PORT1),
+                HBM_RDBUFF_WR_AXI1_WREADY  => cdc_axi_wready(HBM_RDBUFF_WR_PORT1),
+                HBM_RDBUFF_WR_AXI1_BID     => cdc_axi_bid(HBM_RDBUFF_WR_PORT1),
+                HBM_RDBUFF_WR_AXI1_BRESP   => cdc_axi_bresp(HBM_RDBUFF_WR_PORT1),
+                HBM_RDBUFF_WR_AXI1_BVALID  => cdc_axi_bvalid(HBM_RDBUFF_WR_PORT1),
+                HBM_RDBUFF_WR_AXI1_BREADY  => cdc_axi_bready(HBM_RDBUFF_WR_PORT1),
+
+                -- Single RDBUFF-read AXI3 port group.
+                HBM_RDBUFF_RD_AXI0_ARADDR  => cdc_axi_araddr(HBM_RDBUFF_RD_PORT0),
+                HBM_RDBUFF_RD_AXI0_ARID    => cdc_axi_arid(HBM_RDBUFF_RD_PORT0),
+                HBM_RDBUFF_RD_AXI0_ARLEN   => cdc_axi_arlen(HBM_RDBUFF_RD_PORT0),
+                HBM_RDBUFF_RD_AXI0_ARSIZE  => cdc_axi_arsize(HBM_RDBUFF_RD_PORT0),
+                HBM_RDBUFF_RD_AXI0_ARBURST => cdc_axi_arburst(HBM_RDBUFF_RD_PORT0),
+                HBM_RDBUFF_RD_AXI0_ARVALID => cdc_axi_arvalid(HBM_RDBUFF_RD_PORT0),
+                HBM_RDBUFF_RD_AXI0_ARREADY => cdc_axi_arready(HBM_RDBUFF_RD_PORT0),
+                HBM_RDBUFF_RD_AXI0_RDATA   => cdc_axi_rdata(HBM_RDBUFF_RD_PORT0),
+                HBM_RDBUFF_RD_AXI0_RID     => cdc_axi_rid(HBM_RDBUFF_RD_PORT0),
+                HBM_RDBUFF_RD_AXI0_RRESP   => cdc_axi_rresp(HBM_RDBUFF_RD_PORT0),
+                HBM_RDBUFF_RD_AXI0_RLAST   => cdc_axi_rlast(HBM_RDBUFF_RD_PORT0),
+                HBM_RDBUFF_RD_AXI0_RVALID  => cdc_axi_rvalid(HBM_RDBUFF_RD_PORT0),
+                HBM_RDBUFF_RD_AXI0_RREADY  => cdc_axi_rready(HBM_RDBUFF_RD_PORT0),
+                HBM_RDBUFF_RD_AXI1_ARADDR  => cdc_axi_araddr(HBM_RDBUFF_RD_PORT1),
+                HBM_RDBUFF_RD_AXI1_ARID    => cdc_axi_arid(HBM_RDBUFF_RD_PORT1),
+                HBM_RDBUFF_RD_AXI1_ARLEN   => cdc_axi_arlen(HBM_RDBUFF_RD_PORT1),
+                HBM_RDBUFF_RD_AXI1_ARSIZE  => cdc_axi_arsize(HBM_RDBUFF_RD_PORT1),
+                HBM_RDBUFF_RD_AXI1_ARBURST => cdc_axi_arburst(HBM_RDBUFF_RD_PORT1),
+                HBM_RDBUFF_RD_AXI1_ARVALID => cdc_axi_arvalid(HBM_RDBUFF_RD_PORT1),
+                HBM_RDBUFF_RD_AXI1_ARREADY => cdc_axi_arready(HBM_RDBUFF_RD_PORT1),
+                HBM_RDBUFF_RD_AXI1_RDATA   => cdc_axi_rdata(HBM_RDBUFF_RD_PORT1),
+                HBM_RDBUFF_RD_AXI1_RID     => cdc_axi_rid(HBM_RDBUFF_RD_PORT1),
+                HBM_RDBUFF_RD_AXI1_RRESP   => cdc_axi_rresp(HBM_RDBUFF_RD_PORT1),
+                HBM_RDBUFF_RD_AXI1_RLAST   => cdc_axi_rlast(HBM_RDBUFF_RD_PORT1),
+                HBM_RDBUFF_RD_AXI1_RVALID  => cdc_axi_rvalid(HBM_RDBUFF_RD_PORT1),
+                HBM_RDBUFF_RD_AXI1_RREADY  => cdc_axi_rready(HBM_RDBUFF_RD_PORT1),
+
+                STAT_WRBUFF_UNALIGNED_BURST => open,
+                STAT_WRBUFF_WR_BRESP_ERR    => open,
+                STAT_WRBUFF_RD_RRESP_ERR    => open,
+                STAT_WRBUFF_SPARSE_BE       => open,
+                STAT_WRBUFF_DROPPED_FRAME   => open,
+
+                -- RDBUFF HBM datapath statistics: not yet wired to an MI counter, same as
+                -- STAT_WRBUFF_* above (see DMA_IUVENTUS's own STAT_RDBUFF_* port comment).
+                STAT_RDBUFF_RD_RRESP_ERR => open,
+                STAT_RDBUFF_RD_UNALIGNED => open
             );
     end generate ;
 
@@ -801,9 +2311,12 @@ begin
             NVME_RD_REQ_VLD     => nvme_rd_req_vld(0),
             NVME_RD_REQ_RDY     => nvme_rd_req_rdy(0),
             NVME_RD_REQ_QID     => nvme_rd_req_qid(0),
-            NVME_RD_REQ_QUEUE_RDY => nvme_rd_req_queue_rdy(0),
+            NVME_RD_REQ_CID     => nvme_rd_req_cid(0),
+            NVME_RD_REQ_CID_VLD => nvme_rd_req_cid_vld(0),
 
             NVME_OP_STAT_TYPE => nvme_op_stat_type(0),
+            NVME_OP_STAT_QID  => nvme_op_stat_qid(0),
+            NVME_OP_STAT_CID  => nvme_op_stat_cid(0),
             NVME_OP_STAT_CODE => nvme_op_stat_code(0),
             NVME_OP_STAT_VLD  => nvme_op_stat_vld(0),
 
@@ -817,6 +2330,7 @@ begin
             NVME_WR_MFB_DST_RDY => nvme_wr_mfb_dst_rdy(0),
 
             NVME_RD_MFB_DATA    => nvme_rd_mfb_data(0),
+            NVME_RD_MFB_META    => nvme_rd_mfb_meta(0),
             NVME_RD_MFB_SOF     => nvme_rd_mfb_sof(0),
             NVME_RD_MFB_EOF     => nvme_rd_mfb_eof(0),
             NVME_RD_MFB_SOF_POS => nvme_rd_mfb_sof_pos(0),
@@ -845,4 +2359,1400 @@ begin
     end process;
 
     STATUS_LEDS(1) <= (and app_pcie_link_up);
+
+    -- HBM smoke-test wiring. PG276: the switch ties every port's ARESET_N together, so an unused
+    -- port held in reset would reset the whole stack -- every port gets the same clock and a
+    -- deasserted reset; unused ports tie their master-driven inputs inactive.
+    smk_sel_port <= to_integer(unsigned(smk_port_sel))
+                    when hbm_port_wired_f(to_integer(unsigned(smk_port_sel)))
+                    else HBM_SMOKE_PORT;
+
+    hbm_port_wiring_g : for i in 0 to HBM_PORTS-1 generate
+        -- hbm_450_port_f selects the 450 MHz clock/reset per port; the smoke port uses the MI clock/reset.
+        hbm_axi_aclk(i)     <= hbm_450_clk when hbm_450_port_f(i) else usr_clks(MI_CLK_IDX);
+        hbm_axi_areset_n(i) <= hbm_450_arstn when hbm_450_port_f(i) else (not usr_rsts(MI_CLK_IDX)(9));
+
+        -- DMA-driven ports (hbm_dma_driven_port_f) take DMA_IUVENTUS's already-450 MHz AXI
+        -- through an AXI_PIPE before hbm_axi_*(i). dma_driven_port_g, wired_port_g, and
+        -- unused_port_g partition all HBM_PORTS exactly -- every port matches one branch.
+        dma_driven_port_g : if (hbm_dma_driven_port_f(i)) generate
+            hbm_axi_wdata_parity(i) <= (others => '0');
+            -- DMA_IUVENTUS's AXI is already in the 450 MHz domain, so this only pipes it onward
+            -- (see the DMA core's docs). AXI_PIPE stage between the DMA's HBM AXI (cdc_axi_*,
+            -- M_AXI) and hbm_ip (hbm_axi_*, S_AXI); CLK/RESET share the 450 MHz domain.
+            hbm_450_pipe_i : entity work.AXI_PIPE
+            generic map (
+                AXI_ADDR_WIDTH  => HBM_ADDR_WIDTH,
+                AXI_DATA_WIDTH  => HBM_DATA_WIDTH,
+                AXI_ID_WIDTH    => HBM_ID_WIDTH,
+                AXI_LEN_WIDTH   => HBM_LEN_WIDTH,
+                AXI_SIZE_WIDTH  => HBM_SIZE_WIDTH,
+                AXI_BURST_WIDTH => HBM_BURST_WIDTH,
+                AXI_RESP_WIDTH  => HBM_RESP_WIDTH,
+
+                WRITE_EN => hbm_dma_driven_port_f(i),
+                READ_EN  => hbm_dma_driven_port_f(i),
+
+                STAGES => HBM_450_PIPE_STAGES,
+                DEVICE => DEVICE
+            )
+            port map (
+                CLK   => hbm_450_clk,
+                RESET => hbm_450_rst_r(0),
+
+                M_AXI_AWADDR  => cdc_axi_awaddr(i),
+                M_AXI_AWID    => cdc_axi_awid(i),
+                M_AXI_AWLEN   => cdc_axi_awlen(i),
+                M_AXI_AWSIZE  => cdc_axi_awsize(i),
+                M_AXI_AWBURST => cdc_axi_awburst(i),
+                M_AXI_AWVALID => cdc_axi_awvalid(i),
+                M_AXI_AWREADY => cdc_axi_awready(i),
+
+                M_AXI_WDATA  => cdc_axi_wdata(i),
+                M_AXI_WSTRB  => cdc_axi_wstrb(i),
+                M_AXI_WLAST  => cdc_axi_wlast(i),
+                M_AXI_WVALID => cdc_axi_wvalid(i),
+                M_AXI_WREADY => cdc_axi_wready(i),
+
+                M_AXI_BID    => cdc_axi_bid(i),
+                M_AXI_BRESP  => cdc_axi_bresp(i),
+                M_AXI_BVALID => cdc_axi_bvalid(i),
+                M_AXI_BREADY => cdc_axi_bready(i),
+
+                M_AXI_ARADDR  => cdc_axi_araddr(i),
+                M_AXI_ARID    => cdc_axi_arid(i),
+                M_AXI_ARLEN   => cdc_axi_arlen(i),
+                M_AXI_ARSIZE  => cdc_axi_arsize(i),
+                M_AXI_ARBURST => cdc_axi_arburst(i),
+                M_AXI_ARVALID => cdc_axi_arvalid(i),
+                M_AXI_ARREADY => cdc_axi_arready(i),
+
+                M_AXI_RDATA  => cdc_axi_rdata(i),
+                M_AXI_RID    => cdc_axi_rid(i),
+                M_AXI_RRESP  => cdc_axi_rresp(i),
+                M_AXI_RLAST  => cdc_axi_rlast(i),
+                M_AXI_RVALID => cdc_axi_rvalid(i),
+                M_AXI_RREADY => cdc_axi_rready(i),
+
+                S_AXI_AWADDR  => hbm_axi_awaddr(i),
+                S_AXI_AWID    => hbm_axi_awid(i),
+                S_AXI_AWLEN   => hbm_axi_awlen(i),
+                S_AXI_AWSIZE  => hbm_axi_awsize(i),
+                S_AXI_AWBURST => hbm_axi_awburst(i),
+                S_AXI_AWVALID => hbm_axi_awvalid(i),
+                S_AXI_AWREADY => hbm_axi_awready(i),
+
+                S_AXI_WDATA  => hbm_axi_wdata(i),
+                S_AXI_WSTRB  => hbm_axi_wstrb(i),
+                S_AXI_WLAST  => hbm_axi_wlast(i),
+                S_AXI_WVALID => hbm_axi_wvalid(i),
+                S_AXI_WREADY => hbm_axi_wready(i),
+
+                S_AXI_BID    => hbm_axi_bid(i),
+                S_AXI_BRESP  => hbm_axi_bresp(i),
+                S_AXI_BVALID => hbm_axi_bvalid(i),
+                S_AXI_BREADY => hbm_axi_bready(i),
+
+                S_AXI_ARADDR  => hbm_axi_araddr(i),
+                S_AXI_ARID    => hbm_axi_arid(i),
+                S_AXI_ARLEN   => hbm_axi_arlen(i),
+                S_AXI_ARSIZE  => hbm_axi_arsize(i),
+                S_AXI_ARBURST => hbm_axi_arburst(i),
+                S_AXI_ARVALID => hbm_axi_arvalid(i),
+                S_AXI_ARREADY => hbm_axi_arready(i),
+
+                S_AXI_RDATA  => hbm_axi_rdata(i),
+                S_AXI_RID    => hbm_axi_rid(i),
+                S_AXI_RRESP  => hbm_axi_rresp(i),
+                S_AXI_RLAST  => hbm_axi_rlast(i),
+                S_AXI_RVALID => hbm_axi_rvalid(i),
+                S_AXI_RREADY => hbm_axi_rready(i)
+            );
+        end generate;
+
+        wired_port_g : if (hbm_port_wired_f(i)) generate
+            -- Payload/address fields may fan out unconditionally (a transaction only starts on a
+            -- VALID); the handshake signals are gated on the selected port.
+            hbm_axi_araddr(i)       <= smk_araddr;
+            hbm_axi_arburst(i)      <= smk_arburst;
+            hbm_axi_arid(i)         <= smk_arid;
+            hbm_axi_arlen(i)        <= smk_arlen;
+            hbm_axi_arsize(i)       <= smk_arsize;
+            hbm_axi_arvalid(i)      <= smk_arvalid when (smk_sel_port = i) else '0';
+            hbm_axi_awaddr(i)       <= smk_awaddr;
+            hbm_axi_awburst(i)      <= smk_awburst;
+            hbm_axi_awid(i)         <= smk_awid;
+            hbm_axi_awlen(i)        <= smk_awlen;
+            hbm_axi_awsize(i)       <= smk_awsize;
+            hbm_axi_awvalid(i)      <= smk_awvalid when (smk_sel_port = i) else '0';
+            hbm_axi_wdata(i)        <= smk_wdata;
+            hbm_axi_wdata_parity(i) <= smk_wdata_parity;
+            hbm_axi_wlast(i)        <= smk_wlast;
+            hbm_axi_wstrb(i)        <= smk_wstrb;
+            hbm_axi_wvalid(i)       <= smk_wvalid when (smk_sel_port = i) else '0';
+            hbm_axi_rready(i)       <= smk_rready when (smk_sel_port = i) else '0';
+            hbm_axi_bready(i)       <= smk_bready when (smk_sel_port = i) else '0';
+        end generate;
+
+        unused_port_g : if (not hbm_port_wired_f(i) and not hbm_dma_driven_port_f(i)) generate
+            -- tie ALL master-driven inputs of unused ports inactive
+            hbm_axi_araddr(i)       <= (others => '0');
+            hbm_axi_arburst(i)      <= (others => '0');
+            hbm_axi_arid(i)         <= (others => '0');
+            hbm_axi_arlen(i)        <= (others => '0');
+            hbm_axi_arsize(i)       <= (others => '0');
+            hbm_axi_arvalid(i)      <= '0';
+            hbm_axi_awaddr(i)       <= (others => '0');
+            hbm_axi_awburst(i)      <= (others => '0');
+            hbm_axi_awid(i)         <= (others => '0');
+            hbm_axi_awlen(i)        <= (others => '0');
+            hbm_axi_awsize(i)       <= (others => '0');
+            hbm_axi_awvalid(i)      <= '0';
+            hbm_axi_wdata(i)        <= (others => '0');
+            hbm_axi_wdata_parity(i) <= (others => '0');
+            hbm_axi_wlast(i)        <= '0';
+            hbm_axi_wstrb(i)        <= (others => '0');
+            hbm_axi_wvalid(i)       <= '0';
+            hbm_axi_rready(i)       <= '0';
+            hbm_axi_bready(i)       <= '0';
+        end generate;
+    end generate;
+
+    -- Response mux back to the smoke-test FSM
+    smk_awready      <= hbm_axi_awready(smk_sel_port);
+    smk_wready       <= hbm_axi_wready(smk_sel_port);
+    smk_bid          <= hbm_axi_bid(smk_sel_port);
+    smk_bresp        <= hbm_axi_bresp(smk_sel_port);
+    smk_bvalid       <= hbm_axi_bvalid(smk_sel_port);
+    smk_arready      <= hbm_axi_arready(smk_sel_port);
+    smk_rdata        <= hbm_axi_rdata(smk_sel_port);
+    smk_rdata_parity <= hbm_axi_rdata_parity(smk_sel_port);
+    smk_rid          <= hbm_axi_rid(smk_sel_port);
+    smk_rlast        <= hbm_axi_rlast(smk_sel_port);
+    smk_rresp        <= hbm_axi_rresp(smk_sel_port);
+    smk_rvalid       <= hbm_axi_rvalid(smk_sel_port);
+
+    hbm_ready_sync_g : for i in 0 to 1 generate
+        hbm_ready_sync_i : xpm_cdc_single
+            generic map (
+                DEST_SYNC_FF   => 4,
+                INIT_SYNC_FF   => 0,
+                SIM_ASSERT_CHK => 0,
+                SRC_INPUT_REG  => 0
+            )
+            port map (
+                dest_out => hbm_ready_sync(i),
+                dest_clk => usr_clks(MI_CLK_IDX),
+                src_clk  => SYSCLK,
+                src_in   => hbm_ready(i)
+            );
+    end generate;
+
+    hbm_init_done <= and hbm_ready_sync;
+
+    -- HBM_CATTRIP is asserted by the IP on an uncorrectable stack over-temperature; OR the two
+    -- stacks together onto the single top-level pin.
+    HBM_CATTRIP <= or hbm_cattrip_int;
+
+    hbm_smoke_test_i : entity work.HBM_SMOKE_TEST
+        generic map (
+            MI_WIDTH           => MI_WIDTH,
+            SMOKE_PORT_DEFAULT => HBM_SMOKE_PORT,
+            HBM_ADDR_WIDTH     => HBM_ADDR_WIDTH,
+            HBM_DATA_WIDTH     => HBM_DATA_WIDTH,
+            HBM_ID_WIDTH       => HBM_ID_WIDTH,
+            HBM_LEN_WIDTH      => HBM_LEN_WIDTH,
+            HBM_SIZE_WIDTH     => HBM_SIZE_WIDTH,
+            HBM_BURST_WIDTH    => HBM_BURST_WIDTH,
+            HBM_RESP_WIDTH     => HBM_RESP_WIDTH
+        )
+        port map (
+            CLK => usr_clks(MI_CLK_IDX),
+            RST => usr_rsts(MI_CLK_IDX)(9),
+
+            MI_DWR  => mi_adc_dwr (MI_ADC_PORT_HBM_DBG),
+            MI_ADDR => mi_adc_addr(MI_ADC_PORT_HBM_DBG),
+            MI_BE   => mi_adc_be (MI_ADC_PORT_HBM_DBG),
+            MI_RD   => mi_adc_rd (MI_ADC_PORT_HBM_DBG),
+            MI_WR   => mi_adc_wr (MI_ADC_PORT_HBM_DBG),
+            MI_DRD  => mi_adc_drd (MI_ADC_PORT_HBM_DBG),
+            MI_ARDY => mi_adc_ardy(MI_ADC_PORT_HBM_DBG),
+            MI_DRDY => mi_adc_drdy(MI_ADC_PORT_HBM_DBG),
+
+            HBM_INIT_DONE => hbm_init_done,
+
+            PORT_SEL => smk_port_sel,
+
+            AXI_AWADDR  => smk_awaddr,
+            AXI_AWBURST => smk_awburst,
+            AXI_AWID    => smk_awid,
+            AXI_AWLEN   => smk_awlen,
+            AXI_AWSIZE  => smk_awsize,
+            AXI_AWVALID => smk_awvalid,
+            AXI_AWREADY => smk_awready,
+
+            AXI_WDATA        => smk_wdata,
+            AXI_WDATA_PARITY => smk_wdata_parity,
+            AXI_WLAST        => smk_wlast,
+            AXI_WSTRB        => smk_wstrb,
+            AXI_WVALID       => smk_wvalid,
+            AXI_WREADY       => smk_wready,
+
+            AXI_BID    => smk_bid,
+            AXI_BRESP  => smk_bresp,
+            AXI_BVALID => smk_bvalid,
+            AXI_BREADY => smk_bready,
+
+            AXI_ARADDR  => smk_araddr,
+            AXI_ARBURST => smk_arburst,
+            AXI_ARID    => smk_arid,
+            AXI_ARLEN   => smk_arlen,
+            AXI_ARSIZE  => smk_arsize,
+            AXI_ARVALID => smk_arvalid,
+            AXI_ARREADY => smk_arready,
+
+            AXI_RDATA        => smk_rdata,
+            AXI_RDATA_PARITY => smk_rdata_parity,
+            AXI_RID          => smk_rid,
+            AXI_RLAST        => smk_rlast,
+            AXI_RRESP        => smk_rresp,
+            AXI_RVALID       => smk_rvalid,
+            AXI_RREADY       => smk_rready
+        );
+
+    hbm_i : hbm_ip
+        port map (
+            HBM_REF_CLK_0       => SYSCLK,
+            HBM_REF_CLK_1       => SYSCLK,
+            APB_0_PCLK          => SYSCLK,
+            APB_0_PRESET_N      => not SYSRST,
+            APB_1_PCLK          => SYSCLK,
+            APB_1_PRESET_N      => not SYSRST,
+            APB_COMPLETE_0      => hbm_ready(0),
+            APB_COMPLETE_1      => hbm_ready(1),
+            DRAM_0_STAT_CATTRIP => hbm_cattrip_int(0),
+            DRAM_0_STAT_TEMP    => open,
+            DRAM_1_STAT_CATTRIP => hbm_cattrip_int(1),
+            DRAM_1_STAT_TEMP    => open,
+
+            AXI_00_ACLK         => hbm_axi_aclk(0),
+            AXI_00_ARESET_N     => hbm_axi_areset_n(0),
+            AXI_00_ARADDR       => hbm_axi_araddr(0),
+            AXI_00_ARBURST      => hbm_axi_arburst(0),
+            AXI_00_ARID         => hbm_axi_arid(0),
+            AXI_00_ARLEN        => hbm_axi_arlen(0),
+            AXI_00_ARSIZE       => hbm_axi_arsize(0),
+            AXI_00_ARVALID      => hbm_axi_arvalid(0),
+            AXI_00_AWADDR       => hbm_axi_awaddr(0),
+            AXI_00_AWBURST      => hbm_axi_awburst(0),
+            AXI_00_AWID         => hbm_axi_awid(0),
+            AXI_00_AWLEN        => hbm_axi_awlen(0),
+            AXI_00_AWSIZE       => hbm_axi_awsize(0),
+            AXI_00_AWVALID      => hbm_axi_awvalid(0),
+            AXI_00_RREADY       => hbm_axi_rready(0),
+            AXI_00_BREADY       => hbm_axi_bready(0),
+            AXI_00_WDATA        => hbm_axi_wdata(0),
+            AXI_00_WLAST        => hbm_axi_wlast(0),
+            AXI_00_WSTRB        => hbm_axi_wstrb(0),
+            AXI_00_WDATA_PARITY => hbm_axi_wdata_parity(0),
+            AXI_00_WVALID       => hbm_axi_wvalid(0),
+
+            AXI_01_ACLK         => hbm_axi_aclk(1),
+            AXI_01_ARESET_N     => hbm_axi_areset_n(1),
+            AXI_01_ARADDR       => hbm_axi_araddr(1),
+            AXI_01_ARBURST      => hbm_axi_arburst(1),
+            AXI_01_ARID         => hbm_axi_arid(1),
+            AXI_01_ARLEN        => hbm_axi_arlen(1),
+            AXI_01_ARSIZE       => hbm_axi_arsize(1),
+            AXI_01_ARVALID      => hbm_axi_arvalid(1),
+            AXI_01_AWADDR       => hbm_axi_awaddr(1),
+            AXI_01_AWBURST      => hbm_axi_awburst(1),
+            AXI_01_AWID         => hbm_axi_awid(1),
+            AXI_01_AWLEN        => hbm_axi_awlen(1),
+            AXI_01_AWSIZE       => hbm_axi_awsize(1),
+            AXI_01_AWVALID      => hbm_axi_awvalid(1),
+            AXI_01_RREADY       => hbm_axi_rready(1),
+            AXI_01_BREADY       => hbm_axi_bready(1),
+            AXI_01_WDATA        => hbm_axi_wdata(1),
+            AXI_01_WLAST        => hbm_axi_wlast(1),
+            AXI_01_WSTRB        => hbm_axi_wstrb(1),
+            AXI_01_WDATA_PARITY => hbm_axi_wdata_parity(1),
+            AXI_01_WVALID       => hbm_axi_wvalid(1),
+
+            AXI_02_ACLK         => hbm_axi_aclk(2),
+            AXI_02_ARESET_N     => hbm_axi_areset_n(2),
+            AXI_02_ARADDR       => hbm_axi_araddr(2),
+            AXI_02_ARBURST      => hbm_axi_arburst(2),
+            AXI_02_ARID         => hbm_axi_arid(2),
+            AXI_02_ARLEN        => hbm_axi_arlen(2),
+            AXI_02_ARSIZE       => hbm_axi_arsize(2),
+            AXI_02_ARVALID      => hbm_axi_arvalid(2),
+            AXI_02_AWADDR       => hbm_axi_awaddr(2),
+            AXI_02_AWBURST      => hbm_axi_awburst(2),
+            AXI_02_AWID         => hbm_axi_awid(2),
+            AXI_02_AWLEN        => hbm_axi_awlen(2),
+            AXI_02_AWSIZE       => hbm_axi_awsize(2),
+            AXI_02_AWVALID      => hbm_axi_awvalid(2),
+            AXI_02_RREADY       => hbm_axi_rready(2),
+            AXI_02_BREADY       => hbm_axi_bready(2),
+            AXI_02_WDATA        => hbm_axi_wdata(2),
+            AXI_02_WLAST        => hbm_axi_wlast(2),
+            AXI_02_WSTRB        => hbm_axi_wstrb(2),
+            AXI_02_WDATA_PARITY => hbm_axi_wdata_parity(2),
+            AXI_02_WVALID       => hbm_axi_wvalid(2),
+
+            AXI_03_ACLK         => hbm_axi_aclk(3),
+            AXI_03_ARESET_N     => hbm_axi_areset_n(3),
+            AXI_03_ARADDR       => hbm_axi_araddr(3),
+            AXI_03_ARBURST      => hbm_axi_arburst(3),
+            AXI_03_ARID         => hbm_axi_arid(3),
+            AXI_03_ARLEN        => hbm_axi_arlen(3),
+            AXI_03_ARSIZE       => hbm_axi_arsize(3),
+            AXI_03_ARVALID      => hbm_axi_arvalid(3),
+            AXI_03_AWADDR       => hbm_axi_awaddr(3),
+            AXI_03_AWBURST      => hbm_axi_awburst(3),
+            AXI_03_AWID         => hbm_axi_awid(3),
+            AXI_03_AWLEN        => hbm_axi_awlen(3),
+            AXI_03_AWSIZE       => hbm_axi_awsize(3),
+            AXI_03_AWVALID      => hbm_axi_awvalid(3),
+            AXI_03_RREADY       => hbm_axi_rready(3),
+            AXI_03_BREADY       => hbm_axi_bready(3),
+            AXI_03_WDATA        => hbm_axi_wdata(3),
+            AXI_03_WLAST        => hbm_axi_wlast(3),
+            AXI_03_WSTRB        => hbm_axi_wstrb(3),
+            AXI_03_WDATA_PARITY => hbm_axi_wdata_parity(3),
+            AXI_03_WVALID       => hbm_axi_wvalid(3),
+
+            AXI_04_ACLK         => hbm_axi_aclk(4),
+            AXI_04_ARESET_N     => hbm_axi_areset_n(4),
+            AXI_04_ARADDR       => hbm_axi_araddr(4),
+            AXI_04_ARBURST      => hbm_axi_arburst(4),
+            AXI_04_ARID         => hbm_axi_arid(4),
+            AXI_04_ARLEN        => hbm_axi_arlen(4),
+            AXI_04_ARSIZE       => hbm_axi_arsize(4),
+            AXI_04_ARVALID      => hbm_axi_arvalid(4),
+            AXI_04_AWADDR       => hbm_axi_awaddr(4),
+            AXI_04_AWBURST      => hbm_axi_awburst(4),
+            AXI_04_AWID         => hbm_axi_awid(4),
+            AXI_04_AWLEN        => hbm_axi_awlen(4),
+            AXI_04_AWSIZE       => hbm_axi_awsize(4),
+            AXI_04_AWVALID      => hbm_axi_awvalid(4),
+            AXI_04_RREADY       => hbm_axi_rready(4),
+            AXI_04_BREADY       => hbm_axi_bready(4),
+            AXI_04_WDATA        => hbm_axi_wdata(4),
+            AXI_04_WLAST        => hbm_axi_wlast(4),
+            AXI_04_WSTRB        => hbm_axi_wstrb(4),
+            AXI_04_WDATA_PARITY => hbm_axi_wdata_parity(4),
+            AXI_04_WVALID       => hbm_axi_wvalid(4),
+
+            AXI_05_ACLK         => hbm_axi_aclk(5),
+            AXI_05_ARESET_N     => hbm_axi_areset_n(5),
+            AXI_05_ARADDR       => hbm_axi_araddr(5),
+            AXI_05_ARBURST      => hbm_axi_arburst(5),
+            AXI_05_ARID         => hbm_axi_arid(5),
+            AXI_05_ARLEN        => hbm_axi_arlen(5),
+            AXI_05_ARSIZE       => hbm_axi_arsize(5),
+            AXI_05_ARVALID      => hbm_axi_arvalid(5),
+            AXI_05_AWADDR       => hbm_axi_awaddr(5),
+            AXI_05_AWBURST      => hbm_axi_awburst(5),
+            AXI_05_AWID         => hbm_axi_awid(5),
+            AXI_05_AWLEN        => hbm_axi_awlen(5),
+            AXI_05_AWSIZE       => hbm_axi_awsize(5),
+            AXI_05_AWVALID      => hbm_axi_awvalid(5),
+            AXI_05_RREADY       => hbm_axi_rready(5),
+            AXI_05_BREADY       => hbm_axi_bready(5),
+            AXI_05_WDATA        => hbm_axi_wdata(5),
+            AXI_05_WLAST        => hbm_axi_wlast(5),
+            AXI_05_WSTRB        => hbm_axi_wstrb(5),
+            AXI_05_WDATA_PARITY => hbm_axi_wdata_parity(5),
+            AXI_05_WVALID       => hbm_axi_wvalid(5),
+
+            AXI_06_ACLK         => hbm_axi_aclk(6),
+            AXI_06_ARESET_N     => hbm_axi_areset_n(6),
+            AXI_06_ARADDR       => hbm_axi_araddr(6),
+            AXI_06_ARBURST      => hbm_axi_arburst(6),
+            AXI_06_ARID         => hbm_axi_arid(6),
+            AXI_06_ARLEN        => hbm_axi_arlen(6),
+            AXI_06_ARSIZE       => hbm_axi_arsize(6),
+            AXI_06_ARVALID      => hbm_axi_arvalid(6),
+            AXI_06_AWADDR       => hbm_axi_awaddr(6),
+            AXI_06_AWBURST      => hbm_axi_awburst(6),
+            AXI_06_AWID         => hbm_axi_awid(6),
+            AXI_06_AWLEN        => hbm_axi_awlen(6),
+            AXI_06_AWSIZE       => hbm_axi_awsize(6),
+            AXI_06_AWVALID      => hbm_axi_awvalid(6),
+            AXI_06_RREADY       => hbm_axi_rready(6),
+            AXI_06_BREADY       => hbm_axi_bready(6),
+            AXI_06_WDATA        => hbm_axi_wdata(6),
+            AXI_06_WLAST        => hbm_axi_wlast(6),
+            AXI_06_WSTRB        => hbm_axi_wstrb(6),
+            AXI_06_WDATA_PARITY => hbm_axi_wdata_parity(6),
+            AXI_06_WVALID       => hbm_axi_wvalid(6),
+
+            AXI_07_ACLK         => hbm_axi_aclk(7),
+            AXI_07_ARESET_N     => hbm_axi_areset_n(7),
+            AXI_07_ARADDR       => hbm_axi_araddr(7),
+            AXI_07_ARBURST      => hbm_axi_arburst(7),
+            AXI_07_ARID         => hbm_axi_arid(7),
+            AXI_07_ARLEN        => hbm_axi_arlen(7),
+            AXI_07_ARSIZE       => hbm_axi_arsize(7),
+            AXI_07_ARVALID      => hbm_axi_arvalid(7),
+            AXI_07_AWADDR       => hbm_axi_awaddr(7),
+            AXI_07_AWBURST      => hbm_axi_awburst(7),
+            AXI_07_AWID         => hbm_axi_awid(7),
+            AXI_07_AWLEN        => hbm_axi_awlen(7),
+            AXI_07_AWSIZE       => hbm_axi_awsize(7),
+            AXI_07_AWVALID      => hbm_axi_awvalid(7),
+            AXI_07_RREADY       => hbm_axi_rready(7),
+            AXI_07_BREADY       => hbm_axi_bready(7),
+            AXI_07_WDATA        => hbm_axi_wdata(7),
+            AXI_07_WLAST        => hbm_axi_wlast(7),
+            AXI_07_WSTRB        => hbm_axi_wstrb(7),
+            AXI_07_WDATA_PARITY => hbm_axi_wdata_parity(7),
+            AXI_07_WVALID       => hbm_axi_wvalid(7),
+
+            AXI_08_ACLK         => hbm_axi_aclk(8),
+            AXI_08_ARESET_N     => hbm_axi_areset_n(8),
+            AXI_08_ARADDR       => hbm_axi_araddr(8),
+            AXI_08_ARBURST      => hbm_axi_arburst(8),
+            AXI_08_ARID         => hbm_axi_arid(8),
+            AXI_08_ARLEN        => hbm_axi_arlen(8),
+            AXI_08_ARSIZE       => hbm_axi_arsize(8),
+            AXI_08_ARVALID      => hbm_axi_arvalid(8),
+            AXI_08_AWADDR       => hbm_axi_awaddr(8),
+            AXI_08_AWBURST      => hbm_axi_awburst(8),
+            AXI_08_AWID         => hbm_axi_awid(8),
+            AXI_08_AWLEN        => hbm_axi_awlen(8),
+            AXI_08_AWSIZE       => hbm_axi_awsize(8),
+            AXI_08_AWVALID      => hbm_axi_awvalid(8),
+            AXI_08_RREADY       => hbm_axi_rready(8),
+            AXI_08_BREADY       => hbm_axi_bready(8),
+            AXI_08_WDATA        => hbm_axi_wdata(8),
+            AXI_08_WLAST        => hbm_axi_wlast(8),
+            AXI_08_WSTRB        => hbm_axi_wstrb(8),
+            AXI_08_WDATA_PARITY => hbm_axi_wdata_parity(8),
+            AXI_08_WVALID       => hbm_axi_wvalid(8),
+
+            AXI_09_ACLK         => hbm_axi_aclk(9),
+            AXI_09_ARESET_N     => hbm_axi_areset_n(9),
+            AXI_09_ARADDR       => hbm_axi_araddr(9),
+            AXI_09_ARBURST      => hbm_axi_arburst(9),
+            AXI_09_ARID         => hbm_axi_arid(9),
+            AXI_09_ARLEN        => hbm_axi_arlen(9),
+            AXI_09_ARSIZE       => hbm_axi_arsize(9),
+            AXI_09_ARVALID      => hbm_axi_arvalid(9),
+            AXI_09_AWADDR       => hbm_axi_awaddr(9),
+            AXI_09_AWBURST      => hbm_axi_awburst(9),
+            AXI_09_AWID         => hbm_axi_awid(9),
+            AXI_09_AWLEN        => hbm_axi_awlen(9),
+            AXI_09_AWSIZE       => hbm_axi_awsize(9),
+            AXI_09_AWVALID      => hbm_axi_awvalid(9),
+            AXI_09_RREADY       => hbm_axi_rready(9),
+            AXI_09_BREADY       => hbm_axi_bready(9),
+            AXI_09_WDATA        => hbm_axi_wdata(9),
+            AXI_09_WLAST        => hbm_axi_wlast(9),
+            AXI_09_WSTRB        => hbm_axi_wstrb(9),
+            AXI_09_WDATA_PARITY => hbm_axi_wdata_parity(9),
+            AXI_09_WVALID       => hbm_axi_wvalid(9),
+
+            AXI_10_ACLK         => hbm_axi_aclk(10),
+            AXI_10_ARESET_N     => hbm_axi_areset_n(10),
+            AXI_10_ARADDR       => hbm_axi_araddr(10),
+            AXI_10_ARBURST      => hbm_axi_arburst(10),
+            AXI_10_ARID         => hbm_axi_arid(10),
+            AXI_10_ARLEN        => hbm_axi_arlen(10),
+            AXI_10_ARSIZE       => hbm_axi_arsize(10),
+            AXI_10_ARVALID      => hbm_axi_arvalid(10),
+            AXI_10_AWADDR       => hbm_axi_awaddr(10),
+            AXI_10_AWBURST      => hbm_axi_awburst(10),
+            AXI_10_AWID         => hbm_axi_awid(10),
+            AXI_10_AWLEN        => hbm_axi_awlen(10),
+            AXI_10_AWSIZE       => hbm_axi_awsize(10),
+            AXI_10_AWVALID      => hbm_axi_awvalid(10),
+            AXI_10_RREADY       => hbm_axi_rready(10),
+            AXI_10_BREADY       => hbm_axi_bready(10),
+            AXI_10_WDATA        => hbm_axi_wdata(10),
+            AXI_10_WLAST        => hbm_axi_wlast(10),
+            AXI_10_WSTRB        => hbm_axi_wstrb(10),
+            AXI_10_WDATA_PARITY => hbm_axi_wdata_parity(10),
+            AXI_10_WVALID       => hbm_axi_wvalid(10),
+
+            AXI_11_ACLK         => hbm_axi_aclk(11),
+            AXI_11_ARESET_N     => hbm_axi_areset_n(11),
+            AXI_11_ARADDR       => hbm_axi_araddr(11),
+            AXI_11_ARBURST      => hbm_axi_arburst(11),
+            AXI_11_ARID         => hbm_axi_arid(11),
+            AXI_11_ARLEN        => hbm_axi_arlen(11),
+            AXI_11_ARSIZE       => hbm_axi_arsize(11),
+            AXI_11_ARVALID      => hbm_axi_arvalid(11),
+            AXI_11_AWADDR       => hbm_axi_awaddr(11),
+            AXI_11_AWBURST      => hbm_axi_awburst(11),
+            AXI_11_AWID         => hbm_axi_awid(11),
+            AXI_11_AWLEN        => hbm_axi_awlen(11),
+            AXI_11_AWSIZE       => hbm_axi_awsize(11),
+            AXI_11_AWVALID      => hbm_axi_awvalid(11),
+            AXI_11_RREADY       => hbm_axi_rready(11),
+            AXI_11_BREADY       => hbm_axi_bready(11),
+            AXI_11_WDATA        => hbm_axi_wdata(11),
+            AXI_11_WLAST        => hbm_axi_wlast(11),
+            AXI_11_WSTRB        => hbm_axi_wstrb(11),
+            AXI_11_WDATA_PARITY => hbm_axi_wdata_parity(11),
+            AXI_11_WVALID       => hbm_axi_wvalid(11),
+
+            AXI_12_ACLK         => hbm_axi_aclk(12),
+            AXI_12_ARESET_N     => hbm_axi_areset_n(12),
+            AXI_12_ARADDR       => hbm_axi_araddr(12),
+            AXI_12_ARBURST      => hbm_axi_arburst(12),
+            AXI_12_ARID         => hbm_axi_arid(12),
+            AXI_12_ARLEN        => hbm_axi_arlen(12),
+            AXI_12_ARSIZE       => hbm_axi_arsize(12),
+            AXI_12_ARVALID      => hbm_axi_arvalid(12),
+            AXI_12_AWADDR       => hbm_axi_awaddr(12),
+            AXI_12_AWBURST      => hbm_axi_awburst(12),
+            AXI_12_AWID         => hbm_axi_awid(12),
+            AXI_12_AWLEN        => hbm_axi_awlen(12),
+            AXI_12_AWSIZE       => hbm_axi_awsize(12),
+            AXI_12_AWVALID      => hbm_axi_awvalid(12),
+            AXI_12_RREADY       => hbm_axi_rready(12),
+            AXI_12_BREADY       => hbm_axi_bready(12),
+            AXI_12_WDATA        => hbm_axi_wdata(12),
+            AXI_12_WLAST        => hbm_axi_wlast(12),
+            AXI_12_WSTRB        => hbm_axi_wstrb(12),
+            AXI_12_WDATA_PARITY => hbm_axi_wdata_parity(12),
+            AXI_12_WVALID       => hbm_axi_wvalid(12),
+
+            AXI_13_ACLK         => hbm_axi_aclk(13),
+            AXI_13_ARESET_N     => hbm_axi_areset_n(13),
+            AXI_13_ARADDR       => hbm_axi_araddr(13),
+            AXI_13_ARBURST      => hbm_axi_arburst(13),
+            AXI_13_ARID         => hbm_axi_arid(13),
+            AXI_13_ARLEN        => hbm_axi_arlen(13),
+            AXI_13_ARSIZE       => hbm_axi_arsize(13),
+            AXI_13_ARVALID      => hbm_axi_arvalid(13),
+            AXI_13_AWADDR       => hbm_axi_awaddr(13),
+            AXI_13_AWBURST      => hbm_axi_awburst(13),
+            AXI_13_AWID         => hbm_axi_awid(13),
+            AXI_13_AWLEN        => hbm_axi_awlen(13),
+            AXI_13_AWSIZE       => hbm_axi_awsize(13),
+            AXI_13_AWVALID      => hbm_axi_awvalid(13),
+            AXI_13_RREADY       => hbm_axi_rready(13),
+            AXI_13_BREADY       => hbm_axi_bready(13),
+            AXI_13_WDATA        => hbm_axi_wdata(13),
+            AXI_13_WLAST        => hbm_axi_wlast(13),
+            AXI_13_WSTRB        => hbm_axi_wstrb(13),
+            AXI_13_WDATA_PARITY => hbm_axi_wdata_parity(13),
+            AXI_13_WVALID       => hbm_axi_wvalid(13),
+
+            AXI_14_ACLK         => hbm_axi_aclk(14),
+            AXI_14_ARESET_N     => hbm_axi_areset_n(14),
+            AXI_14_ARADDR => hbm_axi_araddr(14),
+            AXI_14_ARBURST => hbm_axi_arburst(14),
+            AXI_14_ARID => hbm_axi_arid(14),
+            AXI_14_ARLEN => hbm_axi_arlen(14),
+            AXI_14_ARSIZE => hbm_axi_arsize(14),
+            AXI_14_ARVALID => hbm_axi_arvalid(14),
+            AXI_14_AWADDR => hbm_axi_awaddr(14),
+            AXI_14_AWBURST => hbm_axi_awburst(14),
+            AXI_14_AWID => hbm_axi_awid(14),
+            AXI_14_AWLEN => hbm_axi_awlen(14),
+            AXI_14_AWSIZE => hbm_axi_awsize(14),
+            AXI_14_AWVALID => hbm_axi_awvalid(14),
+            AXI_14_RREADY => hbm_axi_rready(14),
+            AXI_14_BREADY => hbm_axi_bready(14),
+            AXI_14_WDATA => hbm_axi_wdata(14),
+            AXI_14_WLAST => hbm_axi_wlast(14),
+            AXI_14_WSTRB => hbm_axi_wstrb(14),
+            AXI_14_WDATA_PARITY => hbm_axi_wdata_parity(14),
+            AXI_14_WVALID => hbm_axi_wvalid(14),
+
+            AXI_15_ACLK => hbm_axi_aclk(15),
+            AXI_15_ARESET_N => hbm_axi_areset_n(15),
+            AXI_15_ARADDR => hbm_axi_araddr(15),
+            AXI_15_ARBURST => hbm_axi_arburst(15),
+            AXI_15_ARID => hbm_axi_arid(15),
+            AXI_15_ARLEN => hbm_axi_arlen(15),
+            AXI_15_ARSIZE => hbm_axi_arsize(15),
+            AXI_15_ARVALID => hbm_axi_arvalid(15),
+            AXI_15_AWADDR => hbm_axi_awaddr(15),
+            AXI_15_AWBURST => hbm_axi_awburst(15),
+            AXI_15_AWID => hbm_axi_awid(15),
+            AXI_15_AWLEN => hbm_axi_awlen(15),
+            AXI_15_AWSIZE => hbm_axi_awsize(15),
+            AXI_15_AWVALID => hbm_axi_awvalid(15),
+            AXI_15_RREADY => hbm_axi_rready(15),
+            AXI_15_BREADY => hbm_axi_bready(15),
+            AXI_15_WDATA => hbm_axi_wdata(15),
+            AXI_15_WLAST => hbm_axi_wlast(15),
+            AXI_15_WSTRB => hbm_axi_wstrb(15),
+            AXI_15_WDATA_PARITY => hbm_axi_wdata_parity(15),
+            AXI_15_WVALID => hbm_axi_wvalid(15),
+
+            AXI_16_ACLK => hbm_axi_aclk(16),
+            AXI_16_ARESET_N => hbm_axi_areset_n(16),
+            AXI_16_ARADDR => hbm_axi_araddr(16),
+            AXI_16_ARBURST => hbm_axi_arburst(16),
+            AXI_16_ARID => hbm_axi_arid(16),
+            AXI_16_ARLEN => hbm_axi_arlen(16),
+            AXI_16_ARSIZE => hbm_axi_arsize(16),
+            AXI_16_ARVALID => hbm_axi_arvalid(16),
+            AXI_16_AWADDR => hbm_axi_awaddr(16),
+            AXI_16_AWBURST => hbm_axi_awburst(16),
+            AXI_16_AWID => hbm_axi_awid(16),
+            AXI_16_AWLEN => hbm_axi_awlen(16),
+            AXI_16_AWSIZE => hbm_axi_awsize(16),
+            AXI_16_AWVALID => hbm_axi_awvalid(16),
+            AXI_16_RREADY => hbm_axi_rready(16),
+            AXI_16_BREADY => hbm_axi_bready(16),
+            AXI_16_WDATA => hbm_axi_wdata(16),
+            AXI_16_WLAST => hbm_axi_wlast(16),
+            AXI_16_WSTRB => hbm_axi_wstrb(16),
+            AXI_16_WDATA_PARITY => hbm_axi_wdata_parity(16),
+            AXI_16_WVALID => hbm_axi_wvalid(16),
+
+            AXI_17_ACLK => hbm_axi_aclk(17),
+            AXI_17_ARESET_N => hbm_axi_areset_n(17),
+            AXI_17_ARADDR => hbm_axi_araddr(17),
+            AXI_17_ARBURST => hbm_axi_arburst(17),
+            AXI_17_ARID => hbm_axi_arid(17),
+            AXI_17_ARLEN => hbm_axi_arlen(17),
+            AXI_17_ARSIZE => hbm_axi_arsize(17),
+            AXI_17_ARVALID => hbm_axi_arvalid(17),
+            AXI_17_AWADDR => hbm_axi_awaddr(17),
+            AXI_17_AWBURST => hbm_axi_awburst(17),
+            AXI_17_AWID => hbm_axi_awid(17),
+            AXI_17_AWLEN => hbm_axi_awlen(17),
+            AXI_17_AWSIZE => hbm_axi_awsize(17),
+            AXI_17_AWVALID => hbm_axi_awvalid(17),
+            AXI_17_RREADY => hbm_axi_rready(17),
+            AXI_17_BREADY => hbm_axi_bready(17),
+            AXI_17_WDATA => hbm_axi_wdata(17),
+            AXI_17_WLAST => hbm_axi_wlast(17),
+            AXI_17_WSTRB => hbm_axi_wstrb(17),
+            AXI_17_WDATA_PARITY => hbm_axi_wdata_parity(17),
+            AXI_17_WVALID => hbm_axi_wvalid(17),
+
+            AXI_18_ACLK => hbm_axi_aclk(18),
+            AXI_18_ARESET_N => hbm_axi_areset_n(18),
+            AXI_18_ARADDR => hbm_axi_araddr(18),
+            AXI_18_ARBURST => hbm_axi_arburst(18),
+            AXI_18_ARID => hbm_axi_arid(18),
+            AXI_18_ARLEN => hbm_axi_arlen(18),
+            AXI_18_ARSIZE => hbm_axi_arsize(18),
+            AXI_18_ARVALID => hbm_axi_arvalid(18),
+            AXI_18_AWADDR => hbm_axi_awaddr(18),
+            AXI_18_AWBURST => hbm_axi_awburst(18),
+            AXI_18_AWID => hbm_axi_awid(18),
+            AXI_18_AWLEN => hbm_axi_awlen(18),
+            AXI_18_AWSIZE => hbm_axi_awsize(18),
+            AXI_18_AWVALID => hbm_axi_awvalid(18),
+            AXI_18_RREADY => hbm_axi_rready(18),
+            AXI_18_BREADY => hbm_axi_bready(18),
+            AXI_18_WDATA => hbm_axi_wdata(18),
+            AXI_18_WLAST => hbm_axi_wlast(18),
+            AXI_18_WSTRB => hbm_axi_wstrb(18),
+            AXI_18_WDATA_PARITY => hbm_axi_wdata_parity(18),
+            AXI_18_WVALID => hbm_axi_wvalid(18),
+
+            AXI_19_ACLK => hbm_axi_aclk(19),
+            AXI_19_ARESET_N => hbm_axi_areset_n(19),
+            AXI_19_ARADDR => hbm_axi_araddr(19),
+            AXI_19_ARBURST => hbm_axi_arburst(19),
+            AXI_19_ARID => hbm_axi_arid(19),
+            AXI_19_ARLEN => hbm_axi_arlen(19),
+            AXI_19_ARSIZE => hbm_axi_arsize(19),
+            AXI_19_ARVALID => hbm_axi_arvalid(19),
+            AXI_19_AWADDR => hbm_axi_awaddr(19),
+            AXI_19_AWBURST => hbm_axi_awburst(19),
+            AXI_19_AWID => hbm_axi_awid(19),
+            AXI_19_AWLEN => hbm_axi_awlen(19),
+            AXI_19_AWSIZE => hbm_axi_awsize(19),
+            AXI_19_AWVALID => hbm_axi_awvalid(19),
+            AXI_19_RREADY => hbm_axi_rready(19),
+            AXI_19_BREADY => hbm_axi_bready(19),
+            AXI_19_WDATA => hbm_axi_wdata(19),
+            AXI_19_WLAST => hbm_axi_wlast(19),
+            AXI_19_WSTRB => hbm_axi_wstrb(19),
+            AXI_19_WDATA_PARITY => hbm_axi_wdata_parity(19),
+            AXI_19_WVALID => hbm_axi_wvalid(19),
+
+            AXI_20_ACLK => hbm_axi_aclk(20),
+            AXI_20_ARESET_N => hbm_axi_areset_n(20),
+            AXI_20_ARADDR => hbm_axi_araddr(20),
+            AXI_20_ARBURST => hbm_axi_arburst(20),
+            AXI_20_ARID => hbm_axi_arid(20),
+            AXI_20_ARLEN => hbm_axi_arlen(20),
+            AXI_20_ARSIZE => hbm_axi_arsize(20),
+            AXI_20_ARVALID => hbm_axi_arvalid(20),
+            AXI_20_AWADDR => hbm_axi_awaddr(20),
+            AXI_20_AWBURST => hbm_axi_awburst(20),
+            AXI_20_AWID => hbm_axi_awid(20),
+            AXI_20_AWLEN => hbm_axi_awlen(20),
+            AXI_20_AWSIZE => hbm_axi_awsize(20),
+            AXI_20_AWVALID => hbm_axi_awvalid(20),
+            AXI_20_RREADY => hbm_axi_rready(20),
+            AXI_20_BREADY => hbm_axi_bready(20),
+            AXI_20_WDATA => hbm_axi_wdata(20),
+            AXI_20_WLAST => hbm_axi_wlast(20),
+            AXI_20_WSTRB => hbm_axi_wstrb(20),
+            AXI_20_WDATA_PARITY => hbm_axi_wdata_parity(20),
+            AXI_20_WVALID => hbm_axi_wvalid(20),
+
+            AXI_21_ACLK => hbm_axi_aclk(21),
+            AXI_21_ARESET_N => hbm_axi_areset_n(21),
+            AXI_21_ARADDR => hbm_axi_araddr(21),
+            AXI_21_ARBURST => hbm_axi_arburst(21),
+            AXI_21_ARID => hbm_axi_arid(21),
+            AXI_21_ARLEN => hbm_axi_arlen(21),
+            AXI_21_ARSIZE => hbm_axi_arsize(21),
+            AXI_21_ARVALID => hbm_axi_arvalid(21),
+            AXI_21_AWADDR => hbm_axi_awaddr(21),
+            AXI_21_AWBURST => hbm_axi_awburst(21),
+            AXI_21_AWID => hbm_axi_awid(21),
+            AXI_21_AWLEN => hbm_axi_awlen(21),
+            AXI_21_AWSIZE => hbm_axi_awsize(21),
+            AXI_21_AWVALID => hbm_axi_awvalid(21),
+            AXI_21_RREADY => hbm_axi_rready(21),
+            AXI_21_BREADY => hbm_axi_bready(21),
+            AXI_21_WDATA => hbm_axi_wdata(21),
+            AXI_21_WLAST => hbm_axi_wlast(21),
+            AXI_21_WSTRB => hbm_axi_wstrb(21),
+            AXI_21_WDATA_PARITY => hbm_axi_wdata_parity(21),
+            AXI_21_WVALID => hbm_axi_wvalid(21),
+
+            AXI_22_ACLK => hbm_axi_aclk(22),
+            AXI_22_ARESET_N => hbm_axi_areset_n(22),
+            AXI_22_ARADDR => hbm_axi_araddr(22),
+            AXI_22_ARBURST => hbm_axi_arburst(22),
+            AXI_22_ARID => hbm_axi_arid(22),
+            AXI_22_ARLEN => hbm_axi_arlen(22),
+            AXI_22_ARSIZE => hbm_axi_arsize(22),
+            AXI_22_ARVALID => hbm_axi_arvalid(22),
+            AXI_22_AWADDR => hbm_axi_awaddr(22),
+            AXI_22_AWBURST => hbm_axi_awburst(22),
+            AXI_22_AWID => hbm_axi_awid(22),
+            AXI_22_AWLEN => hbm_axi_awlen(22),
+            AXI_22_AWSIZE => hbm_axi_awsize(22),
+            AXI_22_AWVALID => hbm_axi_awvalid(22),
+            AXI_22_RREADY => hbm_axi_rready(22),
+            AXI_22_BREADY => hbm_axi_bready(22),
+            AXI_22_WDATA => hbm_axi_wdata(22),
+            AXI_22_WLAST => hbm_axi_wlast(22),
+            AXI_22_WSTRB => hbm_axi_wstrb(22),
+            AXI_22_WDATA_PARITY => hbm_axi_wdata_parity(22),
+            AXI_22_WVALID => hbm_axi_wvalid(22),
+
+            AXI_23_ACLK => hbm_axi_aclk(23),
+            AXI_23_ARESET_N => hbm_axi_areset_n(23),
+            AXI_23_ARADDR => hbm_axi_araddr(23),
+            AXI_23_ARBURST => hbm_axi_arburst(23),
+            AXI_23_ARID => hbm_axi_arid(23),
+            AXI_23_ARLEN => hbm_axi_arlen(23),
+            AXI_23_ARSIZE => hbm_axi_arsize(23),
+            AXI_23_ARVALID => hbm_axi_arvalid(23),
+            AXI_23_AWADDR => hbm_axi_awaddr(23),
+            AXI_23_AWBURST => hbm_axi_awburst(23),
+            AXI_23_AWID => hbm_axi_awid(23),
+            AXI_23_AWLEN => hbm_axi_awlen(23),
+            AXI_23_AWSIZE => hbm_axi_awsize(23),
+            AXI_23_AWVALID => hbm_axi_awvalid(23),
+            AXI_23_RREADY => hbm_axi_rready(23),
+            AXI_23_BREADY => hbm_axi_bready(23),
+            AXI_23_WDATA => hbm_axi_wdata(23),
+            AXI_23_WLAST => hbm_axi_wlast(23),
+            AXI_23_WSTRB => hbm_axi_wstrb(23),
+            AXI_23_WDATA_PARITY => hbm_axi_wdata_parity(23),
+            AXI_23_WVALID => hbm_axi_wvalid(23),
+
+            AXI_24_ACLK => hbm_axi_aclk(24),
+            AXI_24_ARESET_N => hbm_axi_areset_n(24),
+            AXI_24_ARADDR => hbm_axi_araddr(24),
+            AXI_24_ARBURST => hbm_axi_arburst(24),
+            AXI_24_ARID => hbm_axi_arid(24),
+            AXI_24_ARLEN => hbm_axi_arlen(24),
+            AXI_24_ARSIZE => hbm_axi_arsize(24),
+            AXI_24_ARVALID => hbm_axi_arvalid(24),
+            AXI_24_AWADDR => hbm_axi_awaddr(24),
+            AXI_24_AWBURST => hbm_axi_awburst(24),
+            AXI_24_AWID => hbm_axi_awid(24),
+            AXI_24_AWLEN => hbm_axi_awlen(24),
+            AXI_24_AWSIZE => hbm_axi_awsize(24),
+            AXI_24_AWVALID => hbm_axi_awvalid(24),
+            AXI_24_RREADY => hbm_axi_rready(24),
+            AXI_24_BREADY => hbm_axi_bready(24),
+            AXI_24_WDATA => hbm_axi_wdata(24),
+            AXI_24_WLAST => hbm_axi_wlast(24),
+            AXI_24_WSTRB => hbm_axi_wstrb(24),
+            AXI_24_WDATA_PARITY => hbm_axi_wdata_parity(24),
+            AXI_24_WVALID => hbm_axi_wvalid(24),
+
+            AXI_25_ACLK => hbm_axi_aclk(25),
+            AXI_25_ARESET_N => hbm_axi_areset_n(25),
+            AXI_25_ARADDR => hbm_axi_araddr(25),
+            AXI_25_ARBURST => hbm_axi_arburst(25),
+            AXI_25_ARID => hbm_axi_arid(25),
+            AXI_25_ARLEN => hbm_axi_arlen(25),
+            AXI_25_ARSIZE => hbm_axi_arsize(25),
+            AXI_25_ARVALID => hbm_axi_arvalid(25),
+            AXI_25_AWADDR => hbm_axi_awaddr(25),
+            AXI_25_AWBURST => hbm_axi_awburst(25),
+            AXI_25_AWID => hbm_axi_awid(25),
+            AXI_25_AWLEN => hbm_axi_awlen(25),
+            AXI_25_AWSIZE => hbm_axi_awsize(25),
+            AXI_25_AWVALID => hbm_axi_awvalid(25),
+            AXI_25_RREADY => hbm_axi_rready(25),
+            AXI_25_BREADY => hbm_axi_bready(25),
+            AXI_25_WDATA => hbm_axi_wdata(25),
+            AXI_25_WLAST => hbm_axi_wlast(25),
+            AXI_25_WSTRB => hbm_axi_wstrb(25),
+            AXI_25_WDATA_PARITY => hbm_axi_wdata_parity(25),
+            AXI_25_WVALID => hbm_axi_wvalid(25),
+
+            AXI_26_ACLK => hbm_axi_aclk(26),
+            AXI_26_ARESET_N => hbm_axi_areset_n(26),
+            AXI_26_ARADDR => hbm_axi_araddr(26),
+            AXI_26_ARBURST => hbm_axi_arburst(26),
+            AXI_26_ARID => hbm_axi_arid(26),
+            AXI_26_ARLEN => hbm_axi_arlen(26),
+            AXI_26_ARSIZE => hbm_axi_arsize(26),
+            AXI_26_ARVALID => hbm_axi_arvalid(26),
+            AXI_26_AWADDR => hbm_axi_awaddr(26),
+            AXI_26_AWBURST => hbm_axi_awburst(26),
+            AXI_26_AWID => hbm_axi_awid(26),
+            AXI_26_AWLEN => hbm_axi_awlen(26),
+            AXI_26_AWSIZE => hbm_axi_awsize(26),
+            AXI_26_AWVALID => hbm_axi_awvalid(26),
+            AXI_26_RREADY => hbm_axi_rready(26),
+            AXI_26_BREADY => hbm_axi_bready(26),
+            AXI_26_WDATA => hbm_axi_wdata(26),
+            AXI_26_WLAST => hbm_axi_wlast(26),
+            AXI_26_WSTRB => hbm_axi_wstrb(26),
+            AXI_26_WDATA_PARITY => hbm_axi_wdata_parity(26),
+            AXI_26_WVALID => hbm_axi_wvalid(26),
+
+            AXI_27_ACLK => hbm_axi_aclk(27),
+            AXI_27_ARESET_N => hbm_axi_areset_n(27),
+            AXI_27_ARADDR => hbm_axi_araddr(27),
+            AXI_27_ARBURST => hbm_axi_arburst(27),
+            AXI_27_ARID => hbm_axi_arid(27),
+            AXI_27_ARLEN => hbm_axi_arlen(27),
+            AXI_27_ARSIZE => hbm_axi_arsize(27),
+            AXI_27_ARVALID => hbm_axi_arvalid(27),
+            AXI_27_AWADDR => hbm_axi_awaddr(27),
+            AXI_27_AWBURST => hbm_axi_awburst(27),
+            AXI_27_AWID => hbm_axi_awid(27),
+            AXI_27_AWLEN => hbm_axi_awlen(27),
+            AXI_27_AWSIZE => hbm_axi_awsize(27),
+            AXI_27_AWVALID => hbm_axi_awvalid(27),
+            AXI_27_RREADY => hbm_axi_rready(27),
+            AXI_27_BREADY => hbm_axi_bready(27),
+            AXI_27_WDATA => hbm_axi_wdata(27),
+            AXI_27_WLAST => hbm_axi_wlast(27),
+            AXI_27_WSTRB => hbm_axi_wstrb(27),
+            AXI_27_WDATA_PARITY => hbm_axi_wdata_parity(27),
+            AXI_27_WVALID => hbm_axi_wvalid(27),
+
+            AXI_28_ACLK => hbm_axi_aclk(28),
+            AXI_28_ARESET_N => hbm_axi_areset_n(28),
+            AXI_28_ARADDR => hbm_axi_araddr(28),
+            AXI_28_ARBURST => hbm_axi_arburst(28),
+            AXI_28_ARID => hbm_axi_arid(28),
+            AXI_28_ARLEN => hbm_axi_arlen(28),
+            AXI_28_ARSIZE => hbm_axi_arsize(28),
+            AXI_28_ARVALID => hbm_axi_arvalid(28),
+            AXI_28_AWADDR => hbm_axi_awaddr(28),
+            AXI_28_AWBURST => hbm_axi_awburst(28),
+            AXI_28_AWID => hbm_axi_awid(28),
+            AXI_28_AWLEN => hbm_axi_awlen(28),
+            AXI_28_AWSIZE => hbm_axi_awsize(28),
+            AXI_28_AWVALID => hbm_axi_awvalid(28),
+            AXI_28_RREADY => hbm_axi_rready(28),
+            AXI_28_BREADY => hbm_axi_bready(28),
+            AXI_28_WDATA => hbm_axi_wdata(28),
+            AXI_28_WLAST => hbm_axi_wlast(28),
+            AXI_28_WSTRB => hbm_axi_wstrb(28),
+            AXI_28_WDATA_PARITY => hbm_axi_wdata_parity(28),
+            AXI_28_WVALID => hbm_axi_wvalid(28),
+
+            AXI_29_ACLK => hbm_axi_aclk(29),
+            AXI_29_ARESET_N => hbm_axi_areset_n(29),
+            AXI_29_ARADDR => hbm_axi_araddr(29),
+            AXI_29_ARBURST => hbm_axi_arburst(29),
+            AXI_29_ARID => hbm_axi_arid(29),
+            AXI_29_ARLEN => hbm_axi_arlen(29),
+            AXI_29_ARSIZE => hbm_axi_arsize(29),
+            AXI_29_ARVALID => hbm_axi_arvalid(29),
+            AXI_29_AWADDR => hbm_axi_awaddr(29),
+            AXI_29_AWBURST => hbm_axi_awburst(29),
+            AXI_29_AWID => hbm_axi_awid(29),
+            AXI_29_AWLEN => hbm_axi_awlen(29),
+            AXI_29_AWSIZE => hbm_axi_awsize(29),
+            AXI_29_AWVALID => hbm_axi_awvalid(29),
+            AXI_29_RREADY => hbm_axi_rready(29),
+            AXI_29_BREADY => hbm_axi_bready(29),
+            AXI_29_WDATA => hbm_axi_wdata(29),
+            AXI_29_WLAST => hbm_axi_wlast(29),
+            AXI_29_WSTRB => hbm_axi_wstrb(29),
+            AXI_29_WDATA_PARITY => hbm_axi_wdata_parity(29),
+            AXI_29_WVALID => hbm_axi_wvalid(29),
+
+            AXI_30_ACLK => hbm_axi_aclk(30),
+            AXI_30_ARESET_N => hbm_axi_areset_n(30),
+            AXI_30_ARADDR => hbm_axi_araddr(30),
+            AXI_30_ARBURST => hbm_axi_arburst(30),
+            AXI_30_ARID => hbm_axi_arid(30),
+            AXI_30_ARLEN => hbm_axi_arlen(30),
+            AXI_30_ARSIZE => hbm_axi_arsize(30),
+            AXI_30_ARVALID => hbm_axi_arvalid(30),
+            AXI_30_AWADDR => hbm_axi_awaddr(30),
+            AXI_30_AWBURST => hbm_axi_awburst(30),
+            AXI_30_AWID => hbm_axi_awid(30),
+            AXI_30_AWLEN => hbm_axi_awlen(30),
+            AXI_30_AWSIZE => hbm_axi_awsize(30),
+            AXI_30_AWVALID => hbm_axi_awvalid(30),
+            AXI_30_RREADY => hbm_axi_rready(30),
+            AXI_30_BREADY => hbm_axi_bready(30),
+            AXI_30_WDATA => hbm_axi_wdata(30),
+            AXI_30_WLAST => hbm_axi_wlast(30),
+            AXI_30_WSTRB => hbm_axi_wstrb(30),
+            AXI_30_WDATA_PARITY => hbm_axi_wdata_parity(30),
+            AXI_30_WVALID => hbm_axi_wvalid(30),
+
+            AXI_31_ACLK => hbm_axi_aclk(31),
+            AXI_31_ARESET_N => hbm_axi_areset_n(31),
+            AXI_31_ARADDR => hbm_axi_araddr(31),
+            AXI_31_ARBURST => hbm_axi_arburst(31),
+            AXI_31_ARID => hbm_axi_arid(31),
+            AXI_31_ARLEN => hbm_axi_arlen(31),
+            AXI_31_ARSIZE => hbm_axi_arsize(31),
+            AXI_31_ARVALID => hbm_axi_arvalid(31),
+            AXI_31_AWADDR => hbm_axi_awaddr(31),
+            AXI_31_AWBURST => hbm_axi_awburst(31),
+            AXI_31_AWID => hbm_axi_awid(31),
+            AXI_31_AWLEN => hbm_axi_awlen(31),
+            AXI_31_AWSIZE => hbm_axi_awsize(31),
+            AXI_31_AWVALID => hbm_axi_awvalid(31),
+            AXI_31_RREADY => hbm_axi_rready(31),
+            AXI_31_BREADY => hbm_axi_bready(31),
+            AXI_31_WDATA => hbm_axi_wdata(31),
+            AXI_31_WLAST => hbm_axi_wlast(31),
+            AXI_31_WSTRB => hbm_axi_wstrb(31),
+            AXI_31_WDATA_PARITY => hbm_axi_wdata_parity(31),
+            AXI_31_WVALID => hbm_axi_wvalid(31),
+
+            AXI_00_ARREADY => hbm_axi_arready(0),
+            AXI_00_AWREADY => hbm_axi_awready(0),
+            AXI_00_RDATA_PARITY => hbm_axi_rdata_parity(0),
+            AXI_00_RDATA => hbm_axi_rdata(0),
+            AXI_00_RID => hbm_axi_rid(0),
+            AXI_00_RLAST => hbm_axi_rlast(0),
+            AXI_00_RRESP => hbm_axi_rresp(0),
+            AXI_00_RVALID => hbm_axi_rvalid(0),
+            AXI_00_WREADY => hbm_axi_wready(0),
+            AXI_00_BID => hbm_axi_bid(0),
+            AXI_00_BRESP => hbm_axi_bresp(0),
+            AXI_00_BVALID => hbm_axi_bvalid(0),
+
+            AXI_01_ARREADY => hbm_axi_arready(1),
+            AXI_01_AWREADY => hbm_axi_awready(1),
+            AXI_01_RDATA_PARITY => hbm_axi_rdata_parity(1),
+            AXI_01_RDATA => hbm_axi_rdata(1),
+            AXI_01_RID => hbm_axi_rid(1),
+            AXI_01_RLAST => hbm_axi_rlast(1),
+            AXI_01_RRESP => hbm_axi_rresp(1),
+            AXI_01_RVALID => hbm_axi_rvalid(1),
+            AXI_01_WREADY => hbm_axi_wready(1),
+            AXI_01_BID => hbm_axi_bid(1),
+            AXI_01_BRESP => hbm_axi_bresp(1),
+            AXI_01_BVALID => hbm_axi_bvalid(1),
+
+            AXI_02_ARREADY => hbm_axi_arready(2),
+            AXI_02_AWREADY => hbm_axi_awready(2),
+            AXI_02_RDATA_PARITY => hbm_axi_rdata_parity(2),
+            AXI_02_RDATA => hbm_axi_rdata(2),
+            AXI_02_RID => hbm_axi_rid(2),
+            AXI_02_RLAST => hbm_axi_rlast(2),
+            AXI_02_RRESP => hbm_axi_rresp(2),
+            AXI_02_RVALID => hbm_axi_rvalid(2),
+            AXI_02_WREADY => hbm_axi_wready(2),
+            AXI_02_BID => hbm_axi_bid(2),
+            AXI_02_BRESP => hbm_axi_bresp(2),
+            AXI_02_BVALID => hbm_axi_bvalid(2),
+
+            AXI_03_ARREADY => hbm_axi_arready(3),
+            AXI_03_AWREADY => hbm_axi_awready(3),
+            AXI_03_RDATA_PARITY => hbm_axi_rdata_parity(3),
+            AXI_03_RDATA => hbm_axi_rdata(3),
+            AXI_03_RID => hbm_axi_rid(3),
+            AXI_03_RLAST => hbm_axi_rlast(3),
+            AXI_03_RRESP => hbm_axi_rresp(3),
+            AXI_03_RVALID => hbm_axi_rvalid(3),
+            AXI_03_WREADY => hbm_axi_wready(3),
+            AXI_03_BID => hbm_axi_bid(3),
+            AXI_03_BRESP => hbm_axi_bresp(3),
+            AXI_03_BVALID => hbm_axi_bvalid(3),
+
+            AXI_04_ARREADY => hbm_axi_arready(4),
+            AXI_04_AWREADY => hbm_axi_awready(4),
+            AXI_04_RDATA_PARITY => hbm_axi_rdata_parity(4),
+            AXI_04_RDATA => hbm_axi_rdata(4),
+            AXI_04_RID => hbm_axi_rid(4),
+            AXI_04_RLAST => hbm_axi_rlast(4),
+            AXI_04_RRESP => hbm_axi_rresp(4),
+            AXI_04_RVALID => hbm_axi_rvalid(4),
+            AXI_04_WREADY => hbm_axi_wready(4),
+            AXI_04_BID => hbm_axi_bid(4),
+            AXI_04_BRESP => hbm_axi_bresp(4),
+            AXI_04_BVALID => hbm_axi_bvalid(4),
+
+            AXI_05_ARREADY => hbm_axi_arready(5),
+            AXI_05_AWREADY => hbm_axi_awready(5),
+            AXI_05_RDATA_PARITY => hbm_axi_rdata_parity(5),
+            AXI_05_RDATA => hbm_axi_rdata(5),
+            AXI_05_RID => hbm_axi_rid(5),
+            AXI_05_RLAST => hbm_axi_rlast(5),
+            AXI_05_RRESP => hbm_axi_rresp(5),
+            AXI_05_RVALID => hbm_axi_rvalid(5),
+            AXI_05_WREADY => hbm_axi_wready(5),
+            AXI_05_BID => hbm_axi_bid(5),
+            AXI_05_BRESP => hbm_axi_bresp(5),
+            AXI_05_BVALID => hbm_axi_bvalid(5),
+
+            AXI_06_ARREADY => hbm_axi_arready(6),
+            AXI_06_AWREADY => hbm_axi_awready(6),
+            AXI_06_RDATA_PARITY => hbm_axi_rdata_parity(6),
+            AXI_06_RDATA => hbm_axi_rdata(6),
+            AXI_06_RID => hbm_axi_rid(6),
+            AXI_06_RLAST => hbm_axi_rlast(6),
+            AXI_06_RRESP => hbm_axi_rresp(6),
+            AXI_06_RVALID => hbm_axi_rvalid(6),
+            AXI_06_WREADY => hbm_axi_wready(6),
+            AXI_06_BID => hbm_axi_bid(6),
+            AXI_06_BRESP => hbm_axi_bresp(6),
+            AXI_06_BVALID => hbm_axi_bvalid(6),
+
+            AXI_07_ARREADY => hbm_axi_arready(7),
+            AXI_07_AWREADY => hbm_axi_awready(7),
+            AXI_07_RDATA_PARITY => hbm_axi_rdata_parity(7),
+            AXI_07_RDATA => hbm_axi_rdata(7),
+            AXI_07_RID => hbm_axi_rid(7),
+            AXI_07_RLAST => hbm_axi_rlast(7),
+            AXI_07_RRESP => hbm_axi_rresp(7),
+            AXI_07_RVALID => hbm_axi_rvalid(7),
+            AXI_07_WREADY => hbm_axi_wready(7),
+            AXI_07_BID => hbm_axi_bid(7),
+            AXI_07_BRESP => hbm_axi_bresp(7),
+            AXI_07_BVALID => hbm_axi_bvalid(7),
+
+            AXI_08_ARREADY => hbm_axi_arready(8),
+            AXI_08_AWREADY => hbm_axi_awready(8),
+            AXI_08_RDATA_PARITY => hbm_axi_rdata_parity(8),
+            AXI_08_RDATA => hbm_axi_rdata(8),
+            AXI_08_RID => hbm_axi_rid(8),
+            AXI_08_RLAST => hbm_axi_rlast(8),
+            AXI_08_RRESP => hbm_axi_rresp(8),
+            AXI_08_RVALID => hbm_axi_rvalid(8),
+            AXI_08_WREADY => hbm_axi_wready(8),
+            AXI_08_BID => hbm_axi_bid(8),
+            AXI_08_BRESP => hbm_axi_bresp(8),
+            AXI_08_BVALID => hbm_axi_bvalid(8),
+
+            AXI_09_ARREADY => hbm_axi_arready(9),
+            AXI_09_AWREADY => hbm_axi_awready(9),
+            AXI_09_RDATA_PARITY => hbm_axi_rdata_parity(9),
+            AXI_09_RDATA => hbm_axi_rdata(9),
+            AXI_09_RID => hbm_axi_rid(9),
+            AXI_09_RLAST => hbm_axi_rlast(9),
+            AXI_09_RRESP => hbm_axi_rresp(9),
+            AXI_09_RVALID => hbm_axi_rvalid(9),
+            AXI_09_WREADY => hbm_axi_wready(9),
+            AXI_09_BID => hbm_axi_bid(9),
+            AXI_09_BRESP => hbm_axi_bresp(9),
+            AXI_09_BVALID => hbm_axi_bvalid(9),
+
+            AXI_10_ARREADY => hbm_axi_arready(10),
+            AXI_10_AWREADY => hbm_axi_awready(10),
+            AXI_10_RDATA_PARITY => hbm_axi_rdata_parity(10),
+            AXI_10_RDATA => hbm_axi_rdata(10),
+            AXI_10_RID => hbm_axi_rid(10),
+            AXI_10_RLAST => hbm_axi_rlast(10),
+            AXI_10_RRESP => hbm_axi_rresp(10),
+            AXI_10_RVALID => hbm_axi_rvalid(10),
+            AXI_10_WREADY => hbm_axi_wready(10),
+            AXI_10_BID => hbm_axi_bid(10),
+            AXI_10_BRESP => hbm_axi_bresp(10),
+            AXI_10_BVALID => hbm_axi_bvalid(10),
+
+            AXI_11_ARREADY => hbm_axi_arready(11),
+            AXI_11_AWREADY => hbm_axi_awready(11),
+            AXI_11_RDATA_PARITY => hbm_axi_rdata_parity(11),
+            AXI_11_RDATA => hbm_axi_rdata(11),
+            AXI_11_RID => hbm_axi_rid(11),
+            AXI_11_RLAST => hbm_axi_rlast(11),
+            AXI_11_RRESP => hbm_axi_rresp(11),
+            AXI_11_RVALID => hbm_axi_rvalid(11),
+            AXI_11_WREADY => hbm_axi_wready(11),
+            AXI_11_BID => hbm_axi_bid(11),
+            AXI_11_BRESP => hbm_axi_bresp(11),
+            AXI_11_BVALID => hbm_axi_bvalid(11),
+
+            AXI_12_ARREADY => hbm_axi_arready(12),
+            AXI_12_AWREADY => hbm_axi_awready(12),
+            AXI_12_RDATA_PARITY => hbm_axi_rdata_parity(12),
+            AXI_12_RDATA => hbm_axi_rdata(12),
+            AXI_12_RID => hbm_axi_rid(12),
+            AXI_12_RLAST => hbm_axi_rlast(12),
+            AXI_12_RRESP => hbm_axi_rresp(12),
+            AXI_12_RVALID => hbm_axi_rvalid(12),
+            AXI_12_WREADY => hbm_axi_wready(12),
+            AXI_12_BID => hbm_axi_bid(12),
+            AXI_12_BRESP => hbm_axi_bresp(12),
+            AXI_12_BVALID => hbm_axi_bvalid(12),
+
+            AXI_13_ARREADY => hbm_axi_arready(13),
+            AXI_13_AWREADY => hbm_axi_awready(13),
+            AXI_13_RDATA_PARITY => hbm_axi_rdata_parity(13),
+            AXI_13_RDATA => hbm_axi_rdata(13),
+            AXI_13_RID => hbm_axi_rid(13),
+            AXI_13_RLAST => hbm_axi_rlast(13),
+            AXI_13_RRESP => hbm_axi_rresp(13),
+            AXI_13_RVALID => hbm_axi_rvalid(13),
+            AXI_13_WREADY => hbm_axi_wready(13),
+            AXI_13_BID => hbm_axi_bid(13),
+            AXI_13_BRESP => hbm_axi_bresp(13),
+            AXI_13_BVALID => hbm_axi_bvalid(13),
+
+            AXI_14_ARREADY => hbm_axi_arready(14),
+            AXI_14_AWREADY => hbm_axi_awready(14),
+            AXI_14_RDATA_PARITY => hbm_axi_rdata_parity(14),
+            AXI_14_RDATA => hbm_axi_rdata(14),
+            AXI_14_RID => hbm_axi_rid(14),
+            AXI_14_RLAST => hbm_axi_rlast(14),
+            AXI_14_RRESP => hbm_axi_rresp(14),
+            AXI_14_RVALID => hbm_axi_rvalid(14),
+            AXI_14_WREADY => hbm_axi_wready(14),
+            AXI_14_BID => hbm_axi_bid(14),
+            AXI_14_BRESP => hbm_axi_bresp(14),
+            AXI_14_BVALID => hbm_axi_bvalid(14),
+
+            AXI_15_ARREADY => hbm_axi_arready(15),
+            AXI_15_AWREADY => hbm_axi_awready(15),
+            AXI_15_RDATA_PARITY => hbm_axi_rdata_parity(15),
+            AXI_15_RDATA => hbm_axi_rdata(15),
+            AXI_15_RID => hbm_axi_rid(15),
+            AXI_15_RLAST => hbm_axi_rlast(15),
+            AXI_15_RRESP => hbm_axi_rresp(15),
+            AXI_15_RVALID => hbm_axi_rvalid(15),
+            AXI_15_WREADY => hbm_axi_wready(15),
+            AXI_15_BID => hbm_axi_bid(15),
+            AXI_15_BRESP => hbm_axi_bresp(15),
+            AXI_15_BVALID => hbm_axi_bvalid(15),
+
+            AXI_16_ARREADY => hbm_axi_arready(16),
+            AXI_16_AWREADY => hbm_axi_awready(16),
+            AXI_16_RDATA_PARITY => hbm_axi_rdata_parity(16),
+            AXI_16_RDATA => hbm_axi_rdata(16),
+            AXI_16_RID => hbm_axi_rid(16),
+            AXI_16_RLAST => hbm_axi_rlast(16),
+            AXI_16_RRESP => hbm_axi_rresp(16),
+            AXI_16_RVALID => hbm_axi_rvalid(16),
+            AXI_16_WREADY => hbm_axi_wready(16),
+            AXI_16_BID => hbm_axi_bid(16),
+            AXI_16_BRESP => hbm_axi_bresp(16),
+            AXI_16_BVALID => hbm_axi_bvalid(16),
+
+            AXI_17_ARREADY => hbm_axi_arready(17),
+            AXI_17_AWREADY => hbm_axi_awready(17),
+            AXI_17_RDATA_PARITY => hbm_axi_rdata_parity(17),
+            AXI_17_RDATA => hbm_axi_rdata(17),
+            AXI_17_RID => hbm_axi_rid(17),
+            AXI_17_RLAST => hbm_axi_rlast(17),
+            AXI_17_RRESP => hbm_axi_rresp(17),
+            AXI_17_RVALID => hbm_axi_rvalid(17),
+            AXI_17_WREADY => hbm_axi_wready(17),
+            AXI_17_BID => hbm_axi_bid(17),
+            AXI_17_BRESP => hbm_axi_bresp(17),
+            AXI_17_BVALID => hbm_axi_bvalid(17),
+
+            AXI_18_ARREADY => hbm_axi_arready(18),
+            AXI_18_AWREADY => hbm_axi_awready(18),
+            AXI_18_RDATA_PARITY => hbm_axi_rdata_parity(18),
+            AXI_18_RDATA => hbm_axi_rdata(18),
+            AXI_18_RID => hbm_axi_rid(18),
+            AXI_18_RLAST => hbm_axi_rlast(18),
+            AXI_18_RRESP => hbm_axi_rresp(18),
+            AXI_18_RVALID => hbm_axi_rvalid(18),
+            AXI_18_WREADY => hbm_axi_wready(18),
+            AXI_18_BID => hbm_axi_bid(18),
+            AXI_18_BRESP => hbm_axi_bresp(18),
+            AXI_18_BVALID => hbm_axi_bvalid(18),
+
+            AXI_19_ARREADY => hbm_axi_arready(19),
+            AXI_19_AWREADY => hbm_axi_awready(19),
+            AXI_19_RDATA_PARITY => hbm_axi_rdata_parity(19),
+            AXI_19_RDATA => hbm_axi_rdata(19),
+            AXI_19_RID => hbm_axi_rid(19),
+            AXI_19_RLAST => hbm_axi_rlast(19),
+            AXI_19_RRESP => hbm_axi_rresp(19),
+            AXI_19_RVALID => hbm_axi_rvalid(19),
+            AXI_19_WREADY => hbm_axi_wready(19),
+            AXI_19_BID => hbm_axi_bid(19),
+            AXI_19_BRESP => hbm_axi_bresp(19),
+            AXI_19_BVALID => hbm_axi_bvalid(19),
+
+            AXI_20_ARREADY => hbm_axi_arready(20),
+            AXI_20_AWREADY => hbm_axi_awready(20),
+            AXI_20_RDATA_PARITY => hbm_axi_rdata_parity(20),
+            AXI_20_RDATA => hbm_axi_rdata(20),
+            AXI_20_RID => hbm_axi_rid(20),
+            AXI_20_RLAST => hbm_axi_rlast(20),
+            AXI_20_RRESP => hbm_axi_rresp(20),
+            AXI_20_RVALID => hbm_axi_rvalid(20),
+            AXI_20_WREADY => hbm_axi_wready(20),
+            AXI_20_BID => hbm_axi_bid(20),
+            AXI_20_BRESP => hbm_axi_bresp(20),
+            AXI_20_BVALID => hbm_axi_bvalid(20),
+
+            AXI_21_ARREADY => hbm_axi_arready(21),
+            AXI_21_AWREADY => hbm_axi_awready(21),
+            AXI_21_RDATA_PARITY => hbm_axi_rdata_parity(21),
+            AXI_21_RDATA => hbm_axi_rdata(21),
+            AXI_21_RID => hbm_axi_rid(21),
+            AXI_21_RLAST => hbm_axi_rlast(21),
+            AXI_21_RRESP => hbm_axi_rresp(21),
+            AXI_21_RVALID => hbm_axi_rvalid(21),
+            AXI_21_WREADY => hbm_axi_wready(21),
+            AXI_21_BID => hbm_axi_bid(21),
+            AXI_21_BRESP => hbm_axi_bresp(21),
+            AXI_21_BVALID => hbm_axi_bvalid(21),
+
+            AXI_22_ARREADY => hbm_axi_arready(22),
+            AXI_22_AWREADY => hbm_axi_awready(22),
+            AXI_22_RDATA_PARITY => hbm_axi_rdata_parity(22),
+            AXI_22_RDATA => hbm_axi_rdata(22),
+            AXI_22_RID => hbm_axi_rid(22),
+            AXI_22_RLAST => hbm_axi_rlast(22),
+            AXI_22_RRESP => hbm_axi_rresp(22),
+            AXI_22_RVALID => hbm_axi_rvalid(22),
+            AXI_22_WREADY => hbm_axi_wready(22),
+            AXI_22_BID => hbm_axi_bid(22),
+            AXI_22_BRESP => hbm_axi_bresp(22),
+            AXI_22_BVALID => hbm_axi_bvalid(22),
+
+            AXI_23_ARREADY => hbm_axi_arready(23),
+            AXI_23_AWREADY => hbm_axi_awready(23),
+            AXI_23_RDATA_PARITY => hbm_axi_rdata_parity(23),
+            AXI_23_RDATA => hbm_axi_rdata(23),
+            AXI_23_RID => hbm_axi_rid(23),
+            AXI_23_RLAST => hbm_axi_rlast(23),
+            AXI_23_RRESP => hbm_axi_rresp(23),
+            AXI_23_RVALID => hbm_axi_rvalid(23),
+            AXI_23_WREADY => hbm_axi_wready(23),
+            AXI_23_BID => hbm_axi_bid(23),
+            AXI_23_BRESP => hbm_axi_bresp(23),
+            AXI_23_BVALID => hbm_axi_bvalid(23),
+
+            AXI_24_ARREADY => hbm_axi_arready(24),
+            AXI_24_AWREADY => hbm_axi_awready(24),
+            AXI_24_RDATA_PARITY => hbm_axi_rdata_parity(24),
+            AXI_24_RDATA => hbm_axi_rdata(24),
+            AXI_24_RID => hbm_axi_rid(24),
+            AXI_24_RLAST => hbm_axi_rlast(24),
+            AXI_24_RRESP => hbm_axi_rresp(24),
+            AXI_24_RVALID => hbm_axi_rvalid(24),
+            AXI_24_WREADY => hbm_axi_wready(24),
+            AXI_24_BID => hbm_axi_bid(24),
+            AXI_24_BRESP => hbm_axi_bresp(24),
+            AXI_24_BVALID => hbm_axi_bvalid(24),
+
+            AXI_25_ARREADY => hbm_axi_arready(25),
+            AXI_25_AWREADY => hbm_axi_awready(25),
+            AXI_25_RDATA_PARITY => hbm_axi_rdata_parity(25),
+            AXI_25_RDATA => hbm_axi_rdata(25),
+            AXI_25_RID => hbm_axi_rid(25),
+            AXI_25_RLAST => hbm_axi_rlast(25),
+            AXI_25_RRESP => hbm_axi_rresp(25),
+            AXI_25_RVALID => hbm_axi_rvalid(25),
+            AXI_25_WREADY => hbm_axi_wready(25),
+            AXI_25_BID => hbm_axi_bid(25),
+            AXI_25_BRESP => hbm_axi_bresp(25),
+            AXI_25_BVALID => hbm_axi_bvalid(25),
+
+            AXI_26_ARREADY => hbm_axi_arready(26),
+            AXI_26_AWREADY => hbm_axi_awready(26),
+            AXI_26_RDATA_PARITY => hbm_axi_rdata_parity(26),
+            AXI_26_RDATA => hbm_axi_rdata(26),
+            AXI_26_RID => hbm_axi_rid(26),
+            AXI_26_RLAST => hbm_axi_rlast(26),
+            AXI_26_RRESP => hbm_axi_rresp(26),
+            AXI_26_RVALID => hbm_axi_rvalid(26),
+            AXI_26_WREADY => hbm_axi_wready(26),
+            AXI_26_BID => hbm_axi_bid(26),
+            AXI_26_BRESP => hbm_axi_bresp(26),
+            AXI_26_BVALID => hbm_axi_bvalid(26),
+
+            AXI_27_ARREADY => hbm_axi_arready(27),
+            AXI_27_AWREADY => hbm_axi_awready(27),
+            AXI_27_RDATA_PARITY => hbm_axi_rdata_parity(27),
+            AXI_27_RDATA => hbm_axi_rdata(27),
+            AXI_27_RID => hbm_axi_rid(27),
+            AXI_27_RLAST => hbm_axi_rlast(27),
+            AXI_27_RRESP => hbm_axi_rresp(27),
+            AXI_27_RVALID => hbm_axi_rvalid(27),
+            AXI_27_WREADY => hbm_axi_wready(27),
+            AXI_27_BID => hbm_axi_bid(27),
+            AXI_27_BRESP => hbm_axi_bresp(27),
+            AXI_27_BVALID => hbm_axi_bvalid(27),
+
+            AXI_28_ARREADY => hbm_axi_arready(28),
+            AXI_28_AWREADY => hbm_axi_awready(28),
+            AXI_28_RDATA_PARITY => hbm_axi_rdata_parity(28),
+            AXI_28_RDATA => hbm_axi_rdata(28),
+            AXI_28_RID => hbm_axi_rid(28),
+            AXI_28_RLAST => hbm_axi_rlast(28),
+            AXI_28_RRESP => hbm_axi_rresp(28),
+            AXI_28_RVALID => hbm_axi_rvalid(28),
+            AXI_28_WREADY => hbm_axi_wready(28),
+            AXI_28_BID => hbm_axi_bid(28),
+            AXI_28_BRESP => hbm_axi_bresp(28),
+            AXI_28_BVALID => hbm_axi_bvalid(28),
+
+            AXI_29_ARREADY => hbm_axi_arready(29),
+            AXI_29_AWREADY => hbm_axi_awready(29),
+            AXI_29_RDATA_PARITY => hbm_axi_rdata_parity(29),
+            AXI_29_RDATA => hbm_axi_rdata(29),
+            AXI_29_RID => hbm_axi_rid(29),
+            AXI_29_RLAST => hbm_axi_rlast(29),
+            AXI_29_RRESP => hbm_axi_rresp(29),
+            AXI_29_RVALID => hbm_axi_rvalid(29),
+            AXI_29_WREADY => hbm_axi_wready(29),
+            AXI_29_BID => hbm_axi_bid(29),
+            AXI_29_BRESP => hbm_axi_bresp(29),
+            AXI_29_BVALID => hbm_axi_bvalid(29),
+
+            AXI_30_ARREADY => hbm_axi_arready(30),
+            AXI_30_AWREADY => hbm_axi_awready(30),
+            AXI_30_RDATA_PARITY => hbm_axi_rdata_parity(30),
+            AXI_30_RDATA => hbm_axi_rdata(30),
+            AXI_30_RID => hbm_axi_rid(30),
+            AXI_30_RLAST => hbm_axi_rlast(30),
+            AXI_30_RRESP => hbm_axi_rresp(30),
+            AXI_30_RVALID => hbm_axi_rvalid(30),
+            AXI_30_WREADY => hbm_axi_wready(30),
+            AXI_30_BID => hbm_axi_bid(30),
+            AXI_30_BRESP => hbm_axi_bresp(30),
+            AXI_30_BVALID => hbm_axi_bvalid(30),
+
+            AXI_31_ARREADY => hbm_axi_arready(31),
+            AXI_31_AWREADY => hbm_axi_awready(31),
+            AXI_31_RDATA_PARITY => hbm_axi_rdata_parity(31),
+            AXI_31_RDATA => hbm_axi_rdata(31),
+            AXI_31_RID => hbm_axi_rid(31),
+            AXI_31_RLAST => hbm_axi_rlast(31),
+            AXI_31_RRESP => hbm_axi_rresp(31),
+            AXI_31_RVALID => hbm_axi_rvalid(31),
+            AXI_31_WREADY => hbm_axi_wready(31),
+            AXI_31_BID => hbm_axi_bid(31),
+            AXI_31_BRESP => hbm_axi_bresp(31),
+            AXI_31_BVALID => hbm_axi_bvalid(31)
+    );
 end architecture;

@@ -22,10 +22,13 @@ set AXI_QSPI_FLASH_CTRL_BASE "$OFM_PATH/cards/silicom/fb2cghh/src/comp/axi_quad_
 set MI_ASYNC_BASE            "$OFM_PATH/comp/mi_tools/async"
 set MFB_GEN_BASE             "$OFM_PATH/comp/mfb_tools/debug/generator"
 set MFB_RECONF_BASE          "$OFM_PATH/comp/mfb_tools/flow/reconfigurator"
+set MFB_PIPE_BASE            "$OFM_PATH/comp/mfb_tools/flow/pipe"
 set DATA_LOGGER_BASE         "$OFM_PATH/comp/debug/data_logger"
 set LATENCY_METER_BASE       "$OFM_PATH/comp/debug/latency_meter"
 set LFSR_GEN_BASE            "$OFM_PATH/comp/base/logic/lfsr_simple_random_gen"
 set EVENT_CNTR_BASE          "$OFM_PATH/comp/base/misc/event_counter"
+set ASFIFOX_BASE             "$OFM_PATH/comp/base/fifo/asfifox"
+set PIPE_BASE                "$OFM_PATH/comp/base/misc/pipe"
 
 # Packages
 lappend PACKAGES "$OFM_PATH/comp/base/pkg/math_pack.vhd"
@@ -47,12 +50,15 @@ lappend COMPONENTS [list "HWID"                 $HWID_BASE                  $ARC
 lappend COMPONENTS [list "DMA_IUVENTUS"         $DMA_BASE                   "FULL"                       ]
 lappend COMPONENTS [list "BOOT_CTRL"            $BOOT_CTRL_BASE             "FULL"                       ]
 lappend COMPONENTS [list "AXI_QSPI_FLASH_CTRL"  $AXI_QSPI_FLASH_CTRL_BASE   "FULL"                       ]
+lappend COMPONENTS [list "ASFIFOX"              $ASFIFOX_BASE               "FULL"                       ]
+lappend COMPONENTS [list "PIPE"                 $PIPE_BASE                  "FULL"                       ]
 
 lappend IP_COMPONENTS [list "pcie" "pcie4_uscale_plus" "pcie4_uscale_plus" 0 1]
 if {$ARCHGRP_ARR(PCIE_ENDPOINTS) == 2 && $ARCHGRP_ARR(PCIE_ENDPOINT_MODE) == 1} {
     lappend IP_COMPONENTS [list "pcie" "pcie4_uscale_plus" "pcie4_uscale_plus_1" 0 1]
 }
 lappend IP_COMPONENTS [list "mem"  "axi_quad_spi"    "axi_quad_spi_0"    0 1]
+lappend IP_COMPONENTS [list "mem"  "hbm_ip"          "hbm_ip"            0 1]
 
 lappend MOD {*}[get_ip_mod_files $IP_COMPONENTS [array get ARCHGRP_ARR]]
 
@@ -63,6 +69,7 @@ if {$ARCHGRP_ARR(USR_CORE_ARCH) == "FULL"} {
     lappend COMPONENTS [list "MI_ASYNC"                $MI_ASYNC_BASE        "FULL" ]
     lappend COMPONENTS [list "MFB_GENERATOR_MI32"      $MFB_GEN_BASE         "FULL" ]
     lappend COMPONENTS [list "MFB_RECONFIGURATOR"      $MFB_RECONF_BASE      "FULL" ]
+    lappend COMPONENTS [list "MFB_PIPE"                $MFB_PIPE_BASE        "FULL" ]
     lappend COMPONENTS [list "DATA_LOGGER"             $DATA_LOGGER_BASE     "FULL" ]
     lappend COMPONENTS [list "LATENCY_METER"           $LATENCY_METER_BASE   "FULL" ]
     lappend COMPONENTS [list "LFSR_SIMPLE_RANDOM_GEN"  $LFSR_GEN_BASE        "FULL" ]
@@ -72,6 +79,10 @@ if {$ARCHGRP_ARR(USR_CORE_ARCH) == "FULL"} {
     lappend MOD "$ENTITY_BASE/user_core_test_arch.vhd"
 }
 
+lappend MOD "$ENTITY_BASE/hbm_smoke_test.vhd"
+# this change: per-channel AXI3 pipeline stage (built on PIPE above) inserted on the 450 MHz side
+# of the HBM port connections -- see core_logic.vhd's hbm_450_pipe_i.
+lappend MOD "$ENTITY_BASE/axi_pipe.vhd"
 lappend MOD "$ENTITY_BASE/core_logic.vhd"
 lappend MOD "$ARCHGRP_ARR(CORE_BASE)/top/DevTree.tcl"
 lappend MOD "$ENTITY_BASE/DevTree.tcl"
