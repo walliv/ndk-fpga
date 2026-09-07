@@ -95,7 +95,7 @@ architecture FULL of IUVENTUS_INTEGRITY_CHECKER is
         variable widx    : unsigned(31 downto 0);
         variable lba_tag : unsigned(31 downto 0);
     begin
-        lba_tag := resize(lba(LBA_PTR_W -1 downto 9), 32);     -- sector number (address / 512)
+        lba_tag := resize(lba(lba'high downto 9), 32);          -- sector number (address / 512)
         for j in 0 to WORDS_BEAT -1 loop
             widx                         := resize(beat*WORDS_BEAT + j, 32);
             res((j+1)*64 -1 downto j*64) := std_logic_vector(lba_tag) & std_logic_vector(widx);
@@ -103,16 +103,31 @@ architecture FULL of IUVENTUS_INTEGRITY_CHECKER is
         return res;
     end function;
 
-    type   state_t is (S_IDLE, S_WR, S_WR_WAIT, S_RD_REQ, S_RD_DATA, S_DONE);
+    -- S_RD_END is appended, not inserted, so STS_STATE keeps the encoding software already
+    -- decodes. It is the pipeline stage on the sector advance: see the read-back branch.
+    type   state_t is (S_IDLE, S_WR, S_WR_WAIT, S_RD_REQ, S_RD_DATA, S_DONE, S_RD_END);
     signal state : state_t := S_IDLE;
 
-    signal cur_lba  : unsigned(LBA_PTR_W -1 downto 0);
-    signal base_lba : unsigned(LBA_PTR_W -1 downto 0);
-    signal end_lba  : unsigned(LBA_PTR_W -1 downto 0);
-    -- end_lba - SECT_SIZE, precomputed at CTL_START. Keeps a 64-bit ADDER out of last_lba: see
+    -- Sweep addressing is 48 bits, not the port's 64: 2**48 B is 281 TB against 4 TB drives, and
+    -- 48 is a DSP48E2 P register's width, so the accumulator fits in one. Ports stay LBA_PTR_W
+    -- wide -- only the counter narrows.
+    constant LBA_ACC_W : natural := 48;
+
+    -- One accumulator per sweep, loaded at arm and only ever incremented. A single counter would
+    -- need a mid-sweep rewind -- a second next-value the DSP's P register can't express. Selecting
+    -- on the output keeps each counter a plain load-then-accumulate.
+    signal wr_lba  : unsigned(LBA_ACC_W -1 downto 0);
+    signal rd_lba  : unsigned(LBA_ACC_W -1 downto 0);
+    -- The active sweep's position, read by the datapath and by last_lba.
+    signal cur_lba : unsigned(LBA_ACC_W -1 downto 0);
+
+    attribute use_dsp : string;
+    attribute use_dsp of wr_lba : signal is "yes";
+    attribute use_dsp of rd_lba : signal is "yes";
+    -- Last sector of the sweep, precomputed at CTL_START. Keeps an adder out of last_lba: see
     -- its assignment below.
-    signal last_lba_tgt : unsigned(LBA_PTR_W -1 downto 0);
-    signal beat_idx : unsigned(BEAT_IDX_W -1 downto 0);
+    signal last_lba_tgt : unsigned(LBA_ACC_W -1 downto 0);
+    signal beat_idx     : unsigned(BEAT_IDX_W -1 downto 0);
 
     signal err_cnt   : unsigned(31 downto 0);
     signal err_first : std_logic;
@@ -129,21 +144,22 @@ architecture FULL of IUVENTUS_INTEGRITY_CHECKER is
 
 begin
 
-    -- cur_lba + SECT = end_lba is equivalent to cur_lba = end_lba - SECT, whose right side is
-    -- loop-invariant, so it is precomputed into last_lba_tgt. That keeps a 64-bit adder off this
-    -- path: an equality compare is an XOR/AND reduction, not a carry chain.
+    cur_lba <= rd_lba when (state = S_RD_REQ or state = S_RD_DATA or state = S_RD_END) else wr_lba;
+
+    -- Comparing against the precomputed final sector, rather than testing cur_lba + SECT against
+    -- the end, keeps an adder off this path: an equality compare is an XOR/AND reduction.
     last_lba <= '1' when (cur_lba = last_lba_tgt) else '0';
 
     -- ---- Datapath outputs (combinational on state) -------------------------------------------
     WR_MFB_DATA    <= ref_beat(cur_lba, resize(beat_idx, cur_lba'length));
-    WR_MFB_META    <= std_logic_vector(cur_lba);
+    WR_MFB_META    <= std_logic_vector(resize(cur_lba, LBA_PTR_W));
     WR_MFB_SOF     <= "1" when (state = S_WR and beat_idx = 0) else "0";
     WR_MFB_EOF     <= "1" when (state = S_WR and beat_idx = SECT_BEATS -1) else "0";
     WR_MFB_SOF_POS <= (others => '0');
     WR_MFB_EOF_POS <= (others => '1');   -- frame always ends on the last item of the beat
     WR_MFB_SRC_RDY <= '1' when (state = S_WR) else '0';
 
-    RD_REQ_LBA_PTR <= std_logic_vector(cur_lba);
+    RD_REQ_LBA_PTR <= std_logic_vector(resize(cur_lba, LBA_PTR_W));
     RD_REQ_LBA_NUM <= (others => '0');   -- one sector per request
     RD_REQ_VLD     <= '1' when (state = S_RD_REQ) else '0';
 
@@ -185,20 +201,18 @@ begin
 
                     when S_IDLE =>
                         if (CTL_START = '1') then
-                            cur_lba   <= unsigned(CTL_LBA_BASE);
-                            base_lba  <= unsigned(CTL_LBA_BASE);
-                            end_lba   <= unsigned(CTL_LBA_BASE)
-                                         + resize(unsigned(CTL_LBA_COUNT) * to_unsigned(SECT_SIZE, 32), LBA_PTR_W);
+                            wr_lba       <= resize(unsigned(CTL_LBA_BASE), LBA_ACC_W);
+                            rd_lba       <= resize(unsigned(CTL_LBA_BASE), LBA_ACC_W);
                             -- Same value less one sector. Config-time path with huge slack, unlike
                             -- last_lba's. CTL_LBA_COUNT=0 underflows here, but a zero-length sweep
                             -- is degenerate either way.
-                            last_lba_tgt <= unsigned(CTL_LBA_BASE)
-                                            + resize(unsigned(CTL_LBA_COUNT) * to_unsigned(SECT_SIZE, 32), LBA_PTR_W)
-                                            - to_unsigned(SECT_SIZE, LBA_PTR_W);
-                            beat_idx  <= (others => '0');
-                            err_cnt   <= (others => '0');
-                            err_first <= '0';
-                            op_err    <= '0';
+                            last_lba_tgt <= resize(unsigned(CTL_LBA_BASE), LBA_ACC_W)
+                                            + resize(unsigned(CTL_LBA_COUNT) * to_unsigned(SECT_SIZE, 32), LBA_ACC_W)
+                                            - to_unsigned(SECT_SIZE, LBA_ACC_W);
+                            beat_idx     <= (others => '0');
+                            err_cnt      <= (others => '0');
+                            err_first    <= '0';
+                            op_err       <= '0';
                             -- A zero-length request completes immediately.
                             if (unsigned(CTL_LBA_COUNT) = 0) then
                                 state <= S_DONE;
@@ -227,11 +241,11 @@ begin
                                 op_err <= '1';
                                 state  <= S_DONE;
                             elsif (last_lba = '1') then
-                                cur_lba <= base_lba;   -- rewind to start for the read-back sweep
-                                state   <= S_RD_REQ;
+                                -- No rewind: rd_lba has held base since the arm.
+                                state <= S_RD_REQ;
                             else
-                                cur_lba <= cur_lba + to_unsigned(SECT_SIZE, LBA_PTR_W);
-                                state   <= S_WR;
+                                wr_lba <= wr_lba + to_unsigned(SECT_SIZE, LBA_ACC_W);
+                                state  <= S_WR;
                             end if;
                         end if;
 
@@ -249,19 +263,17 @@ begin
                                 err_cnt <= err_cnt + 1;
                                 if (err_first = '0') then
                                     err_first <= '1';
-                                    err_lba   <= std_logic_vector(cur_lba);
+                                    err_lba   <= std_logic_vector(resize(cur_lba, LBA_PTR_W));
                                     err_exp   <= exp_beat(31 downto 0);
                                     err_got   <= RD_MFB_DATA(31 downto 0);
                                 end if;
                             end if;
 
                             if (RD_MFB_EOF = "1") then
-                                if (last_lba = '1') then
-                                    state <= S_DONE;
-                                else
-                                    cur_lba <= cur_lba + to_unsigned(SECT_SIZE, LBA_PTR_W);
-                                    state   <= S_RD_REQ;
-                                end if;
+                                -- Advance in S_RD_END, not here. RD_MFB_EOF comes off the DMA's
+                                -- frame-length accumulator, and driving the counter enable from it
+                                -- directly puts that carry chain in this block's clock-enable cone.
+                                state <= S_RD_END;
                             else
                                 beat_idx <= beat_idx + 1;
                             end if;
@@ -272,6 +284,16 @@ begin
                             -- is consumed by the branch above).
                             op_err <= '1';
                             state  <= S_DONE;
+                        end if;
+
+                    -- One bubble between sectors, which costs nothing: DST_RDY is low here and the
+                    -- next request is not issued until S_RD_REQ anyway.
+                    when S_RD_END =>
+                        if (last_lba = '1') then
+                            state <= S_DONE;
+                        else
+                            rd_lba <= rd_lba + to_unsigned(SECT_SIZE, LBA_ACC_W);
+                            state  <= S_RD_REQ;
                         end if;
 
                     when S_DONE =>
