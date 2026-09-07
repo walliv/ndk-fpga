@@ -56,10 +56,13 @@ entity TX_DMA_PCIE_TRANS_BUFFER is
         -- widens by log2(CHANNELS) bits.
         MEM_PARTITIONING : boolean := TRUE;
 
-        -- XPM output-register latency: 1 (default)=none, RD_DATA_VLD_* asserts one cycle
-        -- after RD_EN_*; 2=XPM's own register (READ_LATENCY_A/B), adding a BRAM cycle. Only
-        -- implemented for the 2-region (TDP) read path.
-        READ_LATENCY : natural := 1
+        -- XPM output-register latency for read ports. 1 (default): none, RD_DATA_VLD_* follows
+        -- RD_EN_* one cycle later. 2: XPM's output register adds a BRAM cycle; rd_vld_p/rd_pipe_reg_p
+        -- match it. TDP (2-region) read path only.
+        READ_LATENCY : natural := 1;
+
+        -- Number of input registers
+        INP_REG_NUM   : natural := 1
     );
     port (
         CLK   : in std_logic;
@@ -100,8 +103,6 @@ architecture FULL of TX_DMA_PCIE_TRANS_BUFFER is
     constant BUFFER_DEPTH       : natural := (2**POINTER_WIDTH)/(MFB_LENGTH/8);
     -- Number of registers between BARREL_SHIFTERs and memory arrays
     constant BRAM_REG_NUM       : natural := 2;
-    -- Number of input registers
-    constant INP_REG_NUM        : natural := 1;
     constant IS_INTEL_DEV       : boolean := (DEVICE = "STRATIX10" or DEVICE = "AGILEX");
     constant IS_XILINX_URAM_DEV : boolean := (DEVICE = "ULTRASCALE" or DEVICE = "VERSAL");
     -- Every AMD device this component can be built for (see the DEVICE assertion below). URAM is a
