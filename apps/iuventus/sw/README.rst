@@ -44,6 +44,10 @@ Files
 ``integ_run.py``
     FPGA-driven SSD write/read-back integrity self-test.
 
+``iuventus_groupby.py``
+    The GROUP BY core: run control, the entries-per-second measurement, the reference model that
+    checks the result table, and ``--debug`` register dumps.
+
 Throughput
 ==========
 
@@ -98,6 +102,70 @@ are shares of *classified* cycles, i.e. of the time the DMA had work in hand. Th
 quantity that locates a bottleneck.
 
 ``DATA_WAIT`` is reachable only on the write path, so a read-only workload must show it at zero.
+
+GROUP BY
+========
+
+``iuventus_groupby.py`` drives the GROUP BY user core, which reads 16 B ``{key, value}`` records
+from the drives and sums the values per key in fabric. The result table is written back to a drive;
+the host never carries a record.
+
+.. code-block:: bash
+
+   # one fzc must already be running per drive
+   python iuventus_groupby.py -d 0 --queues 4 -n 4096 \
+       --in-lba 0 --out-lba 0x100000 --seed 1 --seed 2 --seed 3 --seed 4
+
+``-n`` is **per queue**: every enabled queue sweeps that many sectors on its own drive, so the
+record total is ``queues x sectors x 32``. ``--queues N`` sets ``QID_MASK`` to ``(1 << N) - 1``,
+and one queue pair per drive is checked before the run -- two pairs on one drive make every
+per-queue figure stop attributing to a device.
+
+Rate
+----
+
+The rate reported is **eps**, aggregated records per second, taken entirely from the core's own
+event counter: ``EVCR_TOTAL_EVENTS / (EVCR_TOTAL_CYCLES * 4 ns)``. The event counter is fed by the
+same condition that advances ``REC_CNT``, so events are records rather than bus beats. No host
+clock takes part in the number, and a sleep in this script is only ever a settle delay.
+
+Sweep the read-command size and plot it, then replot without touching hardware:
+
+.. code-block:: bash
+
+   python iuventus_groupby.py -d 0 --queues 4 --sweep \
+       --results-file ~/temp/groupby_q4.json
+   python iuventus_groupby.py --from-file --results-file ~/temp/groupby_q4.json
+
+Getting records onto the drives
+-------------------------------
+
+Two patterns are supported, and each has a matching reference model:
+
+``--fill``
+    The core writes its own pattern (``key = index mod GROUPS``, ``value = key + 1``) over the
+    input range. It writes through ``--out-qid`` only, so it stages **one** drive.
+
+``--seed S``
+    The records were written by the host-side filler. Record *i* of a drive seeded ``S`` is
+    ``key = splitmix64(S, 2i) % 16384``, ``value = splitmix64(S, 2i + 1)``; the filler implements
+    the identical function, which is transcribed in C in ``splitmix64()``'s docstring. Repeat
+    ``--seed`` once per queue, or give one seed shared by every drive.
+
+Pass ``--result-file`` with a raw dump of the result sectors to compare the sums themselves
+against the reference; without it only ``REC_CNT`` and ``OOR_CNT`` are checked.
+
+When a run does not finish
+--------------------------
+
+A run that overruns ``--timeout`` is ended with ``ABORT``, so the core returns to a settled state
+and the counters can still be read -- the card does not need a reload. A run aborted mid-read
+leaves the read path owed one completion, so stop ``fzc`` with SIGINT before trusting the next
+run's totals.
+
+``--debug`` dumps every register with the packed fields decoded, including ``ERR_INFO`` (the first
+failing completion's code, direction and queue) and the per-queue progress block. It works whether
+or not the design is up.
 
 Sweeping several SSD counts
 ===========================

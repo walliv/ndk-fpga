@@ -154,15 +154,14 @@ architecture FULL of CORE_LOGIC is
     -- stack 1 -- so every connected port lives in one stack and stack 0 is left entirely unused.
     constant HBM_SMOKE_PORT  : natural := 16;
 
-    -- One port per bank, both directions; Global Addressing off (PG276). Ports 24..26 sit
-    -- under X6Y0, 28..30 under X7Y0, giving each buffer its own column instead of stacking
-    -- all four masters over the most congested fabric in SLR0.
-    constant HBM_WRBUFF_WR_PORT0 : natural := 26;
-    constant HBM_WRBUFF_WR_PORT1 : natural := 25;
+    -- One port per bank, BOTH directions: fill on AW/W/B, drain on AR/R. Fixed port pair per
+    -- buffer; see the DMA core's own documentation for the floorplan/pblock rationale.
+    constant HBM_WRBUFF_WR_PORT0 : natural := 19;
+    constant HBM_WRBUFF_WR_PORT1 : natural := 18;
     constant HBM_WRBUFF_RD_PORT0 : natural := HBM_WRBUFF_WR_PORT0;
     constant HBM_WRBUFF_RD_PORT1 : natural := HBM_WRBUFF_WR_PORT1;
-    constant HBM_RDBUFF_WR_PORT0 : natural := 19;
-    constant HBM_RDBUFF_WR_PORT1 : natural := 20;
+    constant HBM_RDBUFF_WR_PORT0 : natural := 28;
+    constant HBM_RDBUFF_WR_PORT1 : natural := 27;
     constant HBM_RDBUFF_RD_PORT0 : natural := HBM_RDBUFF_WR_PORT0;
     constant HBM_RDBUFF_RD_PORT1 : natural := HBM_RDBUFF_WR_PORT1;
 
