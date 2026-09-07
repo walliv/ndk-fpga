@@ -12,11 +12,44 @@ use work.math_pack.all;
 use work.type_pack.all;
 
 architecture TEST of USER_CORE is
-    constant DLOGGER_HIST_EN : boolean := FALSE;
+    constant DLOGGER_HIST_EN    : boolean := FALSE;
     -- Queue-Identifier width for round-robin distribution across DMA queues. At NUM_QUEUES = 1,
     -- QID_W collapses to 1 bit but every QID-related signal below is explicitly forced to 0,
     -- reproducing today's single-queue behaviour bit-for-bit.
     constant QID_W              : natural := maximum(1, log2(NUM_QUEUES));
+
+    -- Core-side halves of the DMA interfaces; user_core_if_pipe_i sits between these and the ports.
+    signal core_rst             : std_logic;
+    signal core_rd_req_lba_ptr  : std_logic_vector(SQE_LBA_PTR_W-1 downto 0);
+    signal core_rd_req_lba_num  : std_logic_vector(7 downto 0);
+    signal core_rd_req_rdy      : std_logic_vector(NUM_QUEUES-1 downto 0);
+    signal core_rd_req_cid      : std_logic_vector(CQ_ENTRY_CMD_ID_W-1 downto 0);
+    signal core_rd_req_cid_vld  : std_logic;
+    signal core_op_stat_type    : std_logic;
+    signal core_op_stat_code    : std_logic_vector(1 downto 0);
+    signal core_op_stat_qid     : std_logic_vector(QID_W-1 downto 0);
+    signal core_op_stat_cid     : std_logic_vector(CQ_ENTRY_CMD_ID_W-1 downto 0);
+    signal core_op_stat_vld     : std_logic;
+    signal core_rd_mfb_data     : std_logic_vector(DMA_MFB_REGIONS*DMA_MFB_REGION_SIZE*DMA_MFB_BLOCK_SIZE*DMA_MFB_ITEM_WIDTH-1 downto 0);
+    signal core_rd_mfb_meta     : std_logic_vector(DMA_MFB_REGIONS*(QID_W + CQ_ENTRY_CMD_ID_W)-1 downto 0);
+    signal core_rd_mfb_sof      : std_logic_vector(DMA_MFB_REGIONS-1 downto 0);
+    signal core_rd_mfb_eof      : std_logic_vector(DMA_MFB_REGIONS-1 downto 0);
+    signal core_rd_mfb_sof_pos  : std_logic_vector(DMA_MFB_REGIONS*maximum(1, log2(DMA_MFB_REGION_SIZE))-1 downto 0);
+    signal core_rd_mfb_eof_pos  : std_logic_vector(DMA_MFB_REGIONS*log2(DMA_MFB_REGION_SIZE*DMA_MFB_BLOCK_SIZE)-1 downto 0);
+    signal core_rd_mfb_src_rdy  : std_logic;
+    signal core_rd_mfb_dst_rdy  : std_logic;
+    signal core_wr_mfb_data     : std_logic_vector(DMA_MFB_REGIONS*DMA_MFB_REGION_SIZE*DMA_MFB_BLOCK_SIZE*DMA_MFB_ITEM_WIDTH-1 downto 0);
+    signal core_wr_mfb_meta     : std_logic_vector(DMA_MFB_REGIONS*(SQE_LBA_PTR_W + QID_W)-1 downto 0);
+    signal core_wr_mfb_sof      : std_logic_vector(DMA_MFB_REGIONS-1 downto 0);
+    signal core_wr_mfb_eof      : std_logic_vector(DMA_MFB_REGIONS-1 downto 0);
+    signal core_wr_mfb_sof_pos  : std_logic_vector(DMA_MFB_REGIONS*maximum(1, log2(DMA_MFB_REGION_SIZE))-1 downto 0);
+    signal core_wr_mfb_eof_pos  : std_logic_vector(DMA_MFB_REGIONS*log2(DMA_MFB_REGION_SIZE*DMA_MFB_BLOCK_SIZE)-1 downto 0);
+    signal core_wr_mfb_src_rdy  : std_logic;
+    signal core_wr_mfb_dst_rdy  : std_logic;
+
+    -- Register stages on each interface, and the per-queue request buffer backing the credits.
+    constant IF_PIPE_STAGES     : natural := 4;
+    constant IF_PIPE_REQ_ITEMS  : natural := 16;
     -- LENGTH_WIDTH used by the write-side throughput generator (mirrors the value passed to
     -- MFB_GENERATOR_MI32 below); needed only to size/slice the raw generator TX_MFB_META.
     constant GEN_LENGTH_WIDTH   : natural := 18;
@@ -84,24 +117,23 @@ architecture TEST of USER_CORE is
     signal wr_mfb_pkt_cnt_reg      : unsigned(15 downto 0);
     signal wr_mfb_word_cnt_reg     : unsigned(15 downto 0);
 
-    -- Read-side QID round-robin: min/max queue for the range and burst (read requests sent to a
-    -- queue before advancing), mirroring MFB_GENERATOR_MI32 semantics. Default (0,0) keeps every
-    -- read on queue 0 until configured.
-    signal rd_ch_min_reg   : std_logic_vector(QID_W -1 downto 0);
-    signal rd_ch_max_reg   : std_logic_vector(QID_W -1 downto 0);
-    signal rd_burst_reg    : std_logic_vector(15 downto 0);
-    signal rd_qid_cntr     : unsigned(QID_W -1 downto 0);
-    signal rd_burst_cntr   : unsigned(15 downto 0);
+    -- Read-side QID round-robin: min/max queue and burst count (requests per queue before advancing),
+    -- mirroring MFB_GENERATOR_MI32. Default (0,0) keeps reads on queue 0 until software sets the range.
+    signal rd_ch_min_reg     : std_logic_vector(QID_W -1 downto 0);
+    signal rd_ch_max_reg     : std_logic_vector(QID_W -1 downto 0);
+    signal rd_burst_reg      : std_logic_vector(15 downto 0);
+    signal rd_qid_cntr       : unsigned(QID_W -1 downto 0);
+    signal rd_burst_cntr     : unsigned(15 downto 0);
     -- Round-robin QID for the read-request submit interface; forced to 0 when NUM_QUEUES = 1.
-    signal gen_rd_req_qid  : std_logic_vector(QID_W -1 downto 0);
+    signal gen_rd_req_qid    : std_logic_vector(QID_W -1 downto 0);
     -- Next ready queue at/after rd_qid_cntr in [rd_ch_min_reg, rd_ch_max_reg] (from
     -- rd_qid_select_p), skipping full queues: the DMA accepts one request at a time, so
     -- presenting a full queue would stall every other queue too.
-    signal rd_qid_cand     : unsigned(QID_W -1 downto 0);
+    signal rd_qid_cand       : unsigned(QID_W -1 downto 0);
     -- '1' when rd_qid_cand is actually ready (some queue in [min,max] currently has room); '0'
     -- when every queue in range is full -- gates NVME_RD_REQ_VLD off so the generator holds
     -- instead of presenting a request to a queue that would just stall.
-    signal rd_qid_cand_rdy : std_logic;
+    signal rd_qid_cand_rdy   : std_logic;
     -- Scalar view of the per-queue read handshake, so the generator/checker logic below stays
     -- queue-agnostic: request offered, and the RDY bit of the queue QID names.
     signal rd_req_vld_s      : std_logic;
@@ -110,7 +142,7 @@ architecture TEST of USER_CORE is
     signal nvme_rd_req_qid_s : std_logic_vector(QID_W -1 downto 0);
     -- QID that the integrity checker's write/read requests are tagged with (queue 0 / rd_ch_min);
     -- forced to 0 when NUM_QUEUES = 1.
-    signal checker_qid     : std_logic_vector(QID_W -1 downto 0);
+    signal checker_qid       : std_logic_vector(QID_W -1 downto 0);
 
     -- MFB Generator outputs
     signal gen_mfb_sof     : std_logic_vector(NVME_WR_MFB_SOF'range);
@@ -129,7 +161,7 @@ architecture TEST of USER_CORE is
     -- Same as gen_nvme_wr_qid but forced to 0 when NUM_QUEUES = 1.
     signal gen_nvme_wr_qid_mskd  : std_logic_vector(DMA_MFB_REGIONS*QID_W -1 downto 0);
     -- LBA-pointer part of the write meta (unchanged generator/checker addressing logic).
-    type wr_meta_lba_arr_t is array (0 to DMA_MFB_REGIONS -1) of std_logic_vector(SQE_LBA_PTR_W -1 downto 0);
+    type   wr_meta_lba_arr_t is array (0 to DMA_MFB_REGIONS -1) of std_logic_vector(SQE_LBA_PTR_W -1 downto 0);
     signal gen_wr_meta_lba       : wr_meta_lba_arr_t;
 
     function gen_wr_mfb_data (
@@ -153,7 +185,7 @@ architecture TEST of USER_CORE is
             flag_byte := flag_byte or X"40";
         end if;
 
-        for byte_idx in 0 to (NVME_WR_MFB_DATA'length/8) - 1 loop
+        for byte_idx in 0 to (core_wr_mfb_data'length/8) - 1 loop
             tile_idx := to_unsigned(byte_idx/8, tile_idx'length);
 
             case (byte_idx mod 8) is
@@ -234,11 +266,11 @@ architecture TEST of USER_CORE is
     signal tst_sel_reg          : std_logic_vector(1 downto 0);
     signal tst_finished         : std_logic;
     signal tst_addr             : std_logic_vector(ADDR_CNTR_WIDTH -1 downto 0);
-    -- One sequential address per queue: a single shared counter advances only on completion, so
-    -- at low queue counts issuance outruns it and many in-flight commands carry the same LBA,
+    -- One sequential address per queue: a single shared counter would advance only on completion,
+    -- so at low queue counts issuance outruns it and many in-flight commands carry the SAME LBA,
     -- collapsing sequential throughput.
-    type seq_addr_cntr_arr_t is array (0 to NUM_QUEUES -1) of unsigned(ADDR_CNTR_WIDTH -1 downto 0);
-    type tst_addr_arr_t is array (0 to NUM_QUEUES -1) of std_logic_vector(ADDR_CNTR_WIDTH -1 downto 0);
+    type   seq_addr_cntr_arr_t is array (0 to NUM_QUEUES -1) of unsigned(ADDR_CNTR_WIDTH -1 downto 0);
+    type   tst_addr_arr_t is array (0 to NUM_QUEUES -1) of std_logic_vector(ADDR_CNTR_WIDTH -1 downto 0);
     signal seq_addr_cntr        : seq_addr_cntr_arr_t;
     signal tst_addr_q           : tst_addr_arr_t;
     signal lfsr_rand_addr_out   : std_logic_vector(ADDR_CNTR_WIDTH -1 downto 0);
@@ -277,14 +309,14 @@ architecture TEST of USER_CORE is
     signal chk_op_err     : std_logic;
 
     -- Checker datapath (write side) and read request.
-    signal chk_wr_data        : std_logic_vector(NVME_WR_MFB_DATA'range);
+    signal chk_wr_data        : std_logic_vector(core_wr_mfb_data'range);
     -- LBA-only meta (matches IUVENTUS_INTEGRITY_CHECKER's fixed LBA_PTR_W=64 WR_MFB_META port);
-    -- the QID (checker_qid) is appended separately when assembling NVME_WR_MFB_META below.
+    -- the QID (checker_qid) is appended separately when assembling core_wr_mfb_meta below.
     signal chk_wr_meta        : std_logic_vector(63 downto 0);
-    signal chk_wr_sof         : std_logic_vector(NVME_WR_MFB_SOF'range);
-    signal chk_wr_eof         : std_logic_vector(NVME_WR_MFB_EOF'range);
-    signal chk_wr_sof_pos     : std_logic_vector(NVME_WR_MFB_SOF_POS'range);
-    signal chk_wr_eof_pos     : std_logic_vector(NVME_WR_MFB_EOF_POS'range);
+    signal chk_wr_sof         : std_logic_vector(core_wr_mfb_sof'range);
+    signal chk_wr_eof         : std_logic_vector(core_wr_mfb_eof'range);
+    signal chk_wr_sof_pos     : std_logic_vector(core_wr_mfb_sof_pos'range);
+    signal chk_wr_eof_pos     : std_logic_vector(core_wr_mfb_eof_pos'range);
     signal chk_wr_src_rdy     : std_logic;
     signal chk_rd_req_lba_ptr : std_logic_vector(63 downto 0);
     signal chk_rd_req_lba_num : std_logic_vector(7 downto 0);
@@ -292,21 +324,21 @@ architecture TEST of USER_CORE is
     signal chk_rd_mfb_dst_rdy : std_logic;
 
     -- Throughput-generator write path (formerly wired straight to the entity WR MFB outputs).
-    signal gen_nvme_wr_sof     : std_logic_vector(NVME_WR_MFB_SOF'range);
-    signal gen_nvme_wr_eof     : std_logic_vector(NVME_WR_MFB_EOF'range);
-    signal gen_nvme_wr_sof_pos : std_logic_vector(NVME_WR_MFB_SOF_POS'range);
-    signal gen_nvme_wr_eof_pos : std_logic_vector(NVME_WR_MFB_EOF_POS'range);
+    signal gen_nvme_wr_sof     : std_logic_vector(core_wr_mfb_sof'range);
+    signal gen_nvme_wr_eof     : std_logic_vector(core_wr_mfb_eof'range);
+    signal gen_nvme_wr_sof_pos : std_logic_vector(core_wr_mfb_sof_pos'range);
+    signal gen_nvme_wr_eof_pos : std_logic_vector(core_wr_mfb_eof_pos'range);
     signal gen_nvme_wr_src_rdy : std_logic;
     signal gen_nvme_wr_dst_rdy : std_logic;
     signal gen_nvme_rd_req_vld : std_logic;
 
     -- Registered stage between MFB_RECONFIGURATOR and the WR MFB outputs. Breaks the
-    -- DMA-to-user-core critical path: NVME_WR_MFB_DST_RDY is driven combinationally from inside
+    -- DMA-to-user-core critical path: core_wr_mfb_dst_rdy is driven combinationally from inside
     -- the DMA and was landing 20 logic levels later, WNS -1.246 ns.
-    signal pip_nvme_wr_sof     : std_logic_vector(NVME_WR_MFB_SOF'range);
-    signal pip_nvme_wr_eof     : std_logic_vector(NVME_WR_MFB_EOF'range);
-    signal pip_nvme_wr_sof_pos : std_logic_vector(NVME_WR_MFB_SOF_POS'range);
-    signal pip_nvme_wr_eof_pos : std_logic_vector(NVME_WR_MFB_EOF_POS'range);
+    signal pip_nvme_wr_sof     : std_logic_vector(core_wr_mfb_sof'range);
+    signal pip_nvme_wr_eof     : std_logic_vector(core_wr_mfb_eof'range);
+    signal pip_nvme_wr_sof_pos : std_logic_vector(core_wr_mfb_sof_pos'range);
+    signal pip_nvme_wr_eof_pos : std_logic_vector(core_wr_mfb_eof_pos'range);
     signal pip_nvme_wr_src_rdy : std_logic;
     signal pip_nvme_wr_dst_rdy : std_logic;
     -- Write meta rides THROUGH the pipe so the LBA stays aligned with its own frame: it is sourced
@@ -316,24 +348,23 @@ architecture TEST of USER_CORE is
     signal pip_wr_meta         : std_logic_vector(DMA_MFB_REGIONS*(SQE_LBA_PTR_W + QID_W) -1 downto 0);
 
     attribute mark_debug : string;
-    -- DISABLED. mark_debug preserves a net from optimisation and nothing consumes these: the ILA
-    -- that probed them is commented out in src/ilas.xdc. report_qor_assessment flags them on the
-    -- very bus carrying the paths already over the Net/LUT budget. Re-enable TOGETHER with
-    -- ilas.xdc, never on their own.
-    -- attribute mark_debug of NVME_RD_MFB_DATA    : signal is "true";
-    -- attribute mark_debug of NVME_RD_MFB_SOF     : signal is "true";
-    -- attribute mark_debug of NVME_RD_MFB_EOF     : signal is "true";
-    -- attribute mark_debug of NVME_RD_MFB_SOF_POS : signal is "true";
-    -- attribute mark_debug of NVME_RD_MFB_EOF_POS : signal is "true";
-    -- attribute mark_debug of NVME_RD_MFB_SRC_RDY : signal is "true";
-    -- attribute mark_debug of NVME_RD_MFB_DST_RDY : signal is "true";
+    -- mark_debug preserves a net from optimisation; nothing consumes these since the ILA that
+    -- probed them is commented out in src/ilas.xdc, and report_qor_assessment flags them on a bus
+    -- already over budget. Re-enable together with ilas.xdc only.
+    -- attribute mark_debug of core_rd_mfb_data    : signal is "true";
+    -- attribute mark_debug of core_rd_mfb_sof     : signal is "true";
+    -- attribute mark_debug of core_rd_mfb_eof     : signal is "true";
+    -- attribute mark_debug of core_rd_mfb_sof_pos : signal is "true";
+    -- attribute mark_debug of core_rd_mfb_eof_pos : signal is "true";
+    -- attribute mark_debug of core_rd_mfb_src_rdy : signal is "true";
+    -- attribute mark_debug of core_rd_mfb_dst_rdy : signal is "true";
 
     -- attribute mark_debug of tst_trigg        : signal is "true";
     -- attribute mark_debug of meas_fsm_pst     : signal is "true";
     -- attribute mark_debug of pkt_cnt_pst      : signal is "true";
     -- attribute mark_debug of tst_finished     : signal is "true";
     -- attribute mark_debug of tst_addr         : signal is "true";
-    -- attribute mark_debug of NVME_OP_STAT_VLD : signal is "true";
+    -- attribute mark_debug of core_op_stat_vld : signal is "true";
 begin
     mi_async_i : entity work.MI_ASYNC
     generic map (
@@ -355,7 +386,7 @@ begin
         MI_M_DRD  => MI_DRD,
 
         CLK_S   => DMA_CLK,
-        RESET_S => DMA_RST,
+        RESET_S => core_rst,
 
         MI_S_ADDR => mi_addr_sync,
         MI_S_DWR  => mi_dwr_sync,
@@ -383,7 +414,7 @@ begin
     )
     port map (
         CLK   => DMA_CLK,
-        RESET => DMA_RST,
+        RESET => core_rst,
 
         RX_DWR  => mi_dwr_sync,
         RX_MWR  => (others => '0'),
@@ -453,10 +484,10 @@ begin
     op_stat_reg_p : process (DMA_CLK)
     begin
         if (rising_edge(DMA_CLK)) then
-            if (DMA_RST = '1') then
+            if (core_rst = '1') then
                 op_stat_reg <= (others => '0');
-            elsif (NVME_OP_STAT_VLD = '1') then
-                op_stat_reg <= NVME_OP_STAT_VLD & NVME_OP_STAT_TYPE & NVME_OP_STAT_CODE;
+            elsif (core_op_stat_vld = '1') then
+                op_stat_reg <= core_op_stat_vld & core_op_stat_type & core_op_stat_code;
             end if;
         end if;
     end process;
@@ -466,13 +497,13 @@ begin
     op_stat_id_reg_p : process (DMA_CLK)
     begin
         if (rising_edge(DMA_CLK)) then
-            if (DMA_RST = '1') then
+            if (core_rst = '1') then
                 op_stat_qid_reg    <= (others => '0');
                 op_stat_cid_reg    <= (others => '0');
                 op_stat_id_vld_reg <= '0';
-            elsif (NVME_OP_STAT_VLD = '1') then
-                op_stat_qid_reg    <= NVME_OP_STAT_QID;
-                op_stat_cid_reg    <= NVME_OP_STAT_CID;
+            elsif (core_op_stat_vld = '1') then
+                op_stat_qid_reg    <= core_op_stat_qid;
+                op_stat_cid_reg    <= core_op_stat_cid;
                 op_stat_id_vld_reg <= '1';
             end if;
         end if;
@@ -482,11 +513,11 @@ begin
     rd_req_cid_reg_p : process (DMA_CLK)
     begin
         if (rising_edge(DMA_CLK)) then
-            if (DMA_RST = '1') then
+            if (core_rst = '1') then
                 rd_req_cid_reg     <= (others => '0');
                 rd_req_cid_vld_reg <= '0';
-            elsif (NVME_RD_REQ_CID_VLD = '1') then
-                rd_req_cid_reg     <= NVME_RD_REQ_CID;
+            elsif (core_rd_req_cid_vld = '1') then
+                rd_req_cid_reg     <= core_rd_req_cid;
                 rd_req_cid_vld_reg <= '1';
             end if;
         end if;
@@ -497,14 +528,14 @@ begin
     rd_mfb_id_reg_p : process (DMA_CLK)
     begin
         if (rising_edge(DMA_CLK)) then
-            if (DMA_RST = '1') then
-                rd_mfb_qid_reg   <= (others => '0');
-                rd_mfb_cid_reg   <= (others => '0');
+            if (core_rst = '1') then
+                rd_mfb_qid_reg    <= (others => '0');
+                rd_mfb_cid_reg    <= (others => '0');
                 rd_mfb_id_vld_reg <= '0';
-            elsif (NVME_RD_MFB_SOF(0) = '1' and NVME_RD_MFB_SRC_RDY = '1'
+            elsif (core_rd_mfb_sof(0) = '1' and core_rd_mfb_src_rdy = '1'
                    and nvme_rd_mfb_dst_rdy_s = '1') then
-                rd_mfb_cid_reg   <= NVME_RD_MFB_META(CQ_ENTRY_CMD_ID_W -1 downto 0);
-                rd_mfb_qid_reg   <= NVME_RD_MFB_META(CQ_ENTRY_CMD_ID_W + QID_W -1 downto CQ_ENTRY_CMD_ID_W);
+                rd_mfb_cid_reg    <= core_rd_mfb_meta(CQ_ENTRY_CMD_ID_W -1 downto 0);
+                rd_mfb_qid_reg    <= core_rd_mfb_meta(CQ_ENTRY_CMD_ID_W + QID_W -1 downto CQ_ENTRY_CMD_ID_W);
                 rd_mfb_id_vld_reg <= '1';
             end if;
         end if;
@@ -513,7 +544,7 @@ begin
     rd_req_vld_reg_p : process (DMA_CLK)
     begin
         if (rising_edge(DMA_CLK)) then
-            if (DMA_RST = '1') then
+            if (core_rst = '1') then
                 gen_nvme_rd_req_vld <= '0';
             else
                 if ((nvme_rd_req_vld_reg_sel = '1' and mi_split_wr(0) = '1')
@@ -534,7 +565,7 @@ begin
     integ_ctrl_reg_p : process (DMA_CLK)
     begin
         if (rising_edge(DMA_CLK)) then
-            if (DMA_RST = '1') then
+            if (core_rst = '1') then
                 integ_en            <= '0';
                 integ_start         <= '0';
                 integ_lba_base_reg  <= (others => '0');
@@ -566,7 +597,7 @@ begin
     rd_ch_minmax_reg_p : process (DMA_CLK)
     begin
         if (rising_edge(DMA_CLK)) then
-            if (DMA_RST = '1') then
+            if (core_rst = '1') then
                 rd_ch_min_reg <= (others => '0');
                 rd_ch_max_reg <= (others => '0');
             elsif (rd_ch_minmax_reg_sel = '1' and mi_split_wr(0) = '1') then
@@ -579,7 +610,7 @@ begin
     rd_burst_reg_p : process (DMA_CLK)
     begin
         if (rising_edge(DMA_CLK)) then
-            if (DMA_RST = '1') then
+            if (core_rst = '1') then
                 rd_burst_reg <= std_logic_vector(to_unsigned(1, rd_burst_reg'length));
             elsif (rd_burst_reg_sel = '1' and mi_split_wr(0) = '1') then
                 rd_burst_reg <= mi_split_dwr(0)(15 downto 0);
@@ -601,7 +632,7 @@ begin
         for q in 0 to NUM_QUEUES -1 loop
             if (found_v = '0' and to_unsigned(q, QID_W) >= rd_qid_cntr
                 and to_unsigned(q, QID_W) <= unsigned(rd_ch_max_reg)) then
-                if (NVME_RD_REQ_RDY(q) = '1') then
+                if (core_rd_req_rdy(q) = '1') then
                     cand_v  := to_unsigned(q, QID_W);
                     found_v := '1';
                 end if;
@@ -613,7 +644,7 @@ begin
             for q in 0 to NUM_QUEUES -1 loop
                 if (found_v = '0' and to_unsigned(q, QID_W) >= unsigned(rd_ch_min_reg)
                     and to_unsigned(q, QID_W) <= unsigned(rd_ch_max_reg)) then
-                    if (NVME_RD_REQ_RDY(q) = '1') then
+                    if (core_rd_req_rdy(q) = '1') then
                         cand_v  := to_unsigned(q, QID_W);
                         found_v := '1';
                     end if;
@@ -631,7 +662,7 @@ begin
     rd_qid_rr_p : process (DMA_CLK)
     begin
         if (rising_edge(DMA_CLK)) then
-            if (DMA_RST = '1') then
+            if (core_rst = '1') then
                 rd_qid_cntr   <= (others => '0');
                 rd_burst_cntr <= (others => '0');
             elsif (rd_req_accepted_s = '1') then
@@ -656,10 +687,10 @@ begin
     rd_req_lba_num_reg_p : process (DMA_CLK)
     begin
         if (rising_edge(DMA_CLK)) then
-            if (DMA_RST = '1') then
+            if (core_rst = '1') then
                 nvme_rd_req_lba_num_reg <= (others => '0');
             elsif ((nvme_rd_req_lba_num_reg_sel = '1') and (mi_split_wr(0) = '1')) then
-                nvme_rd_req_lba_num_reg <= mi_split_dwr(0)(NVME_RD_REQ_LBA_NUM'range);
+                nvme_rd_req_lba_num_reg <= mi_split_dwr(0)(core_rd_req_lba_num'range);
             end if;
         end if;
     end process;
@@ -667,7 +698,7 @@ begin
     rd_req_lba_ptr_reg_p : process (DMA_CLK)
     begin
         if (rising_edge(DMA_CLK)) then
-            if (DMA_RST = '1') then
+            if (core_rst = '1') then
                 nvme_rd_req_lba_ptr_reg <= (others => '0');
             elsif (mi_split_wr(0) = '1') then
                 if (nvme_rd_req_lba_ptr_low_reg_sel = '1') then
@@ -682,7 +713,7 @@ begin
     wr_req_lba_ptr_reg_p : process (DMA_CLK)
     begin
         if (rising_edge(DMA_CLK)) then
-            if (DMA_RST = '1') then
+            if (core_rst = '1') then
                 nvme_wr_req_lba_ptr_reg <= (others => '0');
             elsif (mi_split_wr(0) = '1') then
                 if (nvme_wr_req_lba_ptr_low_reg_sel = '1') then
@@ -697,7 +728,7 @@ begin
     tst_iterations_reg_p : process (DMA_CLK)
     begin
         if (rising_edge(DMA_CLK)) then
-            if (DMA_RST = '1') then
+            if (core_rst = '1') then
                 tst_trigg          <= '0';
                 tst_iterations_reg <= (others => '0');
             else
@@ -714,7 +745,7 @@ begin
     evcr_interval_cycles_reg_p : process (DMA_CLK)
     begin
         if (rising_edge(DMA_CLK)) then
-            if (DMA_RST = '1') then
+            if (core_rst = '1') then
                 evcr_interval_cycles_reg <= (others => '1');
             else
                 evcr_interval_set <= '0';
@@ -730,7 +761,7 @@ begin
     tst_sel_reg_p : process (DMA_CLK)
     begin
         if (rising_edge(DMA_CLK)) then
-            if (DMA_RST = '1') then
+            if (core_rst = '1') then
                 tst_sel_reg    <= (others => '0');
                 tmsp_ovf_reg   <= '0';
                 contig_test    <= '0';
@@ -752,24 +783,24 @@ begin
 
     -- Datapath steering: the integrity checker owns the WR/RD MFB and the read request when
     -- integ_en = '1'; otherwise the throughput generator drives them (behaviour unchanged).
-    NVME_RD_REQ_LBA_PTR <= chk_rd_req_lba_ptr when (integ_en = '1') else
+    core_rd_req_lba_ptr <= chk_rd_req_lba_ptr when (integ_en = '1') else
                            nvme_rd_req_lba_ptr_reg when (tst_finished = '1' and contig_test = '0') else
-                           std_logic_vector(resize(std_logic_vector(tst_addr), NVME_RD_REQ_LBA_PTR'length));
-    NVME_RD_REQ_LBA_NUM <= chk_rd_req_lba_num when (integ_en = '1') else nvme_rd_req_lba_num_reg;
-    -- Latency mode allows one measured operation at a time: gating only on SQ room lets a run
-    -- issue until the page pool empties without retiring its count, so tst_finished never
-    -- asserts. Accept wins when accept/completion coincide.
-    lat_start_event_s <= ((or NVME_WR_MFB_SOF) and NVME_WR_MFB_SRC_RDY and NVME_WR_MFB_DST_RDY) or
-                         rd_req_accepted_s;
+                           std_logic_vector(resize(std_logic_vector(tst_addr), core_rd_req_lba_ptr'length));
+    core_rd_req_lba_num <= chk_rd_req_lba_num when (integ_en = '1') else nvme_rd_req_lba_num_reg;
+    -- Latency mode allows one op at a time: gating only on SQ room would let a run issue until the
+    -- pool empties without retiring its count, so tst_finished never asserts. An accept beats a
+    -- same-cycle completion (which belongs to the PREVIOUS op).
+    lat_start_event_s   <= ((or core_wr_mfb_sof) and core_wr_mfb_src_rdy and core_wr_mfb_dst_rdy) or
+                           rd_req_accepted_s;
 
     lat_outstanding_p : process (DMA_CLK) is
     begin
         if (rising_edge(DMA_CLK)) then
-            if (DMA_RST = '1' or data_logger_rst = '1') then
+            if (core_rst = '1' or data_logger_rst = '1') then
                 lat_outstanding_r <= '0';
             elsif (lat_start_event_s = '1') then
                 lat_outstanding_r <= '1';
-            elsif (NVME_OP_STAT_VLD = '1') then
+            elsif (core_op_stat_vld = '1') then
                 lat_outstanding_r <= '0';
             end if;
         end if;
@@ -778,12 +809,12 @@ begin
     lat_wr_in_frame_p : process (DMA_CLK) is
     begin
         if (rising_edge(DMA_CLK)) then
-            if (DMA_RST = '1' or data_logger_rst = '1') then
+            if (core_rst = '1' or data_logger_rst = '1') then
                 lat_wr_in_frame_r <= '0';
-            elsif (NVME_WR_MFB_SRC_RDY = '1' and NVME_WR_MFB_DST_RDY = '1') then
-                if ((or NVME_WR_MFB_EOF) = '1') then
+            elsif (core_wr_mfb_src_rdy = '1' and core_wr_mfb_dst_rdy = '1') then
+                if ((or core_wr_mfb_eof) = '1') then
                     lat_wr_in_frame_r <= '0';
-                elsif ((or NVME_WR_MFB_SOF) = '1') then
+                elsif ((or core_wr_mfb_sof) = '1') then
                     lat_wr_in_frame_r <= '1';
                 end if;
             end if;
@@ -796,7 +827,8 @@ begin
     lat_wr_new_frame_s <= '1' when (lat_wr_in_frame_r = '0' and (or pip_nvme_wr_sof) = '1') else '0';
 
     lat_wr_issue_ok    <= '0' when (lat_meas_mode = '1' and lat_wr_new_frame_s = '1' and
-                                    (lat_outstanding_r = '1' or unsigned(lat_meas_fifo_items) /= 0)) else '1';
+                                    (lat_outstanding_r = '1' or unsigned(lat_meas_fifo_items) /= 0)) else
+ '1';
 
     -- Both terms are needed: the register closes the accept-to-STATUS gap, the FIFO term holds
     -- issue off until the meter has actually drained the pair.
@@ -804,20 +836,13 @@ begin
 
     -- One-hot on the queue QID names: the DMA's payload bus is shared, and it asserts both the
     -- one-hot property and the VLD/QID agreement in PSL.
-    rd_req_vld_s        <= chk_rd_req_vld when (integ_en = '1')
-                           else (gen_nvme_rd_req_vld and rd_qid_cand_rdy and lat_meas_issue_ok);
-    nvme_rd_req_vld_oh_p : process (all) is
-    begin
-        NVME_RD_REQ_VLD <= (others => '0');
-        NVME_RD_REQ_VLD(to_integer(unsigned(nvme_rd_req_qid_s))) <= rd_req_vld_s;
-    end process;
-
-    chk_rd_req_rdy      <= NVME_RD_REQ_RDY(to_integer(unsigned(nvme_rd_req_qid_s)));
+    rd_req_vld_s        <= chk_rd_req_vld when (integ_en = '1') else
+                           (gen_nvme_rd_req_vld and rd_qid_cand_rdy and lat_meas_issue_ok);
+    chk_rd_req_rdy      <= core_rd_req_rdy(to_integer(unsigned(nvme_rd_req_qid_s)));
     rd_req_accepted_s   <= rd_req_vld_s and chk_rd_req_rdy;
     -- Read-request QID: round-robin counter for the throughput generator, queue 0 / rd_ch_min for
     -- the checker; both are forced to 0 above when NUM_QUEUES = 1.
     nvme_rd_req_qid_s   <= checker_qid when (integ_en = '1') else gen_rd_req_qid;
-    NVME_RD_REQ_QID     <= nvme_rd_req_qid_s;
 
     -- Write meta per region: [QID (high QID_W bits) | LBA_PTR (low SQE_LBA_PTR_W bits)]. Each
     -- region carries its own QID, so it must take that queue's address -- one shared LBA would put
@@ -826,12 +851,12 @@ begin
         gen_wr_meta_lba(r) <= nvme_wr_req_lba_ptr_reg when (tst_finished = '1' and contig_test = '0') else
                               std_logic_vector(resize(unsigned(tst_addr_q(seq_idx_f(unsigned(
                                   gen_nvme_wr_qid_mskd((r+1)*QID_W -1 downto r*QID_W))))),
-                                  NVME_RD_REQ_LBA_PTR'length));
+                                  core_rd_req_lba_ptr'length));
 
         gen_wr_meta_full((r+1)*(SQE_LBA_PTR_W + QID_W) -1 downto r*(SQE_LBA_PTR_W + QID_W)) <=
-            gen_nvme_wr_qid_mskd((r+1)*QID_W -1 downto r*QID_W) & gen_wr_meta_lba(r);
+                                                                                               gen_nvme_wr_qid_mskd((r+1)*QID_W -1 downto r*QID_W) & gen_wr_meta_lba(r);
 
-        NVME_WR_MFB_META((r+1)*(SQE_LBA_PTR_W + QID_W) -1 downto r*(SQE_LBA_PTR_W + QID_W)) <=
+        core_wr_mfb_meta((r+1)*(SQE_LBA_PTR_W + QID_W) -1 downto r*(SQE_LBA_PTR_W + QID_W)) <=
             (checker_qid & chk_wr_meta) when (integ_en = '1') else
             pip_wr_meta((r+1)*(SQE_LBA_PTR_W + QID_W) -1 downto r*(SQE_LBA_PTR_W + QID_W));
     end generate;
@@ -839,20 +864,20 @@ begin
     -- Data is generated from the framing rather than carried through the reconfigurator, built
     -- from the PIPED SOF/EOF: wr_mfb_data_cnt_p counts on the write handshake, now this pipe's TX
     -- side, keeping counters and framing in step.
-    NVME_WR_MFB_DATA    <= chk_wr_data when (integ_en = '1') else
+    core_wr_mfb_data    <= chk_wr_data when (integ_en = '1') else
                            gen_wr_mfb_data(wr_mfb_pkt_cnt_reg, wr_mfb_word_cnt_reg, pip_nvme_wr_sof, pip_nvme_wr_eof);
-    NVME_WR_MFB_SOF     <= chk_wr_sof     when (integ_en = '1') else pip_nvme_wr_sof;
-    NVME_WR_MFB_EOF     <= chk_wr_eof     when (integ_en = '1') else pip_nvme_wr_eof;
-    NVME_WR_MFB_SOF_POS <= chk_wr_sof_pos when (integ_en = '1') else pip_nvme_wr_sof_pos;
-    NVME_WR_MFB_EOF_POS <= chk_wr_eof_pos when (integ_en = '1') else pip_nvme_wr_eof_pos;
-    NVME_WR_MFB_SRC_RDY <= chk_wr_src_rdy when (integ_en = '1') else (pip_nvme_wr_src_rdy and lat_wr_issue_ok);
+    core_wr_mfb_sof     <= chk_wr_sof     when (integ_en = '1') else pip_nvme_wr_sof;
+    core_wr_mfb_eof     <= chk_wr_eof     when (integ_en = '1') else pip_nvme_wr_eof;
+    core_wr_mfb_sof_pos <= chk_wr_sof_pos when (integ_en = '1') else pip_nvme_wr_sof_pos;
+    core_wr_mfb_eof_pos <= chk_wr_eof_pos when (integ_en = '1') else pip_nvme_wr_eof_pos;
+    core_wr_mfb_src_rdy <= chk_wr_src_rdy when (integ_en = '1') else (pip_nvme_wr_src_rdy and lat_wr_issue_ok);
     -- Stall the generator's writes while the checker owns the bus, at the pipe's TX side so
     -- back-pressure reaches the reconfigurator. The latency gate must reach TX_DST_RDY too:
     -- masking only SRC_RDY lets a never-presented beat advance, orphaning the EOF.
-    pip_nvme_wr_dst_rdy <= (NVME_WR_MFB_DST_RDY and lat_wr_issue_ok) when (integ_en = '0') else '0';
+    pip_nvme_wr_dst_rdy <= (core_wr_mfb_dst_rdy and lat_wr_issue_ok) when (integ_en = '0') else '0';
 
     nvme_rd_mfb_dst_rdy_s <= chk_rd_mfb_dst_rdy when (integ_en = '1') else '1';
-    NVME_RD_MFB_DST_RDY   <= nvme_rd_mfb_dst_rdy_s;
+    core_rd_mfb_dst_rdy   <= nvme_rd_mfb_dst_rdy_s;
 
     integrity_checker_i : entity work.IUVENTUS_INTEGRITY_CHECKER
     generic map (
@@ -864,7 +889,7 @@ begin
     )
     port map (
         CLK => DMA_CLK,
-        RST => DMA_RST,
+        RST => core_rst,
 
         CTL_START     => integ_start,
         CTL_LBA_BASE  => integ_lba_base_reg,
@@ -889,31 +914,31 @@ begin
         WR_MFB_SOF_POS => chk_wr_sof_pos,
         WR_MFB_EOF_POS => chk_wr_eof_pos,
         WR_MFB_SRC_RDY => chk_wr_src_rdy,
-        WR_MFB_DST_RDY => NVME_WR_MFB_DST_RDY,
+        WR_MFB_DST_RDY => core_wr_mfb_dst_rdy,
 
         RD_REQ_LBA_PTR => chk_rd_req_lba_ptr,
         RD_REQ_LBA_NUM => chk_rd_req_lba_num,
         RD_REQ_VLD     => chk_rd_req_vld,
         RD_REQ_RDY     => chk_rd_req_rdy,
 
-        OP_STAT_VLD    => NVME_OP_STAT_VLD,
-        OP_STAT_CODE   => NVME_OP_STAT_CODE,
+        OP_STAT_VLD    => core_op_stat_vld,
+        OP_STAT_CODE   => core_op_stat_code,
 
-        RD_MFB_DATA    => NVME_RD_MFB_DATA,
-        RD_MFB_SOF     => NVME_RD_MFB_SOF,
-        RD_MFB_EOF     => NVME_RD_MFB_EOF,
-        RD_MFB_SRC_RDY => NVME_RD_MFB_SRC_RDY,
+        RD_MFB_DATA    => core_rd_mfb_data,
+        RD_MFB_SOF     => core_rd_mfb_sof,
+        RD_MFB_EOF     => core_rd_mfb_eof,
+        RD_MFB_SRC_RDY => core_rd_mfb_src_rdy,
         RD_MFB_DST_RDY => chk_rd_mfb_dst_rdy
     );
 
     wr_mfb_data_cnt_p : process (DMA_CLK)
     begin
         if (rising_edge(DMA_CLK)) then
-            if (DMA_RST = '1') then
+            if (core_rst = '1') then
                 wr_mfb_pkt_cnt_reg  <= (others => '0');
                 wr_mfb_word_cnt_reg <= (others => '0');
-            elsif ((NVME_WR_MFB_SRC_RDY = '1') and (NVME_WR_MFB_DST_RDY = '1')) then
-                if (unsigned(NVME_WR_MFB_EOF) /= to_unsigned(0, NVME_WR_MFB_EOF'length)) then
+            elsif ((core_wr_mfb_src_rdy = '1') and (core_wr_mfb_dst_rdy = '1')) then
+                if (unsigned(core_wr_mfb_eof) /= to_unsigned(0, core_wr_mfb_eof'length)) then
                     wr_mfb_pkt_cnt_reg  <= wr_mfb_pkt_cnt_reg + 1;
                     wr_mfb_word_cnt_reg <= (others => '0');
                 else
@@ -986,7 +1011,7 @@ begin
     drdy_reg_p : process (DMA_CLK)
     begin
         if (rising_edge(DMA_CLK)) then
-            if (DMA_RST = '1') then
+            if (core_rst = '1') then
                 mi_split_drdy(0) <= '0';
             else
                 mi_split_drdy(0) <= mi_split_rd(0);
@@ -1012,7 +1037,7 @@ begin
     )
     port map (
         CLK => DMA_CLK,
-        RST => DMA_RST,
+        RST => core_rst,
 
         MI_ADDR => mi_split_addr(1),
         MI_RD   => mi_split_rd(1),
@@ -1061,7 +1086,7 @@ begin
     )
     port map (
         CLK        => DMA_CLK,
-        RESET      => DMA_RST,
+        RESET      => core_rst,
 
         RX_DATA    => (others => '0'),
         RX_META    => gen_mfb_qid,
@@ -1104,7 +1129,7 @@ begin
     )
     port map (
         CLK        => DMA_CLK,
-        RESET      => DMA_RST,
+        RESET      => core_rst,
 
         RX_DATA    => (others => '0'),
         RX_META    => gen_wr_meta_full,
@@ -1152,7 +1177,7 @@ begin
     )
     port map (
         CLK => DMA_CLK,
-        RST => DMA_RST,
+        RST => core_rst,
 
         RST_DONE => open,
         SW_RST   => data_logger_rst,
@@ -1188,11 +1213,11 @@ begin
     )
     port map (
         CLK => DMA_CLK,
-        RST => DMA_RST or data_logger_rst,
+        RST => core_rst or data_logger_rst,
 
         START_EVENT         => lat_start_event_s,
         START_EVENT_META    => (others => '0'),
-        END_EVENT           => NVME_OP_STAT_VLD,
+        END_EVENT           => core_op_stat_vld,
         END_EVENT_META      => (others => '0'),
 
         LATENCY_VLD        => lat_meas_val_vld,
@@ -1207,7 +1232,7 @@ begin
     meas_director_fsm_reg_p : process (DMA_CLK) is
     begin
         if (rising_edge(DMA_CLK)) then
-            if (DMA_RST = '1' or data_logger_rst = '1') then
+            if (core_rst = '1' or data_logger_rst = '1') then
                 meas_fsm_pst <= S_IDLE;
                 pkt_cnt_pst  <= (others => '0');
             else
@@ -1235,7 +1260,7 @@ begin
 
             when S_COUNT_TESTING_PACKETS =>
 
-                if (NVME_OP_STAT_VLD = '1' and pkt_cnt_pst > 0) then
+                if (core_op_stat_vld = '1' and pkt_cnt_pst > 0) then
                     pkt_cnt_nst <= pkt_cnt_pst -1;
                 end if;
 
@@ -1253,22 +1278,22 @@ begin
     )
     port map (
         CLK    => DMA_CLK,
-        RESET  => DMA_RST or data_logger_rst,
-        ENABLE => NVME_OP_STAT_VLD and ((not tst_finished) or contig_test),
+        RESET  => core_rst or data_logger_rst,
+        ENABLE => core_op_stat_vld and ((not tst_finished) or contig_test),
         DATA   => lfsr_rand_addr_out
     );
 
     seq_addr_cntr_p : process (DMA_CLK)
     begin
         if (rising_edge(DMA_CLK)) then
-            if (DMA_RST = '1' or data_logger_rst = '1' or tst_trigg = '1') then
+            if (core_rst = '1' or data_logger_rst = '1' or tst_trigg = '1') then
                 seq_addr_cntr <= (others => resize(unsigned(nvme_rd_req_lba_ptr_reg), ADDR_CNTR_WIDTH));
-            elsif (NVME_OP_STAT_VLD = '1' and (tst_finished = '0' or contig_test = '1')) then
-                -- NVME_RD_REQ_LBA_NUM is 0-based (0 => 1 LBA); advance by lba_num+1 so each
-                -- queue's stream stays contiguous. Only the completing queue advances, so queues
-                -- never share an address or duplicate each other's LBA.
-                seq_addr_cntr(seq_idx_f(unsigned(NVME_OP_STAT_QID))) <= seq_addr_cntr(seq_idx_f(unsigned(NVME_OP_STAT_QID)))
-                                                                         + resize(unsigned(nvme_rd_req_lba_num_reg), ADDR_CNTR_WIDTH) + 1;
+            elsif (rd_req_accepted_s = '1' and (tst_finished = '0' or contig_test = '1')) then
+                -- Advance on request-accept, not completion: waiting for completion leaves
+                -- the next address undefined for a whole round trip, capping sequential
+                -- throughput at one in-flight command. lba_num is 0-based; advance by lba_num+1.
+                seq_addr_cntr(seq_idx_f(unsigned(nvme_rd_req_qid_s))) <= seq_addr_cntr(seq_idx_f(unsigned(nvme_rd_req_qid_s)))
+                                                                         + resize(unsigned(core_rd_req_lba_num), ADDR_CNTR_WIDTH) + 1;
             end if;
         end if;
     end process;
@@ -1292,7 +1317,7 @@ begin
     )
     port map (
         CLK   => DMA_CLK,
-        RESET => DMA_RST,
+        RESET => core_rst,
 
         INTERVAL_CYCLES => evcr_interval_cycles_reg,
         INTERVAL_SET    => evcr_interval_set,
@@ -1308,12 +1333,12 @@ begin
     -- Count SUCCESSFUL COMPLETIONS, not accepted requests, against EVENT_COUNTER's own
     -- TOTAL_CYCLES so the IOPS carries no host-timing bias. Counting ACCEPTS gives an issue rate,
     -- which keeps counting even if the DMA's completion pipeline stalls.
-    evcr_event_vld <= '1' when (NVME_OP_STAT_VLD = '1' and NVME_OP_STAT_CODE = OP_STAT_SUCCESS) else '0';
+    evcr_event_vld <= '1' when (core_op_stat_vld = '1' and core_op_stat_code = OP_STAT_SUCCESS) else '0';
 
     evcr_reg_p : process (DMA_CLK)
     begin
         if (rising_edge(DMA_CLK)) then
-            if (DMA_RST = '1') then
+            if (core_rst = '1') then
                 evcr_total_events_reg <= (others => '0');
                 evcr_total_cycles_reg <= (others => '0');
             elsif (evcr_update = '1') then
@@ -1327,25 +1352,111 @@ begin
     -- In latency mode at most one operation may be outstanding: the meter pairs positionally, so
     -- a second concurrent start would be matched against the first completion.
     -- psl LAT_MEAS_SINGLE_OUTSTANDING :
-    --      assert always ((DMA_RST or data_logger_rst) = '0' -> (lat_meas_mode = '0' or unsigned(lat_meas_fifo_items) <= 1))
+    --      assert always ((core_rst or data_logger_rst) = '0' -> (lat_meas_mode = '0' or unsigned(lat_meas_fifo_items) <= 1))
     --      report "USER_CORE: more than one operation outstanding during a latency measurement -- the meter pairs positionally and would report a wrong latency";
 
     -- The gate must never be the reason a NON-measurement run stalls.
     -- psl LAT_MEAS_GATE_IDLE_WHEN_OFF :
-    --      assert always (DMA_RST = '0' -> (lat_meas_mode = '1' or lat_meas_issue_ok = '1'))
+    --      assert always (core_rst = '0' -> (lat_meas_mode = '1' or lat_meas_issue_ok = '1'))
     --      report "USER_CORE: the latency serialisation gate engaged outside latency mode";
 
     -- psl LAT_MEAS_COVER_GATED : cover {lat_meas_issue_ok = '0'};
 
     -- The write gate must never withhold mid-frame: that would stall a partially transferred frame.
     -- psl LAT_MEAS_WR_GATE_NOT_MIDFRAME :
-    --      assert always (DMA_RST = '0' -> (lat_wr_in_frame_r = '0' or lat_wr_issue_ok = '1'))
+    --      assert always (core_rst = '0' -> (lat_wr_in_frame_r = '0' or lat_wr_issue_ok = '1'))
     --      report "USER_CORE: the latency write gate withheld SRC_RDY mid-frame";
 
     -- psl LAT_MEAS_WR_GATE_IDLE_WHEN_OFF :
-    --      assert always (DMA_RST = '0' -> (lat_meas_mode = '1' or lat_wr_issue_ok = '1'))
+    --      assert always (core_rst = '0' -> (lat_meas_mode = '1' or lat_wr_issue_ok = '1'))
     --      report "USER_CORE: the latency write gate engaged outside latency mode";
 
     -- psl LAT_MEAS_COVER_WR_GATED : cover {lat_wr_issue_ok = '0'};
+
+
+    -- Interface pipeline: the architecture sits away from the DMA, so every interface is
+    -- registered here. The request path is credit-based: it samples the per-queue ready
+    -- combinationally when deciding to issue, which can't survive a registered ready.
+    user_core_if_pipe_i : entity work.USER_CORE_IF_PIPE
+    generic map (
+        NUM_QUEUES      => NUM_QUEUES,
+        LBA_PTR_W       => SQE_LBA_PTR_W,
+        MFB_REGION_SIZE => DMA_MFB_REGION_SIZE,
+        MFB_BLOCK_SIZE  => DMA_MFB_BLOCK_SIZE,
+        MFB_ITEM_WIDTH  => DMA_MFB_ITEM_WIDTH,
+        CID_W           => CQ_ENTRY_CMD_ID_W,
+        STAGES          => IF_PIPE_STAGES,
+        REQ_FIFO_ITEMS  => IF_PIPE_REQ_ITEMS,
+        DEVICE          => DEVICE
+    )
+    port map (
+        CLK       => DMA_CLK,
+        RESET     => DMA_RST,
+        ENG_RESET => core_rst,
+
+        ENG_RD_REQ_LBA_PTR => core_rd_req_lba_ptr,
+        ENG_RD_REQ_LBA_NUM => core_rd_req_lba_num,
+        ENG_RD_REQ_QID     => nvme_rd_req_qid_s,
+        ENG_RD_REQ_VLD     => rd_req_vld_s,
+        ENG_RD_REQ_RDY     => core_rd_req_rdy,
+        ENG_RD_REQ_CID     => core_rd_req_cid,
+        ENG_RD_REQ_CID_VLD => core_rd_req_cid_vld,
+
+        ENG_OP_STAT_TYPE => core_op_stat_type,
+        ENG_OP_STAT_CODE => core_op_stat_code,
+        ENG_OP_STAT_QID  => core_op_stat_qid,
+        ENG_OP_STAT_CID  => core_op_stat_cid,
+        ENG_OP_STAT_VLD  => core_op_stat_vld,
+
+        ENG_RD_MFB_DATA    => core_rd_mfb_data,
+        ENG_RD_MFB_META    => core_rd_mfb_meta,
+        ENG_RD_MFB_SOF     => core_rd_mfb_sof,
+        ENG_RD_MFB_EOF     => core_rd_mfb_eof,
+        ENG_RD_MFB_SOF_POS => core_rd_mfb_sof_pos,
+        ENG_RD_MFB_EOF_POS => core_rd_mfb_eof_pos,
+        ENG_RD_MFB_SRC_RDY => core_rd_mfb_src_rdy,
+        ENG_RD_MFB_DST_RDY => core_rd_mfb_dst_rdy,
+
+        ENG_WR_MFB_DATA    => core_wr_mfb_data,
+        ENG_WR_MFB_META    => core_wr_mfb_meta,
+        ENG_WR_MFB_SOF     => core_wr_mfb_sof,
+        ENG_WR_MFB_EOF     => core_wr_mfb_eof,
+        ENG_WR_MFB_SOF_POS => core_wr_mfb_sof_pos,
+        ENG_WR_MFB_EOF_POS => core_wr_mfb_eof_pos,
+        ENG_WR_MFB_SRC_RDY => core_wr_mfb_src_rdy,
+        ENG_WR_MFB_DST_RDY => core_wr_mfb_dst_rdy,
+
+        DMA_RD_REQ_LBA_PTR => NVME_RD_REQ_LBA_PTR,
+        DMA_RD_REQ_LBA_NUM => NVME_RD_REQ_LBA_NUM,
+        DMA_RD_REQ_QID     => NVME_RD_REQ_QID,
+        DMA_RD_REQ_VLD     => NVME_RD_REQ_VLD,
+        DMA_RD_REQ_RDY     => NVME_RD_REQ_RDY,
+        DMA_RD_REQ_CID     => NVME_RD_REQ_CID,
+        DMA_RD_REQ_CID_VLD => NVME_RD_REQ_CID_VLD,
+
+        DMA_OP_STAT_TYPE => NVME_OP_STAT_TYPE,
+        DMA_OP_STAT_CODE => NVME_OP_STAT_CODE,
+        DMA_OP_STAT_QID  => NVME_OP_STAT_QID,
+        DMA_OP_STAT_CID  => NVME_OP_STAT_CID,
+        DMA_OP_STAT_VLD  => NVME_OP_STAT_VLD,
+
+        DMA_RD_MFB_DATA    => NVME_RD_MFB_DATA,
+        DMA_RD_MFB_META    => NVME_RD_MFB_META,
+        DMA_RD_MFB_SOF     => NVME_RD_MFB_SOF,
+        DMA_RD_MFB_EOF     => NVME_RD_MFB_EOF,
+        DMA_RD_MFB_SOF_POS => NVME_RD_MFB_SOF_POS,
+        DMA_RD_MFB_EOF_POS => NVME_RD_MFB_EOF_POS,
+        DMA_RD_MFB_SRC_RDY => NVME_RD_MFB_SRC_RDY,
+        DMA_RD_MFB_DST_RDY => NVME_RD_MFB_DST_RDY,
+
+        DMA_WR_MFB_DATA    => NVME_WR_MFB_DATA,
+        DMA_WR_MFB_META    => NVME_WR_MFB_META,
+        DMA_WR_MFB_SOF     => NVME_WR_MFB_SOF,
+        DMA_WR_MFB_EOF     => NVME_WR_MFB_EOF,
+        DMA_WR_MFB_SOF_POS => NVME_WR_MFB_SOF_POS,
+        DMA_WR_MFB_EOF_POS => NVME_WR_MFB_EOF_POS,
+        DMA_WR_MFB_SRC_RDY => NVME_WR_MFB_SRC_RDY,
+        DMA_WR_MFB_DST_RDY => NVME_WR_MFB_DST_RDY
+    );
 
 end architecture;

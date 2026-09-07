@@ -29,6 +29,6 @@ lappend COMPONENTS [list "FIFOX"         $FIFOX_BASE      "FULL"]
 
 lappend MOD "$APP_COMP_BASE/iuventus_groupby_lane.vhd"
 lappend MOD "$APP_COMP_BASE/iuventus_groupby_engine.vhd"
-lappend MOD "$APP_COMP_BASE/groupby_if_pipe.vhd"
+lappend MOD "$APP_COMP_BASE/user_core_if_pipe.vhd"
 lappend MOD "$APP_COMP_BASE/user_core_ent.vhd"
 lappend MOD "$APP_COMP_BASE/user_core_groupby_arch.vhd"
