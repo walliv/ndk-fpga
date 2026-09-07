@@ -11,9 +11,9 @@ use ieee.numeric_std.all;
 use work.math_pack.all;
 use work.type_pack.all;
 
--- Runs in the HBM port clock domain -- only that clock fills the 256 b bus each cycle.
--- Per-channel accepted/stalled counts name the refusing port; mixed read+write exposes the
--- turnaround a per-direction model can't show.
+-- Measures what an HBM pseudo-channel delivers: back-to-back INCR bursts, beats vs cycles, in the
+-- HBM port clock domain. Per-channel accepted/stalled counters name the refusing channel;
+-- read+write together exposes the turnaround mixed traffic pays.
 entity HBM_THROUGHPUT_TESTER is
     generic (
         -- MI bus width

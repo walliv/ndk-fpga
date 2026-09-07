@@ -42,9 +42,9 @@ BAR→address (see [[reference_nfb_boot_no_reboot_reload]]).
 ## 2. Launch fzc (background)
 ```sh
 FZC=~/projects/spdk/build/examples/fpga_zero_copy
-sudo -n nohup $FZC -d <idx> -t "trtype:PCIe traddr:0000:<ssd-bdf>" -q 16 > /tmp/fzc.log 2>&1 &
+sudo -n nohup $FZC -d <idx> -t "trtype:PCIe traddr:0000:<ssd-bdf>" -q 64 > /tmp/fzc.log 2>&1 &
 ```
-`-d <idx>` = the card's /dev/nfb index; `-q` = queue depth (16 for QD16). fzc enables the design
+`-d <idx>` = the card's /dev/nfb index; `-q` = queue depth (64 for QD64). fzc enables the design
 (`CONTROL` bit 0). It reaches `Starting main loop` but that printf is **stdout-block-buffered** to the
 redirected file, so it may not flush — check `CONTROL & 1 == 1` instead of grepping the log. ublk is
 disabled in fzc, so no `/dev/ublkbN` appears — that's expected.

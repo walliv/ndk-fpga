@@ -73,19 +73,23 @@ entity USER_CORE is
         -- Read operation submit interface
         -- =========================================================================================
         -- The size of data (0-based value).
-        NVME_RD_REQ_LBA_NUM   : out std_logic_vector(7 downto 0);
+        NVME_RD_REQ_LBA_NUM     : out std_logic_vector(7 downto 0);
+        -- Pages the head request on each queue needs, so the DMA admits a queue against what
+        -- that queue actually asks for rather than the largest read that could arrive. 6 bits per
+        -- queue: an 8 b LBA count is at most 32 pages.
+        NVME_RD_REQ_NPAGES_ALL  : out std_logic_vector(NUM_QUEUES*6 -1 downto 0);
         -- This is a LBA address (not a byte address) to the NVMe
-        NVME_RD_REQ_LBA_PTR   : out std_logic_vector(63 downto 0);
+        NVME_RD_REQ_LBA_PTR     : out std_logic_vector(63 downto 0);
         -- Per-queue handshake: at most one VLD bit, and it must be bit NVME_RD_REQ_QID. Accepted
         -- when VLD(QID) and RDY(QID) are both high.
-        NVME_RD_REQ_VLD       : out std_logic_vector(NUM_QUEUES -1 downto 0);
-        NVME_RD_REQ_RDY       : in  std_logic_vector(NUM_QUEUES -1 downto 0);
+        NVME_RD_REQ_VLD         : out std_logic_vector(NUM_QUEUES -1 downto 0);
+        NVME_RD_REQ_RDY         : in  std_logic_vector(NUM_QUEUES -1 downto 0);
         -- Queue Identifier of the queue this read request targets (round-robin, see architecture)
-        NVME_RD_REQ_QID       : out std_logic_vector(maximum(1, log2(NUM_QUEUES))-1 downto 0);
+        NVME_RD_REQ_QID         : out std_logic_vector(maximum(1, log2(NUM_QUEUES))-1 downto 0);
         -- Tag the accepted read was submitted under, qualified by CID_VLD. It arrives a few cycles
         -- after the accept, so it names the last accepted read, not the current handshake.
-        NVME_RD_REQ_CID       : in  std_logic_vector(CQ_ENTRY_CMD_ID_W -1 downto 0);
-        NVME_RD_REQ_CID_VLD   : in  std_logic;
+        NVME_RD_REQ_CID         : in  std_logic_vector(CQ_ENTRY_CMD_ID_W -1 downto 0);
+        NVME_RD_REQ_CID_VLD     : in  std_logic;
 
         -- =========================================================================================
         -- Operation status interface

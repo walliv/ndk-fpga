@@ -11,10 +11,9 @@ use ieee.numeric_std.all;
 use work.math_pack.all;
 use work.type_pack.all;
 
--- Adds STAGES of registers to every interface between a USER_CORE architecture and the DMA, so the
--- two can be placed far apart. The read-request path is credit-based: the DMA's per-queue accept
--- window is mirrored into credits at the core, so both long spans carry only forward registers and
--- neither end sees a stale ready.
+-- Adds STAGES of registers between a USER_CORE architecture and the DMA, so the two sit far
+-- apart. The read-request path is credit-based: the DMA's per-queue accept window mirrors into
+-- credits at the core, so both spans carry only forward registers.
 entity USER_CORE_IF_PIPE is
     generic (
         NUM_QUEUES      : natural := 4;
@@ -76,13 +75,17 @@ entity USER_CORE_IF_PIPE is
         -- =====================================================================
         -- DMA side
         -- =====================================================================
-        DMA_RD_REQ_LBA_PTR : out std_logic_vector(LBA_PTR_W-1 downto 0);
-        DMA_RD_REQ_LBA_NUM : out std_logic_vector(7 downto 0);
-        DMA_RD_REQ_QID     : out std_logic_vector(max(1, log2(NUM_QUEUES))-1 downto 0);
-        DMA_RD_REQ_VLD     : out std_logic_vector(NUM_QUEUES-1 downto 0);
-        DMA_RD_REQ_RDY     : in  std_logic_vector(NUM_QUEUES-1 downto 0);
-        DMA_RD_REQ_CID     : in  std_logic_vector(CID_W-1 downto 0);
-        DMA_RD_REQ_CID_VLD : in  std_logic;
+        DMA_RD_REQ_LBA_PTR     : out std_logic_vector(LBA_PTR_W-1 downto 0);
+        DMA_RD_REQ_LBA_NUM     : out std_logic_vector(7 downto 0);
+        DMA_RD_REQ_QID         : out std_logic_vector(max(1, log2(NUM_QUEUES))-1 downto 0);
+        DMA_RD_REQ_VLD         : out std_logic_vector(NUM_QUEUES-1 downto 0);
+        DMA_RD_REQ_RDY         : in  std_logic_vector(NUM_QUEUES-1 downto 0);
+        -- Pages each queue's head request needs, so the DMA admits against what it asks for. NOT
+        -- routed through mv_sel (selects on DMA_RD_REQ_RDY -- would loop). 6 bits: an 8b LBA
+        -- count maxes at 32 pages, matching MAX_XFER_PAGES; a mismatch fails elaboration.
+        DMA_RD_REQ_NPAGES_ALL  : out std_logic_vector(NUM_QUEUES*6-1 downto 0);
+        DMA_RD_REQ_CID         : in  std_logic_vector(CID_W-1 downto 0);
+        DMA_RD_REQ_CID_VLD     : in  std_logic;
 
         DMA_OP_STAT_TYPE : in std_logic;
         DMA_OP_STAT_CODE : in std_logic_vector(1 downto 0);
@@ -119,7 +122,10 @@ architecture FULL of USER_CORE_IF_PIPE is
     constant SOF_POS_W  : natural := max(1, log2(MFB_REGION_SIZE));
     constant EOF_POS_W  : natural := log2(MFB_REGION_SIZE*MFB_BLOCK_SIZE);
     constant REQ_W      : natural := LBA_PTR_W + 8 + QID_W;
-    constant FIFO_W     : natural := LBA_PTR_W + 8;
+    constant NPAGES_W   : natural := 6;
+    -- The request FIFO carries the page count alongside the request so read admission never has
+    -- to derive it: that arithmetic in the DMA's ready cone cost 0.178 ns of setup slack.
+    constant FIFO_W     : natural := LBA_PTR_W + 8 + NPAGES_W;
     constant CRED_W     : natural := log2(REQ_FIFO_ITEMS+1) + 1;
     constant STAT_W     : natural := 1 + 2 + QID_W + CID_W + 1;
 
@@ -139,11 +145,12 @@ architecture FULL of USER_CORE_IF_PIPE is
     signal eng_qid  : natural range 0 to NUM_QUEUES-1;
 
     type   fifo_do_t is array (0 to NUM_QUEUES-1) of std_logic_vector(FIFO_W-1 downto 0);
-    signal fifo_di    : std_logic_vector(FIFO_W-1 downto 0);
-    signal fifo_do    : fifo_do_t;
-    signal fifo_wr    : std_logic_vector(NUM_QUEUES-1 downto 0);
-    signal fifo_rd    : std_logic_vector(NUM_QUEUES-1 downto 0);
-    signal fifo_empty : std_logic_vector(NUM_QUEUES-1 downto 0);
+    signal fifo_di     : std_logic_vector(FIFO_W-1 downto 0);
+    signal fifo_npages : std_logic_vector(NPAGES_W-1 downto 0);
+    signal fifo_do     : fifo_do_t;
+    signal fifo_wr     : std_logic_vector(NUM_QUEUES-1 downto 0);
+    signal fifo_rd     : std_logic_vector(NUM_QUEUES-1 downto 0);
+    signal fifo_empty  : std_logic_vector(NUM_QUEUES-1 downto 0);
 
     -- Graded reset: index 0 is the DMA end, index STAGES the engine end, and every stage takes the
     -- copy nearest to where it sits. SRL packing would collapse them into one site and put the
@@ -232,8 +239,12 @@ begin
         end process;
     end generate;
 
-    push_qid <= to_integer(unsigned(req_pl(STAGES)(REQ_W-1 downto LBA_PTR_W+8))) mod NUM_QUEUES;
-    fifo_di  <= req_pl(STAGES)(LBA_PTR_W+7 downto 0);
+    push_qid    <= to_integer(unsigned(req_pl(STAGES)(REQ_W-1 downto LBA_PTR_W+8))) mod NUM_QUEUES;
+    -- ceil((lba_num+1)/8) at push time. Registered into the FIFO, so it leaves the ready cone.
+    fifo_npages <= std_logic_vector(resize(
+                       (resize(unsigned(req_pl(STAGES)(LBA_PTR_W+7 downto LBA_PTR_W)), 9) + 8) / 8,
+                       NPAGES_W));
+    fifo_di     <= fifo_npages & req_pl(STAGES)(LBA_PTR_W+7 downto 0);
 
     fifo_wr_p : process (all) is
     begin
@@ -304,6 +315,15 @@ begin
         fifo_rd         <= (others => '0');
         fifo_rd(mv_sel) <= mv_fire;
     end process;
+
+    -- An empty queue has no head request, so offer the largest read instead: that is the size
+    -- admission applied to every queue before, so an idle queue cannot be admitted on a smaller
+    -- footprint than the request that eventually arrives.
+    head_num_g : for q in 0 to NUM_QUEUES-1 generate
+        DMA_RD_REQ_NPAGES_ALL((q+1)*NPAGES_W-1 downto q*NPAGES_W) <=
+            fifo_do(q)(FIFO_W-1 downto LBA_PTR_W+8) when (fifo_empty(q) = '0') else
+            (others => '1');
+    end generate;
 
     DMA_RD_REQ_LBA_PTR <= fifo_do(mv_sel)(LBA_PTR_W-1 downto 0);
     DMA_RD_REQ_LBA_NUM <= fifo_do(mv_sel)(LBA_PTR_W+7 downto LBA_PTR_W);
