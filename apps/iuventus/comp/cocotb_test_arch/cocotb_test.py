@@ -19,40 +19,18 @@ from cocotb.triggers import Timer, RisingEdge, ReadOnly, ClockCycles
 # so it is imported as a library here -- its `if __name__ == "__main__"` CLI never runs -- rather
 # than re-deriving the same register pokes a second time.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "sw"))
+# SimplifiedDmaModel and the scoreboard are shared with the GROUPBY architecture's bench, so they
+# live one level up rather than being forked per architecture.
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "cocotb_common"))
 from iuventus_rw_test import (  # noqa: E402
     IuventusTest, run_read_dispatch, run_write_dispatch, _throughput_point_start, _throughput_point_stop,
 )
 
-# cocotb 2.0 dropped cocotb.external/function from its top-level exports (renamed
-# _bridge.bridge/resume); cocotbext.nfb still imports those names. resume() can't await a bare
-# generator (TypeError), which silently killed the MI read servicer.
-import cocotb._bridge as _cocotb_bridge  # noqa: E402
-
-
-def _generator_compat_resume(func):
-    if not inspect.isgeneratorfunction(func):
-        return _cocotb_bridge.resume(func)
-
-    @functools.wraps(func)
-    async def _driven(*args, **kwargs):
-        gen = func(*args, **kwargs)
-        sent = None
-        while True:
-            try:
-                yielded = gen.send(sent)
-            except StopIteration as stop:
-                return stop.value
-            sent = await yielded
-
-    return _cocotb_bridge.resume(_driven)
-
-
-if not hasattr(cocotb, "external"):
-    cocotb.external = _cocotb_bridge.bridge
-    cocotb.function = _generator_compat_resume
+import nfb_compat  # noqa: F401 (patches cocotb before cocotbext.nfb is imported)
 
 import cocotbext.nfb  # noqa: E402 (must follow the compat shim above)
 from cocotbext.ofm.mi.drivers import MIRequestDriver  # noqa: E402
+from cocotbext.ofm.mfb.properties import attach_mfb_properties  # noqa: E402
 
 from dma_iuventus_model import QID_W, SimplifiedDmaModel  # noqa: E402
 from user_core_model import ReadReqModel, WriteFrameModel, ExpectedReadReq, ExpectedWrFrame  # noqa: E402
@@ -91,19 +69,24 @@ class IuventusUserCoreNfbDevice(cocotbext.nfb.NfbDevice):
         await cocotb.start(Clock(self._dut.DMA_CLK, 4, 'ns').start())
         await cocotb.start(Clock(self._dut.MI_CLK, 10, 'ns').start())
 
-        # Stage 2 actively drives/monitors NVME_* (drives NVME_RD_REQ_RDY/NVME_RD_MFB/
-        # NVME_OP_STAT, monitors NVME_WR_MFB) instead of Stage 1's constant tie-offs; it ties
-        # its own initial values.
+        # Stage 2: NVME_* interfaces are now driven/monitored by the simplified DMA Iuventus
+        # environment (drives NVME_RD_REQ_RDY/NVME_RD_MFB/NVME_OP_STAT, monitors NVME_WR_MFB),
+        # which ties its own initial port values itself.
         self.dma_model = SimplifiedDmaModel(self._dut, self._dut.DMA_CLK)
 
         self._dut.PCIE_LINK_UP.value = 1
         self._dut.FPGA_ID.value = 0
         self._dut.FPGA_ID_VLD.value = 0
 
-        # USER_CORE's own MI slave port: MI_ASYNC bridges it (master side, MI_CLK/MI_RST) to
-        # the DMA_CLK domain the CSR logic runs on (see mi_async_i), so this driver only ever
-        # needs MI_CLK.
+        # USER_CORE's MI slave port -- MI_ASYNC bridges it (MI_CLK/MI_RST side) to the DMA_CLK
+        # domain MI_SPLITTER_PLUS_GEN and the CSR logic run on (mi_async_i), so this driver only
+        # needs to know about MI_CLK.
         self.mi = [MIRequestDriver(self._dut, "MI", self._dut.MI_CLK)]
+
+        # Conformance watchdog on NVME_RD_MFB and NVME_WR_MFB, both of which run on DMA_CLK. It
+        # only samples, so it sits behind the SimplifiedDmaModel that drives and monitors them.
+        self.mfb_props = attach_mfb_properties(self._dut, self._dut.DMA_CLK, reset=self._dut.DMA_RST)
+
 
     async def _reset(self):
         self._dut.USR_RST.value = 1
@@ -141,8 +124,9 @@ async def _check_mi_access(dev):
     assert readback == 0x12345678, f"EVCR_INTERVAL_CYCLES readback mismatch: wrote 0x12345678, got {readback:#010x}"
 
 
-# Each IuventusTest property makes a blocking nfb C-extension call that must run in a bridge
-# thread, so direct `test.tst_mode = "rd"` from the main coroutine fails; gets/sets need this.
+# Async helpers bridging IuventusTest property access into cocotb: each property does a blocking
+# nfb C-extension call that must run inside a bridge thread, so `test.tst_mode = "rd"` from the
+# main coroutine fails; methods are fine wrapped in `e(...)`.
 async def aget(obj, name):
     return await e(lambda: getattr(obj, name))()
 
@@ -631,21 +615,21 @@ async def _case_cli_throughput_point(dut, dev, test, n_queues, addressing="seq",
     assert sb.checked > 0, "no read traffic observed during the throughput point's settle window"
     sb.assert_empty()
 
-    # Detach the scoreboard before stopping: the stop transition can retire one in-flight request
-    # against a torn address -- a separately-reported RTL race, not what this scoreboard validates.
+    # Detach the scoreboard before stopping: the stop transition can retire one already-in-flight
+    # request against a torn address, a separately-reported RTL race, not part of what this
+    # scoreboard validates.
     dev.dma_model.rd_req_accept_cb = None
 
     await e(_throughput_point_stop)(test, "rd", sleep_fn=lambda seconds: None)
 
 
 async def _case_throughput_multi_point(dut, dev, test, n_queues, n_points=6):
-    """Consecutive '-t' sweep points, which nothing previously covered.
+    """Consecutive '-t' sweep points.
 
-    _case_cli_throughput_point drives exactly ONE point, so the sequencing a real sweep performs --
-    start -> settle -> stop -> start the NEXT point -- was never exercised in simulation. That gap
-    sent a multi-point stall (the read page pool never recovering between points at N=4, rd_free
-    stuck at 0) to hardware to be debugged, where stale processes and device contention made it
-    almost impossible to read.
+    _case_cli_throughput_point drives exactly ONE point, so it cannot see the sequencing a real
+    sweep performs: start -> settle -> stop -> start the NEXT point. A stall in that sequence (the
+    read page pool not recovering between points at N=4, rd_free stuck at 0) is nearly unreadable
+    on the card, where stale processes and device contention obscure it, so it is caught here.
 
     _throughput_point_stop only clears contig_test for reads; it does not wait for in-flight
     operations to retire. This asserts the pool nonetheless recovers between points, which is the
@@ -982,11 +966,10 @@ async def _case_write_gen_burst_mode(dut, dev, test):
 
 
 async def _case_integrity_checker(dut, dev, test):
-    """(NEW) Drive the IUVENTUS_INTEGRITY_CHECKER end-to-end -- the same MI sequence
+    """Drive the IUVENTUS_INTEGRITY_CHECKER end-to-end -- the same MI sequence
     apps/iuventus/sw/integ_run.py uses on real hardware -- against the DMA model's write/read-back
-    data-integrity store. This is the FIRST *simulation* of the integrity checker (previously
-    HW-only): it exercises the checker FSM, the integ_en WR/RD-MFB steering mux, its address-derived
-    write pattern (ref_beat) and the read-back comparator, all in sim. With integ_en=1 the checker
+    data-integrity store. Simulating it covers the checker FSM, the integ_en WR/RD-MFB steering
+    mux, its address-derived write pattern (ref_beat) and the read-back comparator without a card. With integ_en=1 the checker
     owns NVME_WR_MFB / NVME_RD_REQ / NVME_RD_MFB; the model stores each written sector and returns it
     on the matching read, so a correct checker reports err_cnt == 0."""
     STATES = {0: "IDLE", 1: "WR", 2: "WR_WAIT", 3: "RD_REQ", 4: "RD_DATA", 5: "DONE"}
@@ -1026,9 +1009,9 @@ async def _case_integrity_checker(dut, dev, test):
         got = await e(c.read32)(0x54)
         assert err == 0, f"integrity check found {err} mismatch(es): first exp=0x{exp:08x} got=0x{got:08x}"
 
-        # OOR ABORT: a sweep past the namespace must ABORT (STS_OP_ERR, DONE), not hang. WRITEs
-        # go first, so an OOR sweep trips the write-OOR completion and S_WR_WAIT aborts to DONE
-        # rather than a read that wedges S_RD_DATA.
+        # OOR ABORT: a sweep past the namespace must ABORT (STS_OP_ERR, DONE), not hang. The
+        # checker WRITEs first, so an OOR sweep trips the DMA's write-OOR completion and
+        # S_WR_WAIT aborts to DONE, rather than reaching a read that wedges S_RD_DATA.
         dev.dma_model.lba_space_size = 4096   # sectors
         if (await e(c.read32)(0x40)) & 0x2:   # re-arm from the previous DONE
             await e(c.write32)(0x30, 0x1)

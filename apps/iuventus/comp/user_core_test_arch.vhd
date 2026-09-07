@@ -129,7 +129,8 @@ architecture TEST of USER_CORE is
     -- Same as gen_nvme_wr_qid but forced to 0 when NUM_QUEUES = 1.
     signal gen_nvme_wr_qid_mskd  : std_logic_vector(DMA_MFB_REGIONS*QID_W -1 downto 0);
     -- LBA-pointer part of the write meta (unchanged generator/checker addressing logic).
-    signal gen_wr_meta_lba       : std_logic_vector(SQE_LBA_PTR_W -1 downto 0);
+    type wr_meta_lba_arr_t is array (0 to DMA_MFB_REGIONS -1) of std_logic_vector(SQE_LBA_PTR_W -1 downto 0);
+    signal gen_wr_meta_lba       : wr_meta_lba_arr_t;
 
     function gen_wr_mfb_data (
         pkt_cnt : unsigned(15 downto 0);
@@ -179,6 +180,16 @@ architecture TEST of USER_CORE is
     end function;
 
     constant ADDR_CNTR_WIDTH          : natural := 21; -- Supports up to 512 GiB
+
+    -- QID_W is log2 rounded up, so at NUM_QUEUES = 1 or 3 a QID value can name a queue that does
+    -- not exist. Indexing a per-queue array with it directly would be an out-of-range fatal.
+    function seq_idx_f (q : unsigned) return natural is
+    begin
+        if (to_integer(q) > NUM_QUEUES -1) then
+            return 0;
+        end if;
+        return to_integer(q);
+    end function;
     constant TIMESTAMP_WIDTH          : natural := 28; -- allows little over 1 s
     constant LOG_TIMESTAMP_WIDTH      : natural := 22; -- allows little over 16 ms, which should be more than enough for an NVMe read/write operation latency
     constant LAT_PARAL_EVENTS         : natural := 2;
@@ -223,7 +234,13 @@ architecture TEST of USER_CORE is
     signal tst_sel_reg          : std_logic_vector(1 downto 0);
     signal tst_finished         : std_logic;
     signal tst_addr             : std_logic_vector(ADDR_CNTR_WIDTH -1 downto 0);
-    signal seq_addr_cntr        : unsigned(ADDR_CNTR_WIDTH -1 downto 0);
+    -- One sequential address per queue: a single shared counter advances only on completion, so
+    -- at low queue counts issuance outruns it and many in-flight commands carry the same LBA,
+    -- collapsing sequential throughput.
+    type seq_addr_cntr_arr_t is array (0 to NUM_QUEUES -1) of unsigned(ADDR_CNTR_WIDTH -1 downto 0);
+    type tst_addr_arr_t is array (0 to NUM_QUEUES -1) of std_logic_vector(ADDR_CNTR_WIDTH -1 downto 0);
+    signal seq_addr_cntr        : seq_addr_cntr_arr_t;
+    signal tst_addr_q           : tst_addr_arr_t;
     signal lfsr_rand_addr_out   : std_logic_vector(ADDR_CNTR_WIDTH -1 downto 0);
 
     signal evcr_interval_cycles_reg  : std_logic_vector(log2(EVCR_MAX_INTERVAL_CYCLES + 1) -1 downto 0);
@@ -802,15 +819,17 @@ begin
     nvme_rd_req_qid_s   <= checker_qid when (integ_en = '1') else gen_rd_req_qid;
     NVME_RD_REQ_QID     <= nvme_rd_req_qid_s;
 
-    gen_wr_meta_lba <= nvme_wr_req_lba_ptr_reg when (tst_finished = '1' and contig_test = '0') else
-                       std_logic_vector(resize(std_logic_vector(tst_addr), NVME_RD_REQ_LBA_PTR'length));
-
-    -- Write meta per region: [QID (high QID_W bits) | LBA_PTR (low SQE_LBA_PTR_W bits)]. LBA is not
-    -- region-indexed (single active address counter); only QID differs per region.
+    -- Write meta per region: [QID (high QID_W bits) | LBA_PTR (low SQE_LBA_PTR_W bits)]. Each
+    -- region carries its own QID, so it must take that queue's address -- one shared LBA would put
+    -- every region of a beat on the same block.
     nvme_wr_mfb_meta_g : for r in 0 to DMA_MFB_REGIONS -1 generate
-        -- Pre-pipe meta, per region: [QID (high QID_W bits) | LBA_PTR (low SQE_LBA_PTR_W bits)].
+        gen_wr_meta_lba(r) <= nvme_wr_req_lba_ptr_reg when (tst_finished = '1' and contig_test = '0') else
+                              std_logic_vector(resize(unsigned(tst_addr_q(seq_idx_f(unsigned(
+                                  gen_nvme_wr_qid_mskd((r+1)*QID_W -1 downto r*QID_W))))),
+                                  NVME_RD_REQ_LBA_PTR'length));
+
         gen_wr_meta_full((r+1)*(SQE_LBA_PTR_W + QID_W) -1 downto r*(SQE_LBA_PTR_W + QID_W)) <=
-            gen_nvme_wr_qid_mskd((r+1)*QID_W -1 downto r*QID_W) & gen_wr_meta_lba;
+            gen_nvme_wr_qid_mskd((r+1)*QID_W -1 downto r*QID_W) & gen_wr_meta_lba(r);
 
         NVME_WR_MFB_META((r+1)*(SQE_LBA_PTR_W + QID_W) -1 downto r*(SQE_LBA_PTR_W + QID_W)) <=
             (checker_qid & chk_wr_meta) when (integ_en = '1') else
@@ -1243,17 +1262,25 @@ begin
     begin
         if (rising_edge(DMA_CLK)) then
             if (DMA_RST = '1' or data_logger_rst = '1' or tst_trigg = '1') then
-                seq_addr_cntr <= resize(unsigned(nvme_rd_req_lba_ptr_reg), seq_addr_cntr'length);
+                seq_addr_cntr <= (others => resize(unsigned(nvme_rd_req_lba_ptr_reg), ADDR_CNTR_WIDTH));
             elsif (NVME_OP_STAT_VLD = '1' and (tst_finished = '0' or contig_test = '1')) then
-                -- NVME_RD_REQ_LBA_NUM is 0-based (0 => 1 LBA); advance the sequential address by
-                -- lba_num+1 so reads/writes stay contiguous (the SQE's NLB field stays 0-based;
-                -- only the address step is corrected here).
-                seq_addr_cntr <= seq_addr_cntr + resize(unsigned(nvme_rd_req_lba_num_reg), seq_addr_cntr'length) + 1;
+                -- NVME_RD_REQ_LBA_NUM is 0-based (0 => 1 LBA); advance by lba_num+1 so each
+                -- queue's stream stays contiguous. Only the completing queue advances, so queues
+                -- never share an address or duplicate each other's LBA.
+                seq_addr_cntr(seq_idx_f(unsigned(NVME_OP_STAT_QID))) <= seq_addr_cntr(seq_idx_f(unsigned(NVME_OP_STAT_QID)))
+                                                                         + resize(unsigned(nvme_rd_req_lba_num_reg), ADDR_CNTR_WIDTH) + 1;
             end if;
         end if;
     end process;
 
-    tst_addr <= std_logic_vector(seq_addr_cntr) when tst_sel_reg(0) = '0' else lfsr_rand_addr_out;
+    -- The random stream stays shared: its repeats are spread over the whole device, so they do
+    -- not concentrate the way a shared sequential address does.
+    tst_addr_q_g : for q in 0 to NUM_QUEUES -1 generate
+        tst_addr_q(q) <= std_logic_vector(seq_addr_cntr(q)) when tst_sel_reg(0) = '0' else
+                         lfsr_rand_addr_out;
+    end generate;
+
+    tst_addr <= tst_addr_q(seq_idx_f(rd_qid_cand));
 
     iops_cntr_i : entity work.EVENT_COUNTER
     generic map (

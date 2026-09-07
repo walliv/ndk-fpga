@@ -5,9 +5,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 TOP_LEVEL_ENT=USER_CORE
-# Modules.tcl lives right here (not one level up, unlike the default) -- see Modules.tcl's own
-# header for why USER_CORE is elaborated with a bespoke, component-scoped source list instead of
-# reusing ../Modules.tcl (which builds the WHOLE app: PCIe core, DMA_IUVENTUS, boot/SDM/HWID...).
+# Modules.tcl lives here, not one level up: see its header for why USER_CORE gets a bespoke,
+# component-scoped source list instead of ../Modules.tcl, which builds the whole app (PCIe core,
+# DMA_IUVENTUS, boot/SDM/HWID).
 TOP_LEVEL_PATH=.
 TARGET=nvc-sim
 NVC_PLATFORM_TAGS := xilinx
@@ -42,9 +42,8 @@ devtree:
 	mkdir -p $(NETCOPE_TEMP)
 	tclsh gen_devtree.tcl $(NETCOPE_TEMP)DevTree.dtb
 
-# Elaborate and run the smoke test in one step, since only a single test runs here. NUM_QUEUES
-# goes in as both an elaboration generic and an env var, so the Python side knows which value the
-# design was built with and can predict the round-robin QID pattern.
+# NUM_QUEUES goes in as both an elaboration generic and an env var, so the Python side knows
+# which value the design was built with and can predict the round-robin QID pattern.
 test: devtree
 	NUM_QUEUES=$(NUM_QUEUES) NVC_ELAB_ARGS="-g NUM_QUEUES=$(NUM_QUEUES)" $(MAKE) "SYNTHFILES=$(OFM_PATH)/build/targets/comp_vivado.tcl" nvc-sim
 

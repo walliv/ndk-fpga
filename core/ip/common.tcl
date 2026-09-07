@@ -55,8 +55,9 @@ proc get_ip_mod_files {ip_components_l ip_params_l} {
             }
         }
 
-        # prevent regeneration of IP files if present (and generated correctly)
-        # (Quartus only, TODO: add similar logic for Vivado (does not use .xci files generation by default))
+        # Skip regenerating an IP already generated. Quartus only: IP_BUILD_DIR carries no
+        # configuration key, so on Vivado a file-exists hit would reuse a core built for a
+        # different PCIE_GEN/DMA_TYPE.
         set ip_file $ip_params_mod(IP_BUILD_DIR)/[get_ip_filename $comp]
         if {[file exists $ip_file]} {
             if {$use_quartus && ![file exists $ip_params_mod(IP_MODIFY_BASE)/$script\_ip.qpf]} {
