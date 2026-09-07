@@ -1,9 +1,8 @@
 # Modules.tcl: script to compile single module
-# Copyright (c) 2026 Universitaet Heidelberg, Institut fuer Technische Informatik (ZITI)
-# Author(s): Vladislav Valek <vladislav.valek@stud.uni-heidelberg.de>
+# Copyright (C) 2019 CESNET z. s. p. o.
+# Author(s): Jakub Cabal <cabal@cesnet.cz>
 #
-# SPDX-License-Identifier: Apache-2.0
-
+# SPDX-License-Identifier: BSD-3-Clause
 # converting input list to associative array (uncomment when needed)
 array set ARCHGRP_ARR $ARCHGRP
 
