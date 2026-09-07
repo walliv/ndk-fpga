@@ -4,12 +4,9 @@
 # Author(s): Vladislav Valek <vladislav.valek@stud.uni-heidelberg.de>
 #
 # SPDX-License-Identifier: Apache-2.0
-#
-# Drive the FPGA-resident IUVENTUS_INTEGRITY_CHECKER (Iuventus TEST user core): write an
-# address-derived pattern to a range of SSD LBAs and read it back, comparing in fabric. The pattern
-# embeds the LBA in every 64-bit word, so a mismatch flags both bit corruption and a wrong-block
-# return. Requires the SSD/DMA plumbing already initialised and the design ENABLEd (e.g. by fzc
-# holding the SSD). Reads err_cnt / first mismatch back over MI.
+# Drives IUVENTUS_INTEGRITY_CHECKER: writes an address-derived pattern to SSD LBAs, reads it back,
+# and compares in fabric -- a mismatch flags bit corruption or a wrong block. Requires the SSD/DMA
+# already ENABLEd. Reads err_cnt/first mismatch over MI.
 import sys
 import time
 import nfb

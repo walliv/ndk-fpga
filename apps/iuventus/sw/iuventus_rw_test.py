@@ -2,6 +2,8 @@
 
 import sys
 import json
+import fcntl
+from datetime import datetime
 import os
 from enum import IntEnum
 from time import sleep
@@ -11,6 +13,50 @@ from ofm.comp.debug.data_logger.data_logger import DataLogger
 from ofm.comp.mfb_tools.debug.generator import MfbGenerator
 import ofm.comp.dma.latency_meas.calam_graph
 from ofm.utils import convert_units
+
+
+# Held open for the process lifetime: closing the file releases the lock.
+_device_lock_fh = None
+
+
+def acquire_device_lock(device) -> None:
+    """Refuse to start if another instance is already driving this device.
+
+    Two of these at once share one traffic generator and one set of counters, so each overwrites
+    the other's stimulus mid-sweep and both read totals containing the other's traffic. It does not
+    look like a tooling fault -- it surfaces as 0 IOPS, or as impossible values such as a free-page
+    count above the pool size -- so it is worth failing loudly instead.
+
+    flock is released by the kernel on process exit, including SIGKILL, so a stale lock file can
+    never block a later run.
+    """
+    global _device_lock_fh
+
+    tag = "".join(c if c.isalnum() else "_" for c in str(device))
+    path = os.path.join("/tmp", f"iuventus_rw_test.{tag}.lock")
+    try:
+        fh = open(path, "a+")
+    except OSError as exc:
+        raise SystemExit(f"ERROR: cannot open device lock {path}: {exc}")
+
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fh.seek(0)
+        owner = fh.read().strip() or "unknown"
+        fh.close()
+        raise SystemExit(
+            f"ERROR: another instance is already driving device '{device}' (pid {owner}).\n"
+            f"       Lock: {path}\n"
+            "       Two instances corrupt each other's measurements -- wait for it to finish, or\n"
+            "       stop it with SIGINT (never SIGKILL while fzc is running)."
+        )
+
+    fh.seek(0)
+    fh.truncate()
+    fh.write(str(os.getpid()))
+    fh.flush()
+    _device_lock_fh = fh
 
 
 def _latex_escape(text: str) -> str:
@@ -151,8 +197,16 @@ def _save_metric_plot(results, selector, metric_key, title, y_label, value_scale
     return [png_path, pdf_path]
 
 
-def build_throughput_plots(results, out_dir="."):
+def run_stamp() -> str:
+    """Timestamp suffix shared by every artifact of ONE -t invocation, so successive sweeps
+    accumulate instead of overwriting each other. These are WORKING artifacts: promote the ones
+    worth keeping into doc/measurements/ deliberately, do not commit them wholesale."""
+    return datetime.now().strftime("%Y-%m-%d_%H%M%S")
+
+
+def build_throughput_plots(results, out_dir=".", stamp=None):
     os.makedirs(out_dir, exist_ok=True)
+    stamp = stamp or run_stamp()
 
     plots = [
         (
@@ -184,7 +238,7 @@ def build_throughput_plots(results, out_dir="."):
 
     generated = []
     for file_stem, title, selector in plots:
-        out_base_path = os.path.join(out_dir, file_stem)
+        out_base_path = os.path.join(out_dir, f"{file_stem}_{stamp}")
         generated_paths = _save_metric_plot(
             results=results,
             selector=selector,
@@ -200,8 +254,9 @@ def build_throughput_plots(results, out_dir="."):
     return generated
 
 
-def build_iops_plots(results, out_dir="."):
+def build_iops_plots(results, out_dir=".", stamp=None):
     os.makedirs(out_dir, exist_ok=True)
+    stamp = stamp or run_stamp()
 
     plots = [
         (
@@ -233,7 +288,7 @@ def build_iops_plots(results, out_dir="."):
 
     generated = []
     for file_stem, title, selector in plots:
-        out_base_path = os.path.join(out_dir, file_stem)
+        out_base_path = os.path.join(out_dir, f"{file_stem}_{stamp}")
         generated_paths = _save_metric_plot(
             results=results,
             selector=selector,
@@ -281,11 +336,12 @@ def generate_throughput_outputs(results, out_dir="."):
         output_file.write(latex_table + "\n")
     print(f"\nSaved LaTeX table to {out_path}")
 
-    plot_paths = build_throughput_plots(results, out_dir=out_dir)
+    stamp = run_stamp()
+    plot_paths = build_throughput_plots(results, out_dir=out_dir, stamp=stamp)
     for path in plot_paths:
         print(f"Saved plot to {path}")
 
-    iops_plot_paths = build_iops_plots(results, out_dir=out_dir)
+    iops_plot_paths = build_iops_plots(results, out_dir=out_dir, stamp=stamp)
     for path in iops_plot_paths:
         print(f"Saved plot to {path}")
 
@@ -381,6 +437,22 @@ class IuventusTest(nfb.BaseComp):
     def tst_iterations(self, val: int):
         assert val >= 1000, "Iterations must be greater than 1000"
         self._comp.write32(IuventusTestRegMap.TST_ITERATIONS.value, val)
+
+    @property
+    def lat_meas_mode(self) -> bool:
+        """Serialise the read generator to ONE operation in flight (TST_SEQ_RAND_SEL bit 4).
+
+        LATENCY_METER pairs starts to completions positionally -- it carries no tag -- so any
+        concurrency pairs a completion with the wrong start. Without this the generator issued
+        back-to-back until the page pool emptied, the run could never retire its programmed
+        operation count and the measurement FSM never asserted tst_finished, hanging the caller.
+        Single SSD / single queue pair only; this deliberately throttles to QD1 and must be off
+        for throughput runs."""
+        return self._comp.get_bit(IuventusTestRegMap.TST_SEQ_RAND_SEL.value, 4)
+
+    @lat_meas_mode.setter
+    def lat_meas_mode(self, val: bool) -> None:
+        self._comp.set_bit(IuventusTestRegMap.TST_SEQ_RAND_SEL.value, 4, val)
 
     @property
     def tst_tmsp_ovf(self):
@@ -554,28 +626,47 @@ class LatencyMeter(DataLogger):
         with open('meas_conf.json', 'w') as output_file:
             json.dump(conf_data, output_file, indent=2)
 
-        for key, (mode, addressing, size) in combs.items():
-            print(f"Running test with size {size}, mode {mode}, and addressing {addressing}")
-            self.test_comp.rd_req_lba_num = size
-            self.test_comp.tst_mode = mode
-            self.test_comp.tst_addressing = addressing
-            self.test_comp.tst_iterations = iterations-1
+        # Cleared in the finally below so a failed/interrupted run cannot leave the generator
+        # throttled for later throughput tests.
+        try:
+            for key, (mode, addressing, size) in combs.items():
+                print(f"Running test with size {size}, mode {mode}, and addressing {addressing}")
+                self.test_comp.rd_req_lba_num = size
+                self.test_comp.tst_mode = mode
+                self.test_comp.tst_addressing = addressing
 
-            if mode == "wr":
-                self.test_comp.disp_wr_req(0, size, iterations)
+                # AFTER tst_mode/tst_addressing: both write TST_SEQ_RAND_SEL, so arming last keeps
+                # this correct. QD1 is required -- LATENCY_METER pairs starts to completions
+                # positionally, with no tag, so concurrency reports a wrong latency.
+                self.test_comp.lat_meas_mode = True
+                assert self.test_comp.lat_meas_mode, \
+                    "lat_meas_mode did not stick -- the run would over-issue and hang"
 
-            sleep(0.3)
-            while not self.is_tst_finished():
-                sleep(0.1)
-                pass
+                self.test_comp.tst_iterations = iterations-1
 
-            self.save_histograms(key)
-            self.rst()
+                if mode == "wr":
+                    # Burst mode explicitly: the generator emits exactly burst_size packets and
+                    # stops. Do NOT inherit it: _throughput_point_start sets bursting=False, so a
+                    # later latency run would face a free-running generator, breaking
+                    # one-command-in-flight.
+                    self.test_comp.gen.bursting = True
+                    self.test_comp.disp_wr_req(0, size, iterations)
+
+                sleep(0.3)
+                while not self.is_tst_finished():
+                    sleep(0.1)
+                    pass
+
+                self.save_histograms(key)
+                self.rst()
+        finally:
+            self.test_comp.lat_meas_mode = False
 
 
 # --- Importable run-logic, factored out of main() below ---
 # These take an ALREADY-OPEN IuventusTest/LatencyMeter plus parsed parameters -- no argparse, no
 # nfb.open() -- so main()'s CLI handlers and a cocotb testbench drive the same code paths.
+
 def run_read_dispatch(test: IuventusTest, lba_ptr: int, lba_num: int) -> None:
     """CLI '-r LBA_PTR LBA_NUM': dispatch one manual read request."""
     test.disp_rd_req(lba_ptr, lba_num)
@@ -593,6 +684,10 @@ def run_latency(
 ) -> None:
     """CLI '-l TYPE ITERATIONS ADDRESSING LBA_NUM': measure and report the latency of one
     mode/addressing/size combination."""
+    # Pin to one queue: without it, a leftover range from a prior multi-queue sweep bleeds in,
+    # mixing SSDs into a single-drive latency figure.
+    lmeter.test_comp.set_queue_range(1)
+
     tst_comb = {f"{mode}_{addressing}_{size}": (mode, addressing, size)}
     lmeter.run_test_suite(tst_comb, iterations)
     lm_output.process_results_by_structure(tst_comb)
@@ -601,8 +696,7 @@ def run_latency(
 def _throughput_point_start(test: IuventusTest, mode: str, addressing: str, size: int) -> None:
     """Arms one throughput measurement point (mode/addressing/size): configures the test-mode
     registers and, for writes, dispatches the free-running generator via disp_wr_req -- exactly
-    the setup the CLI's -t sweep performs for both its warmup point and every point of the main
-    sweep."""
+    the setup the CLI's -t sweep performs for every point of the sweep."""
     test.tst_addressing = addressing
     test.tst_mode = mode
 
@@ -636,8 +730,8 @@ def run_throughput_point(
     settle_seconds: float = 3.0, sleep_fn=sleep,
 ):
     """Runs ONE throughput measurement point (start -> settle -> sample -> stop), returning
-    (iops, throughput_bps). This is the exact per-combo body of the CLI's -t sweep (including the
-    warmup point, which calls this with settle_seconds=0), factored out so it can also be driven
+    (iops, throughput_bps). This is the exact per-combo body of the CLI's -t sweep, factored out
+    so it can also be driven
     point-by-point -- e.g. by a testbench substituting a simulated settle wait (advancing DMA_CLK
     cycles) for the wall-clock sleep_fn used on real hardware."""
     _throughput_point_start(test, mode, addressing, size)
@@ -653,14 +747,77 @@ def run_throughput_point(
     return iops, throughput_bps
 
 
+# Stall-profiler MI offsets, in the order plot_stall_profile.py's r() takes them.
+PROF_CLASS_REGS = [("DISP_SQ", 0x0A4), ("ALLOC_WAIT", 0x0AC), ("DISP_TAG", 0x0B4),
+                   ("DATA_WAIT", 0x0BC), ("BUSY", 0x0C4)]
+PROF_SIZES = [(7, "4K"), (31, "16K"), (255, "128K")]
+
+
+def run_stall_profile(test, queues: int, settle_seconds: float = 3.0, results_file=None,
+                      sleep_fn=sleep, verbose: bool = True):
+    """CLI '-p': DMA stall-class breakdown across read/write x rand/seq x 4K/16K/128K.
+
+    Requires firmware built with PROFILE_EN -- without it every counter reads zero. Emits rows in
+    the exact shape doc/measurements/plot_stall_profile.py's r() helper takes.
+
+    The five classes do NOT partition a cycle: an idle cycle (S_IDLE with no request) sets no bit
+    and is never counted, so the percentages are shares of CLASSIFIED cycles -- the time the DMA
+    had work in hand, which is the quantity that locates a bottleneck.
+    """
+    import nfb
+    from ofm.comp.dma.iuventus.iuventus_reg_access import DMAIuventusRegAccess
+
+    # test._dev may already be an open Nfb handle (the cocotb TB passes one) or a device string.
+    dev = getattr(test, "_dev", "0")
+    handle = dev if isinstance(dev, nfb.Nfb) else nfb.open(dev if isinstance(dev, str) else "0")
+    dma = handle.comp_open("ziti,dma_iuventus", 0)
+    reg = DMAIuventusRegAccess(dev="0")
+    test.set_queue_range(queues)
+
+    def snap():
+        reg.sample_cntrs()
+        return {name: dma.read64(addr) for name, addr in PROF_CLASS_REGS}
+
+    rows = []
+    for mode in ("rd", "wr"):
+        for addressing in ("rand", "seq"):
+            for size, blk in PROF_SIZES:
+                # _throughput_point_start sets contig_test on both paths: contiguous stream.
+                _throughput_point_start(test, mode, addressing, size)
+                sleep_fn(0.5)
+                before = snap(); reg.sample_cntrs(); succ0 = reg.succ_cpls
+                sleep_fn(settle_seconds)
+                after = snap(); reg.sample_cntrs(); succ1 = reg.succ_cpls
+                _throughput_point_stop(test, mode, sleep_fn=sleep_fn)
+                sleep_fn(0.5)
+
+                delta = {k: after[k] - before[k] for k, _ in PROF_CLASS_REGS}
+                total = sum(delta.values()) or 1
+                pct = {k: round(100.0 * v / total, 1) for k, v in delta.items()}
+                iops = int((succ1 - succ0) / settle_seconds) if settle_seconds else 0
+                rows.append(dict(N=queues, mode=mode, addressing=addressing, blk=blk,
+                                 iops=iops, pct=pct))
+                if verbose:
+                    print('  r(%d, %-7s %8d, %5.1f, %5.1f, %5.1f, %5.1f, %5.1f),  # %s %s' % (
+                        queues, '"%s",' % blk, iops, pct["DISP_SQ"], pct["ALLOC_WAIT"],
+                        pct["DISP_TAG"], pct["DATA_WAIT"], pct["BUSY"], mode, addressing),
+                        flush=True)
+
+    if results_file:
+        with open(results_file, "w") as handle:
+            json.dump(rows, handle, indent=2)
+        if verbose:
+            print("Saved stall profile to %s" % results_file)
+    return rows
+
+
 def run_throughput(
     test: IuventusTest, queues: int, tst_comb=None, settle_seconds: float = 3.0,
     sleep_fn=sleep, results_file=None, verbose: bool = True,
 ):
     """CLI '-t [--queues N]': the full throughput sweep across mode x addressing x size (the
     default combination list, or an explicit tst_comb override), returning the same list-of-dict
-    `results` structure save_throughput_results()/generate_throughput_outputs() expect. Behavior
-    (including the warmup point run first) is unchanged from the previous inline main() body."""
+    `results` structure save_throughput_results()/generate_throughput_outputs() expect."""
     assert queues >= 1, "--queues must be at least 1"
     test.evcr_interval_cycles = 0xFFFFFFFF
     # Confine both read and write request generation to queues 0..queues-1 so traffic is spread
@@ -677,12 +834,9 @@ def run_throughput(
             for mode in sorted(tst_modes) for addressing in sorted(tst_addr_modes) for size in sorted(tst_sizes)
         }
 
-    warmup_key, (warmup_mode, warmup_addressing, warmup_size) = next(iter(tst_comb.items()))
-    if verbose:
-        print(f"Running warmup throughput measurement: {warmup_key} (queues={queues})")
-    run_throughput_point(test, warmup_mode, warmup_addressing, warmup_size, settle_seconds=0, sleep_fn=sleep_fn)
-    if verbose:
-        print("Warmup throughput measurement done, collecting results...")
+    # Deliberately no warmup point: one would race _throughput_point_stop's drain wait and could
+    # hang if the generator hadn't started yet. Every real point already settles, so a warmup buys
+    # nothing.
 
     results = []
     for key, (mode, addressing, size) in tst_comb.items():
@@ -723,6 +877,11 @@ def parseParams():
     parser.add_argument('--iterations', type=int, default=10000, help="Number of iterations for latency measurement (default: 10000)")
     parser.add_argument('--rst', action='store_true', help="Reset the latency meter before starting the test")
     parser.add_argument('-t', '--throughput', action='store_true', help="Measure and print the throughput of read and write requests")
+    # long-only: -p is already taken by --process
+    parser.add_argument('--profile', action='store_true',
+                        help="Collect the DMA stall-class profile (needs PROFILE_EN firmware)")
+    parser.add_argument('--profile-results-file', default='stall_profile.json',
+                        help='Path to the stall-profile results JSON')
     parser.add_argument('-p', '--process', action='store_true', help="Process the measurement results and generate graphs")
     parser.add_argument('--throughput-results-file', default='throughput_results.json',
                         help='Path to throughput results JSON file (used for saving and loading)')
@@ -741,6 +900,10 @@ if __name__ == "__main__":
         output_dir = os.path.dirname(args.throughput_results_file) or "."
         generate_throughput_outputs(results, out_dir=output_dir)
         sys.exit(0)
+
+    # Before anything opens the device. --throughput-from-file returns above and never touches
+    # hardware, so it deliberately does not take the lock.
+    acquire_device_lock(args.device)
 
     test = IuventusTest(dev=args.device, index=0)
     lmeter = LatencyMeter(test, dev=args.device, index=0)
@@ -780,6 +943,9 @@ if __name__ == "__main__":
         if args.process:
             lm_output.process_results_by_structure(tst_comb)
         sys.exit(0)
+
+    if args.profile:
+        run_stall_profile(test, args.queues, results_file=args.profile_results_file)
 
     if args.throughput:
         results = run_throughput(test, args.queues, results_file=args.throughput_results_file)
