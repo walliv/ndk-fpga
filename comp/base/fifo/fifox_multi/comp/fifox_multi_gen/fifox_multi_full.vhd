@@ -181,12 +181,16 @@ begin
         report "ERROR: FIFOX Multi: FIFOX_ITEMS(" & integer'image(FIFOX_ITEMS) & ") < 2!"
         severity failure;
 
+    -- NOTE: nvc 1.21.0 crashes on inline @rising_edge(CLK) clocks in PSL directives (SIGSEGV); a
+    -- declared default clock avoids it, same fix as packet_planner.vhd.
+    -- psl default clock is rising_edge(CLK);
+
     -- psl assert_read_empty_fifo :
-    --      assert always (SAFE_READ_MODE=true or (RD and EMPTY) = (READ_PORTS-1 downto 0 => '0')) abort (RESET) @rising_edge(CLK)
+    --      assert always (SAFE_READ_MODE=true or (RD and EMPTY) = (READ_PORTS-1 downto 0 => '0')) abort (RESET)
     --      report "ERROR: FIFOX Multi: Non-safe Read Mode condition violated! Reading from port to_string(i) is forbidden when EMPTY is active!";
 
     -- psl assert_write_full_fifo :
-    --      assert always (rd_check(RD, EMPTY)) abort (RESET) @rising_edge(CLK)
+    --      assert always (rd_check(RD, EMPTY)) abort (RESET)
     --      report "ERROR: FIFOX Multi: Aligned read condition viloated! Reading from non-empty port which and dont read from lower nonempty port is forbidden!";
 
 

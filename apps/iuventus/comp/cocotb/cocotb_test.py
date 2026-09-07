@@ -626,10 +626,9 @@ async def _case_backpressure_no_wedge(dut, dev, test):
         requests despite the intermittent stalls);
       - the burst still completes within a bounded (if larger) cycle budget -- i.e. the read
         generator does NOT wedge/hang permanently once backpressure clears. This is the direct
-        component-level sim analog of the real hardware's read-path stall (an SSD backend that
-        goes idle/unresponsive for a window): here it is USER_CORE's OWN generator being checked
-        for correct recovery, not DMA_IUVENTUS's/the SSD's doorbell logic (out of scope for this
-        component-level harness).
+        component-level sim analog of a real backend going temporarily unresponsive: here it is
+        USER_CORE's OWN generator being checked for correct recovery, not DMA_IUVENTUS's/the
+        SSD's doorbell logic (out of scope for this component-level harness).
     """
     n_queues = NUM_QUEUES
     await e(test.set_queue_range)(n_queues)
@@ -720,8 +719,8 @@ async def _case_integrity_checker(dut, dev, test):
         assert err == 0, f"integrity check found {err} mismatch(es): first exp=0x{exp:08x} got=0x{got:08x}"
 
         # OOR ABORT: a sweep past the namespace must ABORT (STS_OP_ERR, DONE), not hang. The
-        # checker WRITEs first, so an OOR sweep trips op_ctrl's write-OOR completion and
-        # S_WR_WAIT aborts to DONE instead of wedging S_RD_DATA.
+        # checker WRITEs first, so an OOR sweep trips the write-OOR completion; S_WR_WAIT aborts
+        # to DONE instead of a read that would wedge S_RD_DATA.
         dev.dma_model.lba_space_size = 4096   # sectors
         if (await e(c.read32)(0x40)) & 0x2:   # re-arm from the previous DONE
             await e(c.write32)(0x30, 0x1)

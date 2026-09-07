@@ -67,6 +67,9 @@ architecture FULL of LATENCY_METER is
     signal tick_limit           : std_logic;
     signal tick_ovf             : std_logic;
     signal fifo_empty           : std_logic;
+    signal fifo_full_i          : std_logic;
+    signal fifo_wr              : std_logic;
+    signal fifo_rd              : std_logic;
     signal zero_delay           : std_logic;
 
     signal output_in            : OUTPUT_ARRAY_T(OUTPUT_STAGES - 1 downto 0);
@@ -90,14 +93,22 @@ begin
         RESET       => RST,
 
         DI          => (tick_cnt, START_EVENT_META),
-        WR          => START_EVENT,
-        FULL        => FIFO_FULL,
+        WR          => fifo_wr,
+        FULL        => fifo_full_i,
         STATUS      => FIFO_ITEMS,
 
         DO          => fifo_out,
-        RD          => fin_out.end_event,
+        RD          => fifo_rd,
         EMPTY       => fifo_empty
     );
+
+    -- Never write a full FIFO, never read an empty one. Past MAX_PARALEL_EVENTS concurrent events,
+    -- an untracked start is silently unmeasured, not gated. Pairs strictly in issue order;
+    -- out-of-order completion needs tag-based, not positional, pairing.
+    fifo_wr <= START_EVENT and (not fifo_full_i);
+    fifo_rd <= fin_out.end_event and (not fifo_empty);
+
+    FIFO_FULL <= fifo_full_i;
 
     (start_ticks, start_meta_i) <= fifo_out;
 
@@ -159,7 +170,7 @@ begin
     latency_vld_p : process(CLK)
     begin
         if (rising_edge(CLK)) then
-            LATENCY_VLD         <= fin_out.end_event;
+            LATENCY_VLD         <= fifo_rd or zero_delay;
             LATENCY             <= (others => '0')                                          when (zero_delay = '1') else
                        std_logic_vector(unsigned(fin_out.tick_cnt) - unsigned(start_ticks)) when (tick_ovf = '0')   else
                        std_logic_vector(unsigned(fin_out.tick_cnt) + unsigned(DATA_MAX) - unsigned(start_ticks) + 1);

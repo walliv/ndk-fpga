@@ -260,9 +260,9 @@ architecture FULL of CORE_LOGIC is
     signal nvme_rd_req_vld     : std_logic_vector(DMA_STREAMS-1 downto 0);
     signal nvme_rd_req_rdy     : std_logic_vector(DMA_STREAMS-1 downto 0);
     signal nvme_rd_req_qid     : slv_array_t(DMA_STREAMS-1 downto 0)(maximum(1, log2(NUM_QUEUES)) -1 downto 0);
-    -- Per-queue "DMA can currently accept a read for this queue" (mirrors OP_CTRL's SQ_HAS_SPACE);
-    -- passed through from DMA_IUVENTUS to USER_CORE so its round-robin generator can skip a full
-    -- queue -- see DMA_IUVENTUS's NVME_RD_REQ_QUEUE_RDY port comment.
+    -- Per-queue "DMA can accept a read" (mirrors the DMA core's SQ_HAS_SPACE), passed to
+    -- USER_CORE so its round-robin generator can skip a full queue -- see
+    -- NVME_RD_REQ_QUEUE_RDY.
     signal nvme_rd_req_queue_rdy : slv_array_t(DMA_STREAMS-1 downto 0)(NUM_QUEUES -1 downto 0);
 
     signal nvme_op_stat_type : std_logic_vector(DMA_STREAMS-1 downto 0);
@@ -641,13 +641,9 @@ begin
                 MI_SAME_CLK => FALSE,
 
                 NUM_QUEUES => NUM_QUEUES,
-                -- Timing-closure lever for the N=4 multi-queue build: the per-queue tag pools /
-                -- context table / FIFOs (x NUM_QUEUES) congest the CQ/WRBUFF trans-buffer ->
-                -- pkt_dispatcher path. Moving the per-queue register file into NP_LUTRAM freed
-                -- ~1152 flops at N=4, so QUEUE_DEPTH is raised from 4 to 8 (N=4 x QD8 = 32 total
-                -- outstanding commands); rebuild confirms the LUTRAM area drop closes timing at QD8.
-                -- NOTE: raised to 64 for the CQ-alignment measurement (matches the validated
-                -- multi-Samsung throughput config); may need AggressiveExplore route + phys_opt.
+                -- Timing-closure lever for N=4: per-queue tag/context/FIFO storage (x
+                -- NUM_QUEUES) congests the CQ/WRBUFF datapath. The register file lives in
+                -- NP_LUTRAM to bound area; QUEUE_DEPTH trades outstanding commands for congestion.
                 QUEUE_DEPTH => 64,
                 -- Production keepalive width (2**28 DMA_CLK cycles, ~1 s); explicitly assigned
                 -- (equals DMA_IUVENTUS's own default) per the "always assign every generic" rule.
@@ -663,9 +659,8 @@ begin
                 PCIE_MFB_BLOCK_SIZE  => PCIE_RQ_MFB_BLOCK_SIZE,
                 PCIE_MFB_ITEM_WIDTH  => PCIE_RQ_MFB_ITEM_WIDTH,
 
-                -- Enable the op_ctrl stall profiler: OP_PROF -> R_PROF_* MI counters
-                -- (IDLE_NOREQ/ALLOC_WAIT/DISP_WAIT/DATA_WAIT/BUSY at 0x0A4..0x0C8). Off by default;
-                -- turned on to profile where op_ctrl spends its cycles under the non-blocking accept.
+                -- Enable the stall-class profiler, published as MI counters at 0x0A4..0x0C8.
+                -- Off by default; turned on to locate where the DMA spends stalled cycles.
                 PROFILE_EN => true
             )
             port map (

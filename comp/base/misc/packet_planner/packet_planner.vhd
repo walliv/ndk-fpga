@@ -315,12 +315,11 @@ begin
         report "ERROR: Packet Planner: Maximum size of packet ("&to_string(PKT_SIZE)&") must not be higher than the total size of the destination space ("&to_string(SPACE_SIZE)&"!"
         severity failure;
 
-    -- =====================================================================
-    --  Pre-Planning Packet FIFO
-    -- =====================================================================
-    -- This FIFO buffers incoming Packets while the pipeline is stopped
-    -- (for example when Output Buffer is full).
-    -- The FIFO generates an Almost Full to stop generation of new packets.
+    -- psl default clock is rising_edge(CLK);
+
+    -- ==== Pre-Planning Packet FIFO ====
+    -- Buffers incoming packets while the pipeline is stopped (e.g. Output Buffer full); generates
+    -- Almost Full to stop new packet generation.
 
     pktf_i : entity work.FIFOX_MULTI
     generic map (
@@ -351,7 +350,7 @@ begin
 
     -- Check Packet FIFO overflow
     -- psl assert_pktf_overflow :
-    --      assert always (((or pktf_wr) and pktf_full)/='1') @rising_edge(CLK)
+    --      assert always (((or pktf_wr) and pktf_full)/='1')
     --      report "ERROR: Packet Planner: Packet FIFO overflow! RX_STR_PKT_AFULL was probably ignored or the FIFO_AFULL_OFFSET to_string(FIFO_AFULL_OFFSET) is too low!";
 
     -- Serialize all RX pakcets to one input for FIFOX Multi
@@ -628,7 +627,7 @@ begin
                 );
 
                 -- psl assert_oshk_full_overflow :
-                --      assert always (((or oshk_wr(i)) and oshk_full(i))/='1') @rising_edge(CLK)
+                --      assert always (((or oshk_wr(i)) and oshk_full(i))/='1')
                 --      report "ERROR: Packet Planner: Output packet Shakedown overflow! The ALMOST_FULL_OFFSET is too low to compensate pipeline length!";
 
                 TX_STR_PKT_VLD (i) <= not oshk_empty(i);
@@ -660,7 +659,7 @@ begin
 
                 -- Check Shakedown overflow
                 -- psl assert_oshk_rdy_overflow :
-                --      assert always (((or oshk_wr(i)) and (not oshk_rdy(i)))/='1') @rising_edge(CLK)
+                --      assert always (((or oshk_wr(i)) and (not oshk_rdy(i)))/='1')
                 --      report "ERROR: Packet Planner: Output packet Shakedown overflow! The ALMOST_FULL_OFFSET is too low to compensate pipeline length!";
 
                 -- Propagate Almost Full from user DST_RDY
@@ -738,7 +737,7 @@ begin
 
             -- Check Shakedown overflow
             -- psl assert_gshk_overflow :
-            --      assert always (((or gshk_wr) and gshk_full)/='1') @rising_edge(CLK)
+            --      assert always (((or gshk_wr) and gshk_full)/='1')
             --      report "ERROR: Packet Planner: Output global packet Shakedown overflow! The ALMOST_FULL_OFFSET is too low to compensate pipeline length!";
 
             -- Generate Shakedown input

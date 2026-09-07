@@ -82,7 +82,7 @@ architecture TEST of USER_CORE is
     -- Round-robin QID for the read-request submit interface; forced to 0 when NUM_QUEUES = 1.
     signal gen_rd_req_qid  : std_logic_vector(QID_W -1 downto 0);
     -- Round-robin candidate this cycle: next queue at/after rd_qid_cntr in [rd_ch_min_reg,
-    -- rd_ch_max_reg] with SQ room, skipping a full one rather than livelocking (OP_CTRL is
+    -- rd_ch_max_reg] with SQ room, skipping a full one rather than livelocking (the DMA core is
     -- single-issue, so a full queue stalls every queue).
     signal rd_qid_cand     : unsigned(QID_W -1 downto 0);
     -- '1' when rd_qid_cand is actually ready (some queue in [min,max] currently has room); '0'
