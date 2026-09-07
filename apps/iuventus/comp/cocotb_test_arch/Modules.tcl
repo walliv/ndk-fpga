@@ -1,8 +1,12 @@
-# Modules.tcl: USER_CORE component list for cocotb.
+# Modules.tcl: standalone component list to elaborate USER_CORE (TEST architecture) by itself, for a component-level cocotb testbench.
 # Copyright (C) 2026 Universitaet Heidelberg, Institut fuer Technische Informatik (ZITI)
 # Author(s): Vladislav Valek <vladislav.valek@stud.uni-heidelberg.de>
 #
 # SPDX-License-Identifier: Apache-2.0
+
+# Mirrors the USR_CORE_ARCH=="TEST" branch of ../Modules.tcl minus the rest of the app: USER_CORE
+# needs only its own MI slave and the subcomponents user_core_test_arch.vhd instantiates.
+# MFB_SPEED_METER_MI is intentionally absent.
 set APP_COMP_BASE [file normalize "$ENTITY_BASE/.."]
 
 set MI_ASYNC_BASE      "$OFM_PATH/comp/mi_tools/async"

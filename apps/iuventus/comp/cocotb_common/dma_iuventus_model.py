@@ -22,8 +22,9 @@ OP_STAT_TYPE_READ = 1
 OP_STAT_CODE_SUCCESS = 0
 OP_STAT_CODE_OOR = 2   # LBA Out of Range ("10"): completed without moving data
 
-# QID_W, matching user_core_test_arch.vhd's `maximum(1, log2(NUM_QUEUES))` (ceil-log2, log2(1)=0
-# by math_pack convention). Needed for NVME_WR_MFB_META's width (SQE_LBA_PTR_W(64) + QID_W).
+# QID_W matches user_core_test_arch.vhd's maximum(1, log2(NUM_QUEUES)) (ceil-log2 per math_pack;
+# log2(1)=0). Sizes NVME_WR_MFB_META: SQE_LBA_PTR_W(64) + QID_W bits per region (see
+# nvme_wr_mfb_meta_g).
 _NUM_QUEUES = int(os.environ.get("NUM_QUEUES", "1"))
 # Every queue offered ready at once (see the per-queue handshake note in __init__).
 ALL_QUEUES_RDY = (1 << _NUM_QUEUES) - 1
@@ -43,9 +44,9 @@ SQE_LBA_PTR_W = 64
 # nvme_meta_pack.CQ_ENTRY_CMD_ID_W -- the NVMe Command Identifier width.
 CQ_ENTRY_CMD_ID_W = 16
 
-# MFB geometry passed explicitly: get_mfb_params() assumes EOF_POS encodes BLOCK_SIZE, but here
-# it encodes log2(REGION_SIZE*BLOCK_SIZE), deriving a wrong block_size and item_width=1.
-# meta_width must be given too, or trans.meta stays unpopulated.
+# USER_CORE's MFB geometry given explicitly, not via get_mfb_params(): it assumes EOF_POS encodes
+# BLOCK_SIZE, but here it encodes log2(REGION_SIZE*BLOCK_SIZE). meta_width must also be explicit --
+# omitted, it silently defaults to 0.
 _WR_MFB_PARAMS = {
     "regions": 1,
     "region_size": 8,
@@ -89,9 +90,8 @@ class SimplifiedDmaModel:
     USER_CORE's request/frame generators must hold VLD/SRC_RDY steady and resume (not drop,
     duplicate, or wedge) once ready is reasserted; that's exactly what the backpressure directed
     case in cocotb_test.py checks via the reference-model scoreboard. Disabled by default
-    (`enable_backpressure()` not called), in which case behavior is identical to before this knob
-    existed. `disable_backpressure()` cleanly turns it back off (e.g. between directed cases
-    sharing one long-lived model instance).
+    (`enable_backpressure()` not called). `disable_backpressure()` turns it back off, e.g.
+    between directed cases sharing one long-lived model instance.
     """
 
     def __init__(self, dut, clk, rd_latency_cycles: int = 2, wr_latency_cycles: int = 2):
@@ -134,29 +134,45 @@ class SimplifiedDmaModel:
         # model only has to be self-consistent: the CID it reports on RD_MFB_META and OP_STAT must
         # be the one it published for that request.
         self._next_cid = 0
+        self._rd_task = None
         self._inflight_cid = 0
         self._inflight_qid = 0
-        dut.NVME_RD_MFB_DATA.value = 0
-        dut.NVME_RD_MFB_SOF.value = 0
-        dut.NVME_RD_MFB_EOF.value = 0
-        dut.NVME_RD_MFB_SOF_POS.value = 0
-        dut.NVME_RD_MFB_EOF_POS.value = 0
-        dut.NVME_RD_MFB_SRC_RDY.value = 0
+        self._idle_rd_mfb()
         dut.NVME_WR_MFB_DST_RDY.value = 1
 
         self._rd_mfb_driver = MFBDriver(dut, "NVME_RD_MFB", clk, mfb_params=_RD_MFB_PARAMS, vld_gen=None)
         self._wr_mfb_monitor = MFBMonitor(dut, "NVME_WR_MFB", clk, mfb_params=_WR_MFB_PARAMS, trans_type=MfbTransactionWithMeta)
         self._wr_mfb_monitor.add_callback(self._on_wr_frame)
 
+        cocotb.start_soon(self._rst_loop())
         cocotb.start_soon(self._rd_req_loop())
         cocotb.start_soon(self._op_stat_loop())
         cocotb.start_soon(self._wr_dst_rdy_loop())
         cocotb.start_soon(self._backpressure_loop())
 
+    def _idle_rd_mfb(self) -> None:
+        """Park RD_MFB with nothing offered, the state the driver expects between frames."""
+        self._dut.NVME_RD_MFB_DATA.value = 0
+        self._dut.NVME_RD_MFB_SOF.value = 0
+        self._dut.NVME_RD_MFB_EOF.value = 0
+        self._dut.NVME_RD_MFB_SOF_POS.value = 0
+        self._dut.NVME_RD_MFB_EOF_POS.value = 0
+        self._dut.NVME_RD_MFB_SRC_RDY.value = 0
+
     def reset(self) -> None:
         """Clears this model's own in-flight/pending state. Call after pulsing a fresh DMA_RST
         mid-simulation (e.g. between directed sub-scenarios sharing one cocotb test) so a stray
         in-flight request/completion from a previous scenario can't leak into the next one."""
+        # Cancel the in-flight read service, do not merely forget it: it parks inside send(), so
+        # leaving it alive lets it resume once the next scenario started its own, and two
+        # coroutines then drive RD_MFB in one timestep, costing a frame its SOF.
+        if self._rd_task is not None and not self._rd_task.done():
+            self._rd_task.cancel()
+        self._rd_task = None
+        # Cancelling can land mid-frame, leaving queued words in the driver and a half-written
+        # word on the bus. abort() drops both, so the next scenario starts from nothing.
+        self._rd_mfb_driver.abort()
+        self._idle_rd_mfb()
         self._rd_busy = False
         self._bp_active = False
         self._op_stat_pending.clear()
@@ -175,6 +191,18 @@ class SimplifiedDmaModel:
         """Disarms backpressure; RDY/DST_RDY return to their normal (busy-gated / always-high)
         behavior from the next cycle."""
         self._bp_enabled = False
+
+    async def _rst_loop(self):
+        """Self-reset on DMA_RST, as the engine this stands in for does. A test that pulses the
+        reset without calling reset() would otherwise leave a read still driving across it, and
+        that frame's EOF lands after the pulse with its SOF on the far side."""
+        prev = "0"
+        while True:
+            await RisingEdge(self._clk)
+            now = str(self._dut.DMA_RST.value)
+            if now == "1" and prev != "1":
+                self.reset()
+            prev = now
 
     async def _wr_dst_rdy_loop(self):
         """Drives NVME_WR_MFB_DST_RDY as a synchronous level every cycle (same discipline as
@@ -245,7 +273,7 @@ class SimplifiedDmaModel:
                 self.rd_req_accept_cb(lba_ptr, lba_num, qid)
 
             cocotb.start_soon(self._publish_rd_req_cid(self._inflight_cid))
-            cocotb.start_soon(self._service_read(lba_num, lba_ptr))
+            self._rd_task = cocotb.start_soon(self._service_read(lba_num, lba_ptr))
 
     async def _publish_rd_req_cid(self, cid: int):
         """One-cycle CID_VLD pulse a cycle after the accept, mirroring the DMA: the tag is drawn a
