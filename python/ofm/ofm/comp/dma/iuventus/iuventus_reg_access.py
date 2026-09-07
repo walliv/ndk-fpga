@@ -46,6 +46,14 @@ FENCE_AFULL_CNTR_L_ADDR          = 0x12C
 FENCE_GAP_ADDR                   = 0x134
 FENCE_TARGET_ADDR                = 0x138
 
+# Write-path drain counters. These three plus TOTAL_CYCLES split every cycle into idle /
+# cc-stalled / serving and give the mean commands in flight. See the DMA core's own
+# documentation for their semantics.
+DRAIN_IDLE_CNTR_L_ADDR           = 0x140
+CC_STALL_CNTR_L_ADDR             = 0x148
+DEV_INFLIGHT_ACC_L_ADDR          = 0x150
+TOTAL_CYCLES_CNTR_L_ADDR         = 0x158
+
 @dataclass
 class DMAIuventusConfig:
     ctrl_reg                : int
@@ -384,6 +392,48 @@ class DMAIuventusRegAccess(nfb.BaseComp):
     def wr_pages_free(self) -> int:
         """Free WRITE pages."""
         return self._comp.read32(IuventusMiRegMap.WR_PAGES_FREE.value) & 0xFFFF
+
+    @property
+    def total_cycles(self) -> int:
+        """Cycles since the last counter reset. The denominator for every always-on counter; the
+        OP_PROF classes sum only to cycles OP_CTRL was active, which is a shorter window."""
+        return self._comp.read64(TOTAL_CYCLES_CNTR_L_ADDR)
+
+    @property
+    def drain_idle(self) -> int:
+        """Cycles the write drain is not actively fetching staged data from RDBUFF. A high
+        fraction of total_cycles means write pages are held waiting on the device."""
+        return self._comp.read64(DRAIN_IDLE_CNTR_L_ADDR)
+
+    @property
+    def cc_stall(self) -> int:
+        """Cycles a staged write word was ready and the CC path refused it. Not necessarily lost
+        bandwidth -- see the DMA core's own documentation for why."""
+        return self._comp.read64(CC_STALL_CNTR_L_ADDR)
+
+    @property
+    def dev_inflight_acc(self) -> int:
+        """Sum of the in-flight command count over total_cycles. Divide to get the mean commands
+        the drive is holding; with the completion rate that is Little's law for device latency."""
+        return self._comp.read64(DEV_INFLIGHT_ACC_L_ADDR)
+
+    def write_drain_split(self) -> dict:
+        """The write drain as fractions of one cycle budget, plus the mean queue depth at the drive.
+
+        Reads all four counters from one sample so they share a window. 'serving' is the remainder,
+        so the three fractions sum to 1 by construction.
+        """
+        cyc = self.total_cycles
+        if cyc == 0:
+            return {"cycles": 0}
+        idle, stall, acc = self.drain_idle, self.cc_stall, self.dev_inflight_acc
+        return {
+            "cycles": cyc,
+            "idle": idle / cyc,
+            "cc_stall": stall / cyc,
+            "serving": max(0.0, (cyc - idle - stall) / cyc),
+            "mean_inflight": acc / cyc,
+        }
 
     @property
     def drain_admit(self) -> int:
