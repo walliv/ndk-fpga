@@ -1,14 +1,46 @@
 # General rules 
 
-- the primary languages are VHDL 2008, SystemVerilog (verification), Tcl (build scripts), and Python (tooling/simulation).
 - required tools: **Intel Quartus Prime Pro 25.1** (for Intel/Altera cards) or **Xilinx Vivado 2025.1** (for AMD/Xilinx cards), **Questa Sim-64 2025.2** (for UVM verification with System Verilog), **nvc** (for cocotb simulation).
-- each background task running in Claude should be actively monitored so it doesn't stuck
+- each background task running in Claude should be actively monitored so it doesn't stuck.
+  Poll at 5, 15, 30 or 60 s -- no other rate. Wait on the artefact the task produces (a log
+  marker, an exit code), never on a `pgrep` pattern that also matches the waiter's own command
+  line: that self-matches, never exits, and reports a finished task as still running
 - results can be deemed successful if the experiment they came from is
   repeatable at least 10 times and each iteration yielded comparable results 
 - use multiple agents with various models:
-  - Opus as a main orchestrator and conductor
-  - Sonnet for code writing, testing and debugging
-  - Haiku for rapid testing, research and explore
+  - the strongest available model (Fable/Opus) as the main orchestrator and conductor — it owns
+    design, precise task specs, root-cause triage, review of agent output, and premise-questioning
+    (e.g. "is this fix's area cost acceptable?", "is the testbench traffic model realistic?").
+    Judgment calls bounce back to this layer; don't expect implementation agents to resolve them.
+  - Sonnet for code writing, testbench iteration and debugging — excellent when the spec is
+    precise and self-contained (implementations land near-clean; verification discipline is
+    strong: cycle-level tracing, A/B controls, honest gate reporting). Its known limits: deep
+    multi-hypothesis debugging converges slowly across hand-offs, and it defaults to workarounds
+    over convention-level fixes when a premise is wrong — the orchestrator must supply that.
+  - escalate selectively: for gnarly root-cause work in shared/high-blast-radius components
+    (timing races, cross-component protocol bugs), override the per-invocation agent model to
+    Opus/Fable rather than burning multiple Sonnet hand-offs.
+  - Haiku for rapid testing, research and explore (read-only reconnaissance with file:line
+    evidence).
+- additional resources can be copied to the `../docs/` directory. These include:
+  - documentation
+  - data sheets
+  - scientific articles
+  - product guides
+  - design guides
+  - etc.
+
+## Assistant output formatting
+
+- hard-wrap prose in chat responses at **80 characters** per line; do not rely
+  on the terminal to soft-wrap it
+- exempt from wrapping, because breaking them makes them wrong rather than tidy:
+  - fenced code blocks and inline code
+  - tables
+  - file paths and `file:line` references
+  - command lines meant to be copy-pasted
+- this governs chat output only. Source-comment length is a separate rule
+  (250 characters per comment block) under Commentaries in the code below
 
 ## Commit Style
 
@@ -30,15 +62,36 @@ refactor(pcie): simplify handshake logic
 - no automatic commiting unless allowed by the user on a per-prompt basis
 - no "co-authored by" trailer
 
+## Verification
+
+- use `cocotb` for verification
+- insert PSL assertions to VHDL as an additional level of verification
+- each verification suite has to be equpped with:
+  1. One or multiple stimulus generators for multiple interfaces
+  2. DUT
+  3. High-level model of the DUT that generates reference output
+  4. One or multiple monitors on the output signals and interfaces
+  5. Scoreboard where data from monitor(s) and reference data from the model are compared
+- If there are are backpressure signals to the DUT (for example MFB's `DST_RDY`,
+AXI Masters's `AWREADY`/`WREADY`, etc.), there should be randomly toggled or
+toggled based on that component's specification with specific rate. Having
+backpressure successively disengaged is only allowed when explicitly requested
+on a per-prompt basis.
+- The verification agents can use specific seeds for debugging to get
+  deterministic outputs. However, verification is only valid when it uses random
+  seeding inspite passig previously on concrete seed.
+- Use Python bus modules for standardized interfaces (like
+  `MFBDriver`/`MFBMonitor` for MFB or classes of `cocotbext-axi`, for axi
+  interfaces)
+
 ## Code Style
 
 - 4-space indent, checked by `vsg` with config in `tests/ci/vsg_config.yaml`
-- Python: pycodestyle + mypy type checking (Python 3.12+)
-- All files: LF line endings, UTF-8, trailing whitespace trimmed (enforced by `.editorconfig`)
+- for commentaries see the Commentaries in the code section below
 
 ### Verilog/SystemVerilog coding style
 
-- Verible rules in `tests/verible/rules` (120-char line limit, explicit `begin`, generate labels required)
+- Verible rules in `tests/verible/rules`
 - explicitly specify parameters types for class parameters
 
 ### VHDL coding style
@@ -100,24 +153,8 @@ source env.sh      # Must be run before any Python tooling or cocotb flows
 ```
 
 ### Building FPGA Firmware (App for a Card)
-```sh
-cd apps/<app_name>/build/<card>/
-make               # Default target (calls quartus or vivado depending on Makefile)
-make SYNTH=vivado  # Override synthesis tool
-make SYNTH=quartus
 
-# Card-specific targets (e.g., for agi-fh400g):
-make 400g1         # 1x400G Ethernet
-make 100g4         # 4x100G Ethernet
-```
-
-### Building/Checking a Single Component
-```sh
-# From a component's synth/ directory:
-cd comp/mi_tools/pipe/synth/
-make               # Default vivado
-make SYNTH=quartus
-```
+Building a card's bitstream: see the `bitstream-build` skill.
 
 ### UVM Simulation (Questa Sim)
 ```sh
@@ -154,21 +191,7 @@ vsg --configuration tests/ci/vsg_config.yaml --filename path/to/file.vhd
 
 ### OFM Python Package
 
-- contains Python classes to access control physical devices with a running NDK bitsream 
 - preferred to be installed system-wide or into Mamba virtual environment (with debugging flag when necessary)
-
-```sh
-source env.sh
-cd python/ofm && pip install .
-```
-
-### Documentation
-```sh
-cd doc
-python3 -m venv venv-doc && source venv-doc/bin/activate
-pip install -r requirements.txt
-make html          # Output: doc/build/index.html
-```
 
 ## Key Conventions
 
