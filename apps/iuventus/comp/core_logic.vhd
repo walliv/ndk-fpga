@@ -329,6 +329,10 @@ architecture FULL of CORE_LOGIC is
     signal pcie_cc_mfb_dst_rdy : std_logic_vector(DMA_STREAMS-1 downto 0);
 
     signal nvme_rd_req_lba_num : slv_array_t(DMA_STREAMS-1 downto 0)(7 downto 0);
+    -- Head request page count per queue, carried alongside the shared payload bus so read
+    -- admission can test a queue against its own request instead of the largest one that could
+    -- arrive. Computed by the requester, so the DMA's ready stays a bare compare.
+    signal nvme_rd_req_npages_all : slv_array_t(DMA_STREAMS-1 downto 0)(NUM_QUEUES*6 -1 downto 0);
     signal nvme_rd_req_lba_ptr : slv_array_t(DMA_STREAMS-1 downto 0)(SQE_LBA_PTR_W -1 downto 0);
     signal nvme_rd_req_vld     : slv_array_t(DMA_STREAMS-1 downto 0)(NUM_QUEUES -1 downto 0);
     signal nvme_rd_req_rdy     : slv_array_t(DMA_STREAMS-1 downto 0)(NUM_QUEUES -1 downto 0);
@@ -2029,6 +2033,7 @@ begin
                 RST      => pcie_rsts(str),
 
                 NVME_RD_REQ_LBA_NUM => nvme_rd_req_lba_num(str),
+                NVME_RD_REQ_NPAGES_ALL => nvme_rd_req_npages_all(str),
                 NVME_RD_REQ_LBA_PTR => nvme_rd_req_lba_ptr(str),
                 NVME_RD_REQ_VLD     => nvme_rd_req_vld(str),
                 NVME_RD_REQ_RDY     => nvme_rd_req_rdy(str),
@@ -2306,6 +2311,7 @@ begin
             USR_RST => usr_rsts(APP_CLK_IDX)(0),
 
             NVME_RD_REQ_LBA_NUM => nvme_rd_req_lba_num(0),
+            NVME_RD_REQ_NPAGES_ALL => nvme_rd_req_npages_all(0),
             NVME_RD_REQ_LBA_PTR => nvme_rd_req_lba_ptr(0),
             NVME_RD_REQ_VLD     => nvme_rd_req_vld(0),
             NVME_RD_REQ_RDY     => nvme_rd_req_rdy(0),

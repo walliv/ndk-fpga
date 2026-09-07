@@ -19,10 +19,9 @@ use work.type_pack.all;
 library xpm;
 use xpm.vcomponents.all;
 
--- Rows alternate banks so a barrel-rotated write's two neighbouring rows land in different
--- banks, enabling URAM as well as BRAM (RAM_TYPE).
-
--- RD_EN/RD_ADDR/RD_CHAN assert RD_DATA_VLD READ_LATENCY cycles later, data on RD_DATA.
+-- Even/odd row banking lets a barrel-rotated write land in URAM as well as BRAM (RAM_TYPE below).
+-- RD_EN with RD_ADDR/RD_CHAN asserts RD_DATA_VLD READ_LATENCY cycles later, data on RD_DATA (see
+-- the READ_LATENCY generic).
 entity TX_DMA_PCIE_TRANS_BUFFER is
     generic (
         DEVICE : string := "ULTRASCALE";

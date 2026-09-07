@@ -96,12 +96,21 @@ Stall profile
    python iuventus_rw_test.py -d 0 --profile --queues 1 \
        --profile-results-file ~/temp/profile_q1.json
 
-The five classes are ``DISP_SQ`` / ``ALLOC_WAIT`` / ``DISP_TAG`` / ``DATA_WAIT`` / ``BUSY``. They
-do **not** partition a cycle -- an idle cycle sets no bit and is never counted -- so percentages
-are shares of *classified* cycles, i.e. of the time the DMA had work in hand. That is the
-quantity that locates a bottleneck.
+The seven classes are ``DISP_SQ`` / ``ALLOC_WAIT`` / ``DISP_TAG`` / ``DATA_WAIT`` / ``BUSY`` /
+``ALLOC_WR`` / ``ALLOC_RD_PEND``. They do **not** partition a cycle -- an idle cycle sets no bit --
+so each percentage is a share of *elapsed* cycles (``TOTAL_CYCLES``, ``0x158``, read over the same
+window) and ``idle`` is the unclassified remainder. Every row also carries the raw cycle counts it
+was computed from, so a point built out of eight classified cycles reads as eight cycles instead of
+as a full-looking breakdown.
 
-``DATA_WAIT`` is reachable only on the write path, so a read-only workload must show it at zero.
+The three allocator classes name the blocked side: ``ALLOC_WAIT`` (``0x0AC``) is a read waiting on
+the read allocator, ``ALLOC_WR`` (``0x170``) a write blocked on the write allocator, and
+``ALLOC_RD_PEND`` (``0x178``) an accepted read parked waiting on the read allocator. See the DMA
+core's own documentation for what each class means internally.
+
+``DATA_WAIT`` is reachable only on the write path, so a read-only workload must show it at zero --
+a write point reporting IOPS with ``DATA_WAIT`` at zero is flagged and printed as ``!! REJECTED``
+(``valid: false`` in the JSON) rather than reported as a profile.
 
 GROUP BY
 ========

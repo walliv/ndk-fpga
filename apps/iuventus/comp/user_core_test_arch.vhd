@@ -96,6 +96,7 @@ architecture TEST of USER_CORE is
     -- Read-side QID round-robin registers: min/max queue and burst size (0x58/0x5C).
     signal rd_ch_minmax_reg_sel             : std_logic;
     signal rd_burst_reg_sel                 : std_logic;
+    signal seq_addr_sel_reg_sel             : std_logic;
 
     -- Registers
     signal nvme_rd_req_lba_ptr_reg : std_logic_vector(SQE_LBA_PTR_W -1 downto 0);
@@ -122,6 +123,9 @@ architecture TEST of USER_CORE is
     signal rd_ch_min_reg     : std_logic_vector(QID_W -1 downto 0);
     signal rd_ch_max_reg     : std_logic_vector(QID_W -1 downto 0);
     signal rd_burst_reg      : std_logic_vector(15 downto 0);
+    -- Which queue's sequential address counter the readback at 0x6C shows. Debug only:
+    -- the counter is ADDR_CNTR_WIDTH bits, so a sequential stream repeats its LBA range
+    -- once it wraps, and only a live readback says where in that cycle a run sits.
     signal rd_qid_cntr       : unsigned(QID_W -1 downto 0);
     signal rd_burst_cntr     : unsigned(15 downto 0);
     -- Round-robin QID for the read-request submit interface; forced to 0 when NUM_QUEUES = 1.
@@ -211,7 +215,16 @@ architecture TEST of USER_CORE is
         return ret_data;
     end function;
 
-    constant ADDR_CNTR_WIDTH          : natural := 21; -- Supports up to 512 GiB
+    -- Wide enough to address every LBA of the attached namespace, so a sequential stream walks
+    -- the whole device instead of repeatedly rewriting one region.
+    constant ADDR_CNTR_WIDTH          : natural := 33;
+    -- LBAs in the namespace: Samsung 990 PRO 4 TB at 512 B/sector -- lower for a smaller drive. A
+    -- past-end LBA is an I/O error, not a slow access. Built by shift: 7_814_037_168 exceeds a
+    -- 32-bit signed VHDL literal (Vivado rejects it; nvc doesn't).
+    constant TST_LBA_COUNT            : unsigned(ADDR_CNTR_WIDTH -1 downto 0) := shift_left(to_unsigned(488377323, ADDR_CNTR_WIDTH), 4);
+    -- Sector size the namespace is formatted with. The write generator is configured in bytes,
+    -- so its frame length converts to a count of LBAs by this.
+    constant SECT_SIZE_B              : natural := 512;
 
     -- QID_W is log2 rounded up, so at NUM_QUEUES = 1 or 3 a QID value can name a queue that does
     -- not exist. Indexing a per-queue array with it directly would be an out-of-range fatal.
@@ -272,8 +285,17 @@ architecture TEST of USER_CORE is
     type   seq_addr_cntr_arr_t is array (0 to NUM_QUEUES -1) of unsigned(ADDR_CNTR_WIDTH -1 downto 0);
     type   tst_addr_arr_t is array (0 to NUM_QUEUES -1) of std_logic_vector(ADDR_CNTR_WIDTH -1 downto 0);
     signal seq_addr_cntr        : seq_addr_cntr_arr_t;
+    signal seq_addr_sel_reg     : std_logic_vector(7 downto 0);
+    signal seq_addr_sel_vld     : std_logic;
+    signal seq_addr_idx         : natural range 0 to NUM_QUEUES -1;
+    signal seq_addr_view        : std_logic_vector(ADDR_CNTR_WIDTH -1 downto 0);
     signal tst_addr_q           : tst_addr_arr_t;
+    -- LFSR_SIMPLE_RANDOM_GEN implements widths 3..32 and 64 only, so the generator runs at 64
+    -- and the address takes its low bits. 32 would cap random access at 2 TiB, short of the
+    -- namespace.
+    signal lfsr_rand_wide       : std_logic_vector(63 downto 0);
     signal lfsr_rand_addr_out   : std_logic_vector(ADDR_CNTR_WIDTH -1 downto 0);
+    signal rand_addr_in_range   : std_logic_vector(ADDR_CNTR_WIDTH -1 downto 0);
 
     signal evcr_interval_cycles_reg  : std_logic_vector(log2(EVCR_MAX_INTERVAL_CYCLES + 1) -1 downto 0);
     signal evcr_interval_set         : std_logic;
@@ -331,6 +353,11 @@ architecture TEST of USER_CORE is
     signal gen_nvme_wr_src_rdy : std_logic;
     signal gen_nvme_wr_dst_rdy : std_logic;
     signal gen_nvme_rd_req_vld : std_logic;
+    -- Per-region write-frame accept at mfb_wr_pipe_i's RX handshake. Per region because several
+    -- regions of one word can each start a frame, each with its own QID.
+    signal gen_nvme_wr_accept  : std_logic_vector(DMA_MFB_REGIONS -1 downto 0);
+    -- Number of LBAs one generated write frame covers.
+    signal wr_frame_lba_cnt    : unsigned(ADDR_CNTR_WIDTH -1 downto 0);
 
     -- Registered stage between MFB_RECONFIGURATOR and the WR MFB outputs. Breaks the
     -- DMA-to-user-core critical path: core_wr_mfb_dst_rdy is driven combinationally from inside
@@ -456,6 +483,7 @@ begin
         integ_count_reg_sel                     <= '0';
         rd_ch_minmax_reg_sel                    <= '0';
         rd_burst_reg_sel                        <= '0';
+        seq_addr_sel_reg_sel                    <= '0';
 
         -- Zero-extend to 12 bits to match x"000" style
         reg_sel_addr                          := (others => '0');
@@ -477,6 +505,7 @@ begin
             when x"3C" => integ_count_reg_sel                <= '1';
             when x"58" => rd_ch_minmax_reg_sel               <= '1';
             when x"5C" => rd_burst_reg_sel                   <= '1';
+            when x"70" => seq_addr_sel_reg_sel               <= '1';
             when others => null;
         end case;
     end process;
@@ -614,6 +643,24 @@ begin
                 rd_burst_reg <= std_logic_vector(to_unsigned(1, rd_burst_reg'length));
             elsif (rd_burst_reg_sel = '1' and mi_split_wr(0) = '1') then
                 rd_burst_reg <= mi_split_dwr(0)(15 downto 0);
+            end if;
+        end if;
+    end process;
+
+    -- Selected queue's counter, muxed outside the MI read path so the read mux stays a plain
+    -- assignment and an index naming no built queue reads back invalid instead of aliasing onto
+    -- queue 0.
+    seq_addr_sel_vld <= '1' when (unsigned(seq_addr_sel_reg) < NUM_QUEUES) else '0';
+    seq_addr_idx     <= to_integer(unsigned(seq_addr_sel_reg)) when seq_addr_sel_vld = '1' else 0;
+    seq_addr_view    <= std_logic_vector(seq_addr_cntr(seq_addr_idx));
+
+    seq_addr_sel_reg_p : process (DMA_CLK)
+    begin
+        if (rising_edge(DMA_CLK)) then
+            if (core_rst = '1') then
+                seq_addr_sel_reg <= (others => '0');
+            elsif (seq_addr_sel_reg_sel = '1' and mi_split_wr(0) = '1') then
+                seq_addr_sel_reg <= mi_split_dwr(0)(7 downto 0);
             end if;
         end if;
     end process;
@@ -1001,6 +1048,19 @@ begin
                     mi_split_drd(0)(CQ_ENTRY_CMD_ID_W -1 downto 0)          <= rd_mfb_cid_reg;
                     mi_split_drd(0)(16 + QID_W -1 downto 16)                <= rd_mfb_qid_reg;
                     mi_split_drd(0)(31)                                     <= rd_mfb_id_vld_reg;
+
+                -- Sequential-address readback (debug): 0x70 selects the queue, 0x74 shows its live
+                -- LBA. Bit 31 of 0x74 flags a select naming no built queue, so queue 0's address
+                -- isn't mistaken for it; only this readback says where a wrapped stream sits.
+                when x"70" =>
+                    mi_split_drd(0)(7 downto 0)                             <= seq_addr_sel_reg;
+                when x"74" =>
+                    mi_split_drd(0)                                         <= seq_addr_view(31 downto 0);
+                -- The counter is wider than one MI register, so its top bits and the select-valid
+                -- flag live here rather than aliasing onto bits of the address itself.
+                when x"78" =>
+                    mi_split_drd(0)(ADDR_CNTR_WIDTH -33 downto 0)           <= seq_addr_view(ADDR_CNTR_WIDTH -1 downto 32);
+                    mi_split_drd(0)(31)                                     <= not seq_addr_sel_vld;
                 when others => mi_split_drd(0)                                               <= X"CAFEBABE";
             end case;
         end if;
@@ -1272,37 +1332,89 @@ begin
 
     lfsr_rand_addr_gen_i : entity work.LFSR_SIMPLE_RANDOM_GEN
     generic map (
-        DATA_WIDTH  => ADDR_CNTR_WIDTH,
-        -- Some stuff
-        RESET_SEED  => "000011010110011100001"
+        DATA_WIDTH  => 64,
+        RESET_SEED  => "0000110101100111000010000110101100001101011001110000100001101011"
     )
     port map (
         CLK    => DMA_CLK,
         RESET  => core_rst or data_logger_rst,
         ENABLE => core_op_stat_vld and ((not tst_finished) or contig_test),
-        DATA   => lfsr_rand_addr_out
+        DATA   => lfsr_rand_wide
     );
 
+    lfsr_rand_addr_out <= lfsr_rand_wide(ADDR_CNTR_WIDTH -1 downto 0);
+
+    -- A write frame takes its LBA from tst_addr_q when mfb_wr_pipe_i latches gen_wr_meta_full, so
+    -- the address must advance on THAT handshake: the pipe holds two beats, and advancing at its
+    -- TX side would admit a later frame on the stale address.
+    wr_accept_g : for r in 0 to DMA_MFB_REGIONS -1 generate
+        gen_nvme_wr_accept(r) <= gen_nvme_wr_sof(r) and gen_nvme_wr_src_rdy and gen_nvme_wr_dst_rdy;
+    end generate;
+
+    -- MFB_GENERATOR_MI32 publishes frame length only via meta ([channel|length], same register
+    -- every region), in bytes; software sets it to (lba_num+1)*512, so length/512 is a 1-based
+    -- LBA count, rounded up so a sub-sector frame still claims one LBA.
+    wr_frame_lba_cnt <= shift_right(resize(unsigned(gen_mfb_meta(GEN_LENGTH_WIDTH -1 downto 0)), ADDR_CNTR_WIDTH)
+                                    + (SECT_SIZE_B -1), log2(SECT_SIZE_B));
+
     seq_addr_cntr_p : process (DMA_CLK)
+        variable next_addr_v : seq_addr_cntr_arr_t;
+        variable wr_idx_v    : natural;
     begin
         if (rising_edge(DMA_CLK)) then
             if (core_rst = '1' or data_logger_rst = '1' or tst_trigg = '1') then
                 seq_addr_cntr <= (others => resize(unsigned(nvme_rd_req_lba_ptr_reg), ADDR_CNTR_WIDTH));
-            elsif (rd_req_accepted_s = '1' and (tst_finished = '0' or contig_test = '1')) then
-                -- Advance on request-accept, not completion: waiting for completion leaves
-                -- the next address undefined for a whole round trip, capping sequential
-                -- throughput at one in-flight command. lba_num is 0-based; advance by lba_num+1.
-                seq_addr_cntr(seq_idx_f(unsigned(nvme_rd_req_qid_s))) <= seq_addr_cntr(seq_idx_f(unsigned(nvme_rd_req_qid_s)))
-                                                                         + resize(unsigned(core_rd_req_lba_num), ADDR_CNTR_WIDTH) + 1;
+            elsif (tst_finished = '0' or contig_test = '1') then
+                -- A read and a write can be accepted in the same cycle, on the same queue, so both
+                -- increments accumulate in one variable; an if/elsif chain would drop one of them
+                -- and let the two streams overlap.
+                next_addr_v := seq_addr_cntr;
+
+                -- Advance when accepted, not when it completes: waiting leaves the address
+                -- undefined for the round trip, so requests issued meanwhile repeat the previous
+                -- LBA, capping in-flight commands to one per queue. lba_num is 0-based: advance by
+                -- lba_num+1.
+                if (rd_req_accepted_s = '1') then
+                    next_addr_v(seq_idx_f(unsigned(nvme_rd_req_qid_s))) := next_addr_v(seq_idx_f(unsigned(nvme_rd_req_qid_s)))
+                                                                           + resize(unsigned(core_rd_req_lba_num), ADDR_CNTR_WIDTH) + 1;
+                end if;
+
+                -- Writes read the same per-queue address and must advance it too: otherwise every
+                -- frame between two read accepts carries one LBA, and an SSD can't reorder
+                -- write-after-write to the same blocks -- it serialises them one round trip at a
+                -- time.
+                for r in 0 to DMA_MFB_REGIONS -1 loop
+                    wr_idx_v := seq_idx_f(unsigned(gen_nvme_wr_qid_mskd((r+1)*QID_W -1 downto r*QID_W)));
+
+                    if (gen_nvme_wr_accept(r) = '1') then
+                        next_addr_v(wr_idx_v) := next_addr_v(wr_idx_v) + wr_frame_lba_cnt;
+                    end if;
+                end loop;
+
+                -- Fold at the namespace end. One accepted read plus one accepted write advance
+                -- by at most a few hundred LBAs, so the overshoot is always less than the count
+                -- and a single conditional subtract brings it back in range.
+                for q in 0 to NUM_QUEUES -1 loop
+                    if (next_addr_v(q) >= TST_LBA_COUNT) then
+                        next_addr_v(q) := next_addr_v(q) - TST_LBA_COUNT;
+                    end if;
+                end loop;
+
+                seq_addr_cntr <= next_addr_v;
             end if;
         end if;
     end process;
 
-    -- The random stream stays shared: its repeats are spread over the whole device, so they do
-    -- not concentrate the way a shared sequential address does.
+    -- The random stream stays shared: repeats spread over the device, not concentrating. The
+    -- LFSR spans the full counter width, overrunning the namespace, so fold it the same way --
+    -- the folded span draws twice as often (a generator, not uniformity).
+    rand_addr_in_range <= std_logic_vector(unsigned(lfsr_rand_addr_out) - TST_LBA_COUNT)
+                          when unsigned(lfsr_rand_addr_out) >= TST_LBA_COUNT else
+                          lfsr_rand_addr_out;
+
     tst_addr_q_g : for q in 0 to NUM_QUEUES -1 generate
         tst_addr_q(q) <= std_logic_vector(seq_addr_cntr(q)) when tst_sel_reg(0) = '0' else
-                         lfsr_rand_addr_out;
+                         rand_addr_in_range;
     end generate;
 
     tst_addr <= tst_addr_q(seq_idx_f(rd_qid_cand));
@@ -1428,6 +1540,7 @@ begin
 
         DMA_RD_REQ_LBA_PTR => NVME_RD_REQ_LBA_PTR,
         DMA_RD_REQ_LBA_NUM => NVME_RD_REQ_LBA_NUM,
+        DMA_RD_REQ_NPAGES_ALL => NVME_RD_REQ_NPAGES_ALL,
         DMA_RD_REQ_QID     => NVME_RD_REQ_QID,
         DMA_RD_REQ_VLD     => NVME_RD_REQ_VLD,
         DMA_RD_REQ_RDY     => NVME_RD_REQ_RDY,
