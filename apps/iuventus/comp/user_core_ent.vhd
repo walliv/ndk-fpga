@@ -76,20 +76,26 @@ entity USER_CORE is
         NVME_RD_REQ_LBA_NUM   : out std_logic_vector(7 downto 0);
         -- This is a LBA address (not a byte address) to the NVMe
         NVME_RD_REQ_LBA_PTR   : out std_logic_vector(63 downto 0);
-        NVME_RD_REQ_VLD       : out std_logic;
-        NVME_RD_REQ_RDY       : in  std_logic;
+        -- Per-queue handshake: at most one VLD bit, and it must be bit NVME_RD_REQ_QID. Accepted
+        -- when VLD(QID) and RDY(QID) are both high.
+        NVME_RD_REQ_VLD       : out std_logic_vector(NUM_QUEUES -1 downto 0);
+        NVME_RD_REQ_RDY       : in  std_logic_vector(NUM_QUEUES -1 downto 0);
         -- Queue Identifier of the queue this read request targets (round-robin, see architecture)
         NVME_RD_REQ_QID       : out std_logic_vector(maximum(1, log2(NUM_QUEUES))-1 downto 0);
-        -- Per-queue "DMA can currently accept a read for this queue" (mirrors that queue's SQ
-        -- space). The round-robin generator must skip a queue whose bit is '0' instead of
-        -- presenting it and stalling -- see DMA_IUVENTUS's NVME_RD_REQ_QUEUE_RDY port comment.
-        NVME_RD_REQ_QUEUE_RDY : in std_logic_vector(NUM_QUEUES -1 downto 0);
+        -- Tag the accepted read was submitted under, qualified by CID_VLD. It arrives a few cycles
+        -- after the accept, so it names the last accepted read, not the current handshake.
+        NVME_RD_REQ_CID       : in  std_logic_vector(CQ_ENTRY_CMD_ID_W -1 downto 0);
+        NVME_RD_REQ_CID_VLD   : in  std_logic;
 
         -- =========================================================================================
         -- Operation status interface
         -- =========================================================================================
         -- 0 for write, 1 for read
         NVME_OP_STAT_TYPE : in  std_logic;
+        -- Identity of the reported command. CID is per-queue, so it names a command only together
+        -- with QID. Neither is meaningful for CODE="10", an LBA-out-of-range rejection.
+        NVME_OP_STAT_QID  : in  std_logic_vector(maximum(1, log2(NUM_QUEUES))-1 downto 0);
+        NVME_OP_STAT_CID  : in  std_logic_vector(CQ_ENTRY_CMD_ID_W -1 downto 0);
         NVME_OP_STAT_CODE : in  std_logic_vector(1 downto 0);
         NVME_OP_STAT_VLD  : in  std_logic;
 
@@ -97,6 +103,9 @@ entity USER_CORE is
         -- Read interface
         -- =========================================================================================
         NVME_RD_MFB_DATA    : in  std_logic_vector(DMA_MFB_REGIONS*DMA_MFB_REGION_SIZE*DMA_MFB_BLOCK_SIZE*DMA_MFB_ITEM_WIDTH-1 downto 0);
+        -- Per region: bits [CQ_ENTRY_CMD_ID_W-1:0] = CID, bits above = QID. Together they name the
+        -- command whose data this frame carries, so returned data can be attributed to a request.
+        NVME_RD_MFB_META    : in  std_logic_vector(DMA_MFB_REGIONS*(maximum(1, log2(NUM_QUEUES)) + CQ_ENTRY_CMD_ID_W) -1 downto 0);
         NVME_RD_MFB_SOF     : in  std_logic_vector(DMA_MFB_REGIONS-1 downto 0);
         NVME_RD_MFB_EOF     : in  std_logic_vector(DMA_MFB_REGIONS-1 downto 0);
         NVME_RD_MFB_SOF_POS : in  std_logic_vector(DMA_MFB_REGIONS*maximum(1, log2(DMA_MFB_REGION_SIZE))-1 downto 0);

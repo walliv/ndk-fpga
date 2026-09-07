@@ -62,3 +62,4 @@ set_property IOSTANDARD LVCMOS18 [get_ports {STATUS_LEDS[2]}]
 set_property IOSTANDARD LVCMOS18 [get_ports {STATUS_LEDS[1]}]
 set_property IOSTANDARD LVCMOS18 [get_ports {STATUS_LEDS[0]}]
 
+

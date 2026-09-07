@@ -7,23 +7,25 @@
 
 import functools
 import inspect
+import math
 import os
 import sys
 
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import Timer, RisingEdge, ReadOnly
+from cocotb.triggers import Timer, RisingEdge, ReadOnly, ClockCycles
 
-# Reuses apps/iuventus/sw/iuventus_rw_test.py's MI register map (IuventusTestRegMap,
-# rd_req_*/tst_*/gen.* properties) as a library import instead of re-deriving the pokes.
+# iuventus_rw_test.py already implements the exact MI register map real hardware testing uses,
+# so it is imported as a library here -- its `if __name__ == "__main__"` CLI never runs -- rather
+# than re-deriving the same register pokes a second time.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "sw"))
 from iuventus_rw_test import (  # noqa: E402
     IuventusTest, run_read_dispatch, run_write_dispatch, _throughput_point_start, _throughput_point_stop,
 )
 
 # cocotb 2.0 dropped cocotb.external/function from its top-level exports (renamed
-# _bridge.bridge/resume); cocotbext.nfb still imports those names. resume() can't await a
-# bare generator (TypeError), which silently killed the MI read servicer.
+# _bridge.bridge/resume); cocotbext.nfb still imports those names. resume() can't await a bare
+# generator (TypeError), which silently killed the MI read servicer.
 import cocotb._bridge as _cocotb_bridge  # noqa: E402
 
 
@@ -52,15 +54,24 @@ if not hasattr(cocotb, "external"):
 import cocotbext.nfb  # noqa: E402 (must follow the compat shim above)
 from cocotbext.ofm.mi.drivers import MIRequestDriver  # noqa: E402
 
-from dma_iuventus_model import SimplifiedDmaModel  # noqa: E402
+from dma_iuventus_model import QID_W, SimplifiedDmaModel  # noqa: E402
 from user_core_model import ReadReqModel, WriteFrameModel, ExpectedReadReq, ExpectedWrFrame  # noqa: E402
 from scoreboard import Scoreboard  # noqa: E402
+
+# OP_STAT_CODE encoding on the DMA interface: 00 SUCCESS, 01 FAILURE, 10 LBA out of range.
+OP_STAT_CODE_SUCCESS = 0
 
 # Shortcut, matching apps/minimal/tests/cocotb/cocotb_test.py's own convention.
 e = cocotb.external
 
-# NUM_QUEUES must match the -g NUM_QUEUES=... elaboration generic (Makefile's `test` target)
-# -- read once at import so the reference model predicts the matching QID round-robin pattern.
+# EVCR interval used by every cross-check below. Small vs. the ~2^28-cycle production default so
+# an interval completes inside a short directed burst, and named so the TOTAL_CYCLES readback can
+# be compared against the value actually programmed.
+EVCR_INTERVAL_CYCLES = 200
+
+# NUM_QUEUES must match the -g NUM_QUEUES=... the design was elaborated with; the Makefile passes
+# it both ways. Read once at import time so the reference model predicts the QID round-robin
+# pattern of whichever build is running.
 NUM_QUEUES = int(os.environ.get("NUM_QUEUES", "1"))
 
 
@@ -130,9 +141,8 @@ async def _check_mi_access(dev):
     assert readback == 0x12345678, f"EVCR_INTERVAL_CYCLES readback mismatch: wrote 0x12345678, got {readback:#010x}"
 
 
-# Small async helpers bridging synchronous property access into cocotb: each property makes a
-# blocking nfb call needing a bridge thread, so a bare `test.tst_mode = "rd"` fails. Methods
-# work via `e(...)`; gets/sets need this.
+# Each IuventusTest property makes a blocking nfb C-extension call that must run in a bridge
+# thread, so direct `test.tst_mode = "rd"` from the main coroutine fails; gets/sets need this.
 async def aget(obj, name):
     return await e(lambda: getattr(obj, name))()
 
@@ -188,6 +198,70 @@ async def _case_one_read_request(dut, dev, test):
     assert ok, "timed out waiting for the single manual read request to be accepted"
     sb.assert_empty()
 
+    dev.dma_model.rd_req_accept_cb = None
+
+
+async def _case_command_identity(dut, dev, test):
+    """The DMA publishes which command a completion and a returned frame belong to
+    (NVME_RD_REQ_CID/_CID_VLD, RD_MFB_META, OP_STAT_QID/CID). USER_CORE latches all three and
+    exposes them at 0x60/0x64/0x68, so software can attribute a state to a command.
+
+    Checked against the identity the DMA model actually published, not against a constant: a
+    register wired to the wrong field, or never written, would otherwise still read plausibly.
+    """
+    await e(test.set_queue_range)(1)
+    c = dev.nfb.comp_open("ziti,iuventus_test_ctrl")
+
+    # Latch the identity AT ACCEPT, not after: the model assigns it before invoking this callback,
+    # and reading it later would pick up whatever a subsequent request had advanced it to.
+    seen = {}
+
+    def on_accept(lba_ptr_got, lba_num_got, qid_got):
+        seen.setdefault("cid", dev.dma_model._inflight_cid)
+        seen.setdefault("qid", dev.dma_model._inflight_qid)
+
+    dev.dma_model.rd_req_accept_cb = on_accept
+
+    lba_ptr = 0x2000
+    lba_num = 1  # 2 sectors
+    await e(test.disp_rd_req)(lba_ptr, lba_num)
+
+    # Two separate waits. "_rd_busy is False" is ALSO true before the request is ever accepted, so
+    # waiting only on that races straight past and reads registers still holding the previous
+    # case's identity.
+    ok = await _wait_until(lambda: "cid" in seen, dut, max_cycles=2000)
+    assert ok, "the manual read was never accepted -- nothing to attribute"
+    ok = await _wait_until(lambda: not dev.dma_model._rd_busy, dut, max_cycles=5000)
+    assert ok, "timed out waiting for the read to complete -- no identity would be captured"
+    await ClockCycles(dut.DMA_CLK, 10)
+
+    want_cid = seen["cid"]
+    want_qid = seen["qid"]
+
+    op_stat_id = await e(c.read32)(0x60)
+    rd_req_id = await e(c.read32)(0x64)
+    rd_mfb_id = await e(c.read32)(0x68)
+
+    for name, got in (("OP_STAT", op_stat_id), ("RD_REQ", rd_req_id), ("RD_MFB", rd_mfb_id)):
+        assert got & (1 << 31), (
+            f"{name} identity register {got:#010x} has its captured-since-reset bit clear -- the "
+            f"identity was never latched"
+        )
+
+    assert (op_stat_id & 0xFFFF) == want_cid, (
+        f"OP_STAT CID {op_stat_id & 0xFFFF} != published {want_cid}")
+    assert ((op_stat_id >> 16) & ((1 << QID_W) - 1)) == want_qid, (
+        f"OP_STAT QID {(op_stat_id >> 16) & ((1 << QID_W) - 1)} != published {want_qid}")
+    assert (rd_req_id & 0xFFFF) == want_cid, (
+        f"RD_REQ CID {rd_req_id & 0xFFFF} != published {want_cid}")
+    assert (rd_mfb_id & 0xFFFF) == want_cid, (
+        f"RD_MFB CID {rd_mfb_id & 0xFFFF} != published {want_cid}")
+    assert ((rd_mfb_id >> 16) & ((1 << QID_W) - 1)) == want_qid, (
+        f"RD_MFB QID {(rd_mfb_id >> 16) & ((1 << QID_W) - 1)} != published {want_qid}")
+
+    cocotb.log.info(
+        f"command identity: CID={want_cid} QID={want_qid} readable at 0x60/0x64/0x68"
+    )
     dev.dma_model.rd_req_accept_cb = None
 
 
@@ -271,16 +345,16 @@ async def _case_small_read_burst(dut, dev, test, lba_num):
 
     # Small vs. the ~2^28-cycle production default, so an interval genuinely completes early in
     # this burst -- lets the check below cross-check TOTAL_EVENTS against this test's own tally.
-    await aset(test, "evcr_interval_cycles", 200)
+    await aset(test, "evcr_interval_cycles", EVCR_INTERVAL_CYCLES)
 
     accepted_since_reached = 0
     seen_addrs = []  # first few accepted addresses, for the explicit step-size assertion below
 
     def on_accept(got_lba_ptr, got_lba_num, got_qid):
         nonlocal accepted_since_reached
-        # Compute the expectation lazily at accept time, mirroring the RTL's registered
-        # counters. Precomputing up front would freeze every entry at the initial values,
-        # since only on_completion() advances that state.
+        # Compute the expectation lazily at accept time: next_burst_request() reads the model's
+        # CURRENT per-queue seq_addr/QID and applies the advance this accept causes; precomputing
+        # would freeze every entry at the initial value.
         sb.expect(model.next_burst_request())
         sb.check(ExpectedReadReq(lba_ptr=got_lba_ptr, lba_num=got_lba_num, qid=got_qid))
         model.on_completion()
@@ -299,43 +373,55 @@ async def _case_small_read_burst(dut, dev, test, lba_num):
     await aset(test, "contig_test", False)
     await aset(test, "tst_iterations", iterations)  # fires tst_trigg -- must be written LAST
 
-    # EVCR cross-check: wait for the first interval (iops_cntr_i.int_reached), confirm MI
-    # TOTAL_EVENTS matches this test's tally of accepted reads since the burst started, read
-    # back before the next interval completes.
+    # EVCR cross-check: wait for the first interval, confirm MI TOTAL_EVENTS matches this
+    # test's tally, read back before the next interval completes. Tallied from OP_STAT
+    # pins, since an accept-based tally would be off by what's in flight.
     internal = dut.iops_cntr_i
     prev_int_reached = False
     first_interval_events = None
+    completions_since_reached = 0
     for _ in range(1000):
         await RisingEdge(dut.DMA_CLK)
         await ReadOnly()
+        if (bool(dut.NVME_OP_STAT_VLD.value)
+                and int(dut.NVME_OP_STAT_CODE.value) == OP_STAT_CODE_SUCCESS):
+            completions_since_reached += 1
         reached = bool(internal.int_reached.value)
         if reached and not prev_int_reached:
-            first_interval_events = accepted_since_reached
-            accepted_since_reached = 0
+            first_interval_events = completions_since_reached
+            completions_since_reached = 0
             break
         prev_int_reached = reached
 
     assert first_interval_events is not None, (
-        "no EVCR interval (evcr_interval_cycles=200) completed within 1000 DMA_CLK cycles of the "
-        "burst starting -- can't cross-check TOTAL_EVENTS"
+        f"no EVCR interval (evcr_interval_cycles={EVCR_INTERVAL_CYCLES}) completed within 1000 "
+        "DMA_CLK cycles of the burst starting -- can't cross-check TOTAL_EVENTS"
     )
-    assert first_interval_events > 0, "no read request was accepted during the first EVCR interval"
+    assert first_interval_events > 0, "no completion was observed during the first EVCR interval"
 
     got_events = await aget(test, "evcr_total_events")
     got_cycles = await aget(test, "evcr_total_cycles")
     assert got_events == first_interval_events, (
-        f"EVCR TOTAL_EVENTS ({got_events}) does not match this test's own tally of read requests "
-        f"accepted during the first completed interval ({first_interval_events})"
+        f"EVCR TOTAL_EVENTS ({got_events}) does not match this test's own tally of successful "
+        f"completions during the first completed interval ({first_interval_events})"
     )
-    assert got_cycles > 0, "EVCR TOTAL_CYCLES read back as 0 after a completed interval"
+    assert got_cycles == EVCR_INTERVAL_CYCLES, (
+        f"EVCR TOTAL_CYCLES read back {got_cycles}, expected the programmed interval "
+        f"{EVCR_INTERVAL_CYCLES} -- event_counter.vhd latches TOTAL_CYCLES from int_pr_cnt_reg at "
+        f"the very cycle it equals int_cyc_reg, so the two cannot legitimately differ"
+    )
+    cocotb.log.info(
+        f"EVCR first interval: TOTAL_EVENTS={got_events} (tally {first_interval_events}), "
+        f"TOTAL_CYCLES={got_cycles}"
+    )
 
     ok = await _wait_until(lambda: sb.checked >= iterations, dut, max_cycles=iterations * 50)
     assert ok, f"timed out: only {sb.checked}/{iterations} burst read requests were accepted (short stream)"
     sb.assert_empty()
 
-    # Explicit step-size cross-check (beyond the scoreboard's bit-exact match): confirm the DUT's
-    # observed address stream advances by exactly lba_num+1 every step, as concrete evidence
-    # rather than an indirect pass/fail.
+    # Explicit step-size cross-check on top of the scoreboard's bit-exact match: the observed
+    # address stream must advance by exactly lba_num+1 every step. Direct evidence of
+    # "lba_num=0 -> +1, contiguous, was frozen before", not an indirect scoreboard pass.
     assert len(seen_addrs) >= 2, "not enough accepted requests observed to check the address step"
     for prev_addr, next_addr in zip(seen_addrs, seen_addrs[1:]):
         step = next_addr - prev_addr
@@ -348,9 +434,10 @@ async def _case_small_read_burst(dut, dev, test, lba_num):
     dev.dma_model.rd_req_accept_cb = None
 
 
-# Stage 3 drives iuventus_rw_test.py's real CLI functions (run_read_dispatch/
-# run_write_dispatch/_throughput_point_start/_stop): the only user-facing entry point, so
-# exercising it directly is the primary surface here.
+# --- Stage 3: drive iuventus_rw_test.py's REAL CLI-path functions ---
+# That script is the only user-facing entry point, so exercising the exact functions main()'s
+# -r/-w/-t handlers call is the primary surface here, on top of Stage 2's property pokes.
+
 async def _case_cli_read_dispatch_sizes(dut, dev, test):
     """Stage 3.1: '-r LBA_PTR LBA_NUM' (run_read_dispatch) at both size extremes -- lba_num=0 (1
     LBA, the smallest legal request) and lba_num=255 (256 LBAs, the largest value that fits the
@@ -449,7 +536,7 @@ async def _case_cli_throughput_point(dut, dev, test, n_queues, addressing="seq",
     scope rather than causing a nondeterministic gate failure.
     """
     await e(test.set_queue_range)(n_queues)
-    await aset(test, "evcr_interval_cycles", 200)
+    await aset(test, "evcr_interval_cycles", EVCR_INTERVAL_CYCLES)
 
     sb = Scoreboard(f"cli_throughput[rd,{addressing},size={size}]")
     model = ReadReqModel(num_queues=n_queues)
@@ -478,6 +565,7 @@ async def _case_cli_throughput_point(dut, dev, test, n_queues, addressing="seq",
     prev_int_reached = False
     intervals_seen = 0
     clean_interval_events = None
+    completions_since_reached = 0
     cycles_run = 0
     # Stop as soon as the second interval boundary is captured, so evcr_total_events is read
     # before a third interval completes, then keep running settle_cycles to accumulate more
@@ -486,29 +574,53 @@ async def _case_cli_throughput_point(dut, dev, test, n_queues, addressing="seq",
         await RisingEdge(dut.DMA_CLK)
         await ReadOnly()
         cycles_run += 1
+        # Tally the DUT's own successful-completion pulses: evcr_event_vld counts completions, so an
+        # accept-based tally would be off by whatever is in flight at the interval boundary.
+        if (bool(dut.NVME_OP_STAT_VLD.value)
+                and int(dut.NVME_OP_STAT_CODE.value) == OP_STAT_CODE_SUCCESS):
+            completions_since_reached += 1
         reached = bool(internal.int_reached.value)
         if reached and not prev_int_reached:
             intervals_seen += 1
-            if intervals_seen == 2:
-                clean_interval_events = accepted_since_reached
-            accepted_since_reached = 0
-            if intervals_seen >= 2:
+            # Take the first FULLY-OBSERVED interval containing a completion; interval 1 is
+            # skipped since the point started mid-interval. A large transfer can span several
+            # intervals, so scanning to a non-empty one avoids comparing 0 == 0.
+            if intervals_seen >= 2 and completions_since_reached > 0:
+                clean_interval_events = completions_since_reached
+                completions_since_reached = 0
                 break
+            completions_since_reached = 0
         prev_int_reached = reached
 
     assert clean_interval_events is not None, (
-        f"fewer than 2 EVCR intervals completed within {settle_cycles} DMA_CLK cycles of the "
-        "throughput point starting -- can't cross-check TOTAL_EVENTS/iops() against a clean interval"
+        f"no fully-observed EVCR interval containing a completion within {settle_cycles} DMA_CLK "
+        "cycles of the throughput point starting -- can't cross-check TOTAL_EVENTS/iops()"
     )
-    assert clean_interval_events > 0, "no read request was accepted during the second (clean) EVCR interval"
+    assert clean_interval_events > 0, "no completion was observed during the second (clean) EVCR interval"
 
     got_events = await aget(test, "evcr_total_events")
     assert got_events == clean_interval_events, (
-        f"EVCR TOTAL_EVENTS ({got_events}) does not match this test's own tally of read requests "
-        f"accepted during the second (clean) completed interval ({clean_interval_events})"
+        f"EVCR TOTAL_EVENTS ({got_events}) does not match this test's own tally of successful "
+        f"completions during the second (clean) completed interval ({clean_interval_events})"
+    )
+    got_cycles = await aget(test, "evcr_total_cycles")
+    assert got_cycles == EVCR_INTERVAL_CYCLES, (
+        f"EVCR TOTAL_CYCLES read back {got_cycles}, expected the programmed interval "
+        f"{EVCR_INTERVAL_CYCLES}"
     )
     iops = await e(test.iops)()
-    assert iops > 0, "IuventusTest.iops() reported 0 during an active throughput point"
+    # iops() is TOTAL_EVENTS / (TOTAL_CYCLES * clk_period), so reproduce it from the same two
+    # registers: a bare "> 0" would pass even if it were reading the wrong register pair.
+    clk_period = await e(lambda: test.clk_period)()
+    expect_iops = got_events / (got_cycles * clk_period)
+    assert math.isclose(iops, expect_iops, rel_tol=1e-9), (
+        f"IuventusTest.iops() returned {iops}, but TOTAL_EVENTS={got_events} / (TOTAL_CYCLES="
+        f"{got_cycles} * clk_period={clk_period}) is {expect_iops}"
+    )
+    cocotb.log.info(
+        f"EVCR clean interval: TOTAL_EVENTS={got_events} (tally {clean_interval_events}), "
+        f"TOTAL_CYCLES={got_cycles}, iops={iops:.0f}"
+    )
 
     # Keep the read stream running for the rest of the settle budget, purely so the scoreboard
     # accumulates a meaningful amount of round-robin traffic (order/QID/size) beyond the two short
@@ -524,6 +636,43 @@ async def _case_cli_throughput_point(dut, dev, test, n_queues, addressing="seq",
     dev.dma_model.rd_req_accept_cb = None
 
     await e(_throughput_point_stop)(test, "rd", sleep_fn=lambda seconds: None)
+
+
+async def _case_throughput_multi_point(dut, dev, test, n_queues, n_points=6):
+    """Consecutive '-t' sweep points, which nothing previously covered.
+
+    _case_cli_throughput_point drives exactly ONE point, so the sequencing a real sweep performs --
+    start -> settle -> stop -> start the NEXT point -- was never exercised in simulation. That gap
+    sent a multi-point stall (the read page pool never recovering between points at N=4, rd_free
+    stuck at 0) to hardware to be debugged, where stale processes and device contention made it
+    almost impossible to read.
+
+    _throughput_point_stop only clears contig_test for reads; it does not wait for in-flight
+    operations to retire. This asserts the pool nonetheless recovers between points, which is the
+    property a sweep depends on and the one that failed on the card."""
+    lba_ptr = await aget(test, "rd_req_lba_ptr")
+    sizes = [0, 1, 3, 7, 15, 31][:n_points]
+    for idx, size in enumerate(sizes):
+        await e(_throughput_point_start)(test, "rd", "rand", size)
+        for _ in range(1500):
+            await RisingEdge(dut.DMA_CLK)
+        await e(_throughput_point_stop)(test, "rd", sleep_fn=lambda _s: None)
+
+        # Let the point retire before the next one starts. Sampling ends with an explicit clock
+        # edge so the phase is writable again -- a bridged MI write from the ReadOnly phase raises.
+        recovered = False
+        for _ in range(20000):
+            await RisingEdge(dut.DMA_CLK)
+            await ReadOnly()
+            quiet = int(dut.NVME_RD_REQ_VLD.value) == 0
+            await RisingEdge(dut.DMA_CLK)
+            if quiet:
+                recovered = True
+                break
+        assert recovered, (
+            f"point {idx} (size={size}) left read requests asserted after "
+            f"_throughput_point_stop -- the next sweep point would start on top of it"
+        )
 
 
 async def _case_rd_burst_and_rand(dut, dev, test):
@@ -588,9 +737,9 @@ async def _case_write_enable_disable_midstream(dut, dev, test):
     lba_num = 0
 
     def on_frame(trans):
-        # Lazy expectation, like _case_small_read_burst's on_accept: the generator is
-        # free-running, so the exact frame COUNT accepted before "disable" takes effect isn't
-        # known in advance -- compute next_frame() as each frame arrives.
+        # Lazy expectation, like _case_small_read_burst's on_accept: the generator is free-running,
+        # so the frame COUNT accepted before a disable takes effect isn't known in advance;
+        # next_frame() per arrival avoids committing to a count it could outrun.
         got_lba_ptr = trans.meta & ((1 << 64) - 1)
         got_qid = trans.meta >> 64
         sb.expect(model.next_frame(lba_ptr, (lba_num + 1) * 512))
@@ -673,6 +822,165 @@ async def _case_backpressure_no_wedge(dut, dev, test):
     dev.dma_model.disable_backpressure()
 
 
+async def _case_mi_async_reset_asymmetry(dut, dev, test):
+    """(NEW) MI_ASYNC's own cross-clock reset FSM (comp/mi_tools/async/mi_async.vhd's reset_state:
+    NO_RESET/MASTER_RESET/SLAVE_RESET/COMP_RESET) only ever visits NO_RESET<->COMP_RESET anywhere
+    else in this suite, because IuventusUserCoreNfbDevice._reset() always asserts/deasserts MI_RST
+    (master side, MI_CLK domain) and DMA_RST (slave side, DMA_CLK domain, synchronized into MI_CLK
+    via mi_async_i's own ASYNC_RESET instance) in lockstep. MASTER_RESET/SLAVE_RESET instead
+    require exactly ONE side to be in reset while the other stays clear -- a real (if less common)
+    bring-up scenario the RTL is defensively designed for (e.g. one clock domain resetting
+    independently of the other, such as a partial/warm reset or a not-yet-locked clock). Directly
+    toggles MI_RST/DMA_RST out of lockstep via cocotb signal writes and confirms both states are
+    actually visited with a white-box peek of mi_async_i.p_state (reset_state's 0-based literal
+    index per cocotb's own VHDL-enum convention: NO_RESET=0, MASTER_RESET=1, SLAVE_RESET=2,
+    COMP_RESET=3), then restores a normal synchronized reset and proves the MI path still works
+    (the same read32(0x7C)==0xCAFEBABE smoke check _check_mi_access uses) before handing back to
+    the rest of the suite."""
+    NO_RESET, MASTER_RESET, SLAVE_RESET = 0, 1, 2
+
+    async def _settle(cycles):
+        for _ in range(cycles):
+            await RisingEdge(dut.MI_CLK)
+
+    dut.MI_RST.value = 0
+    dut.DMA_RST.value = 0
+    await _settle(5)
+    assert int(dut.mi_async_i.p_state.value) == NO_RESET, "did not start in NO_RESET"
+
+    # MI_RST alone: RESET_M='1' while reset_s_sync(0) stays '0' -> MASTER_RESET.
+    dut.MI_RST.value = 1
+    await _settle(5)
+    got = int(dut.mi_async_i.p_state.value)
+    assert got == MASTER_RESET, (
+        f"expected MASTER_RESET ({MASTER_RESET}) with MI_RST alone asserted, got {got}"
+    )
+    dut.MI_RST.value = 0
+    await _settle(5)
+    assert int(dut.mi_async_i.p_state.value) == NO_RESET, (
+        "did not return to NO_RESET after MI_RST alone was cleared"
+    )
+
+    # DMA_RST alone: reset_s_sync(0)='1' (synced from RESET_S=DMA_RST) while RESET_M stays '0'
+    # -> SLAVE_RESET.
+    dut.DMA_RST.value = 1
+    await _settle(5)
+    got = int(dut.mi_async_i.p_state.value)
+    assert got == SLAVE_RESET, (
+        f"expected SLAVE_RESET ({SLAVE_RESET}) with DMA_RST alone asserted, got {got}"
+    )
+    dut.DMA_RST.value = 0
+    await _settle(5)
+    assert int(dut.mi_async_i.p_state.value) == NO_RESET, (
+        "did not return to NO_RESET after DMA_RST alone was cleared"
+    )
+
+    # Restore a normal, fully synchronized reset (matches _reset()'s own lockstep sequencing)
+    # before handing back to the rest of the suite, and prove the MI path still works afterwards.
+    dut.MI_RST.value = 1
+    dut.DMA_RST.value = 1
+    await _settle(10)
+    dut.MI_RST.value = 0
+    dut.DMA_RST.value = 0
+    await _settle(10)
+
+    c = dev.nfb.comp_open("ziti,iuventus_test_ctrl")
+    sentinel = await e(c.read32)(0x7C)
+    assert sentinel == 0xCAFEBABE, (
+        f"MI path did not recover after the reset-asymmetry sequence: expected 0xCAFEBABE from "
+        f"unmapped reg 0x7C, got {sentinel:#010x}"
+    )
+
+
+async def _case_data_logger_mi_smoke(dut, dev, test):
+    """(NEW) MI_SPLITTER_PLUS_GEN's port2 (base 0x200, "Data Logger for latency meter" -- see
+    user_core_test_arch.vhd's MI_SPLIT_BASES) is otherwise never addressed by any test in this
+    suite: its OUTPUT_PIPES_G(2) pipeline register (comp/base/misc/pipe/pipe_arch.vhd's own
+    fsm_states) never transfers even a FIRST item (stuck at S_0 the whole run), unlike ports 0/1
+    which do get exercised elsewhere. One raw MI read at the Data Logger's own CTRL register
+    (offset 0 within its window -- a plain read-only status word, see comp/debug/data_logger.vhd's
+    MI_CTRL_ADDR/mi_ctrl_p, no side effects on a read) is enough to route a transaction through
+    that pipe and confirm the whole splitter path -- not just ports 0/1 -- is wired up correctly.
+    Uses the raw MIRequestDriver directly (dev.mi[0], the same transport dev.nfb's own DevTree-based
+    comp_open()/read32() ultimately calls into -- see IuventusUserCoreNfbDevice's own port comment)
+    rather than nfb.comp_open(), since this DevTree has no "netcope,latency_meter" node wired up for
+    this component-level harness."""
+    got = await dev.mi[0].read32(0x200)
+    dut._log.info(f"Data Logger CTRL reg (0x200) read back: {got:#010x}")
+
+
+async def _case_write_gen_burst_mode(dut, dev, test):
+    """(NEW) mfb_generator.vhd's own burst_fsm_pst (BURST_FSM_STATE_T: S_TRIGGER_DETECT=0,
+    S_BURST_COUNTDOWN=1) never visits S_BURST_COUNTDOWN anywhere else in this suite. Two things
+    must both hold for the FSM to ever leave S_TRIGGER_DETECT (burst_mod_fsm_out_logic's own entry
+    condition): CTRL_CHAN_INC's CONFIG[1]/bit9 ("bursting"/burst_mode_en) must be '1' (with it '0'
+    the mux `gen_vld <= (others => CTRL_EN) when burst_mode_en = '0' else gen_vld_regions` instead
+    selects plain continuous streaming -- see mfb_generator.vhd's own register-map comment), AND
+    burst_size > REGIONS (REGIONS=1, DMA_MFB_REGIONS's entity default, unchanged by this suite's
+    elaboration -- see user_core_test_arch.vhd's mfb_generator_i instantiation). IuventusTest.
+    __init__ sets `self.gen.bursting = True` once, but every dev._reset() between cases (this
+    orchestrator's own convention) clears the generator's registers back to their power-on default
+    (bursting=False) and NOTHING re-asserts it afterwards -- so every OTHER case in this file that
+    calls disp_wr_req (all with burst_size=1) is actually, silently, running in continuous-
+    streaming mode (bursting=False), not "burst_size=1, one-shot" mode as their own docstrings
+    assumed; that misconception is what a purely burst_size=3 attempt here first ran into (it
+    failed: burst_fsm_pst never left S_TRIGGER_DETECT, because bursting read back False). This
+    case re-asserts bursting=True explicitly right before dispatching (burst_size=3 > REGIONS),
+    and burst_fsm_pst is sampled every DMA_CLK cycle via a white-box peek
+    (dut.mfb_generator_i.mfb_generator_i.burst_fsm_pst) to confirm S_BURST_COUNTDOWN is actually
+    entered, on top of the existing scoreboard-based frame-content check (mirrors
+    _case_one_write_frame's own pattern -- NUM_QUEUES=1 makes the channel-grouping side of
+    burst_size unobservable in the predicted QID anyway, see RoundRobinQid.next_qid())."""
+    await e(test.set_queue_range)(1)
+    await aset(test.gen, "bursting", True)
+
+    seen_countdown = False
+
+    async def _monitor():
+        nonlocal seen_countdown
+        while True:
+            await RisingEdge(dut.DMA_CLK)
+            await ReadOnly()
+            if int(dut.mfb_generator_i.mfb_generator_i.burst_fsm_pst.value) == 1:
+                seen_countdown = True
+
+    cocotb.start_soon(_monitor())
+
+    sb = Scoreboard("wr_frame[burst_mode]")
+    model = WriteFrameModel(num_queues=NUM_QUEUES)
+
+    def on_frame(trans):
+        lba_ptr = trans.meta & ((1 << 64) - 1)
+        qid = trans.meta >> 64
+        sb.check(ExpectedWrFrame(data=bytes(trans.data), lba_ptr=lba_ptr, qid=qid))
+        if sb.checked >= 1:
+            dev.dma_model.wr_frame_accept_cb = None
+
+    dev.dma_model.wr_frame_accept_cb = on_frame
+
+    lba_ptr = 0x9000
+    lba_num = 0  # 1 sector
+    sb.expect(model.next_frame(lba_ptr, (lba_num + 1) * 512))
+
+    await e(test.disp_wr_req)(lba_ptr, lba_num, 3)  # burst_size=3 > REGIONS(1)
+
+    ok = await _wait_until(lambda: sb.checked >= 1, dut, max_cycles=1000)
+    assert ok, "timed out waiting for the burst-mode write frame to be accepted"
+    sb.assert_empty()
+
+    # A few extra cycles: burst_fsm_pst's own countdown continues region-by-region for a bit past
+    # the confirmed frame's own accept.
+    for _ in range(20):
+        await RisingEdge(dut.DMA_CLK)
+
+    await aset(test.gen, "enabled", False)
+
+    assert seen_countdown, (
+        "burst_fsm_pst never visited S_BURST_COUNTDOWN (index 1) with burst_size=3 > REGIONS=1 -- "
+        "mfb_generator.vhd's burst_mod_fsm_out_logic entry condition regressed"
+    )
+
+
 async def _case_integrity_checker(dut, dev, test):
     """(NEW) Drive the IUVENTUS_INTEGRITY_CHECKER end-to-end -- the same MI sequence
     apps/iuventus/sw/integ_run.py uses on real hardware -- against the DMA model's write/read-back
@@ -718,9 +1026,9 @@ async def _case_integrity_checker(dut, dev, test):
         got = await e(c.read32)(0x54)
         assert err == 0, f"integrity check found {err} mismatch(es): first exp=0x{exp:08x} got=0x{got:08x}"
 
-        # OOR ABORT: a sweep past the namespace must ABORT (STS_OP_ERR, DONE), not hang. The
-        # checker WRITEs first, so an OOR sweep trips the write-OOR completion; S_WR_WAIT aborts
-        # to DONE instead of a read that would wedge S_RD_DATA.
+        # OOR ABORT: a sweep past the namespace must ABORT (STS_OP_ERR, DONE), not hang. WRITEs
+        # go first, so an OOR sweep trips the write-OOR completion and S_WR_WAIT aborts to DONE
+        # rather than a read that wedges S_RD_DATA.
         dev.dma_model.lba_space_size = 4096   # sectors
         if (await e(c.read32)(0x40)) & 0x2:   # re-arm from the previous DONE
             await e(c.write32)(0x30, 0x1)
@@ -747,6 +1055,113 @@ async def _case_integrity_checker(dut, dev, test):
     finally:
         dev.dma_model.data_integrity = False
         dev.dma_model.lba_space_size = None
+
+
+
+async def _case_latency_qd1(dut, dev, test, mode: str = "rd"):
+    """Latency mode must keep exactly ONE command in flight while the queue stays QD64.
+
+    LATENCY_METER pairs starts to completions positionally (no tag), so any concurrency pairs a
+    completion with the wrong start. Before the fix NVME_RD_REQ_VLD was gated only on SQ room, so a
+    latency run issued back-to-back until the page pool emptied; the run could then never retire its
+    programmed operation count, the measurement FSM never left S_COUNT_TESTING_PACKETS and
+    tst_finished never asserted -- the host hung forever polling it. This drives a real measurement
+    run and requires (a) never more than one outstanding, (b) the gate actually engages, and
+    (c) tst_finished asserts. Against the pre-fix RTL (b) never happens and (c) times out."""
+    # lat_meas_mode LAST: tst_mode/tst_addressing also write TST_SEQ_RAND_SEL (0x20) and would
+    # clear bit 4 again.
+    await e(lambda: setattr(test, "tst_mode", mode))()
+    await e(lambda: setattr(test, "tst_addressing", "seq"))()
+    # set_bit() preserves tst_sel_reg -- a whole-register write clobbers the read-generator enable.
+    # Arm the gate and WAIT for it to reach the DUT before dispatching: the MI write is slower than
+    # the first frames, so a burst would launch ungated.
+    await e(lambda: setattr(test, "lat_meas_mode", True))()
+    for _ in range(400):
+        await RisingEdge(dut.DMA_CLK)
+    assert int(dut.lat_meas_mode.value) == 1, (
+        f"lat_meas_mode did not reach the DUT even on a direct write32 "
+        f"(tst_sel_reg={int(dut.tst_sel_reg.value)}, contig={int(dut.contig_test.value)})"
+    )
+    # Bypass the >=1000 guard on IuventusTest.tst_iterations: that minimum exists for statistical
+    # confidence on hardware, not for this structural check, and 1000 QD1 round trips does not fit
+    # the sim budget.
+    if mode == "wr":
+        await e(lambda: setattr(test.gen, "bursting", True))()
+        await e(lambda: test.disp_wr_req(0, 3, 8))()
+    await e(lambda: test._comp.write32(0x1C, 8))()  # IuventusTestRegMap.TST_ITERATIONS
+
+    async def _lat_monitor():
+        """Runs for the whole case, not just the measurement loop -- the previous version stopped
+        at tst_finished and so missed everything after it, which is where the violation was."""
+        while True:
+            await RisingEdge(dut.DMA_CLK)
+            it = int(dut.lat_meas_fifo_items.value)
+            if int(dut.lat_start_event_s.value) == 1 or int(dut.NVME_OP_STAT_VLD.value) == 1 or it > 1:
+                dut._log.debug(
+                    f"LATMON items={it} outst={int(dut.lat_outstanding_r.value)} "
+                    f"start={int(dut.lat_start_event_s.value)} opstat={int(dut.NVME_OP_STAT_VLD.value)} "
+                    f"wr_sof={int(dut.NVME_WR_MFB_SOF.value)} wr_eof={int(dut.NVME_WR_MFB_EOF.value)} "
+                    f"wr_src={int(dut.NVME_WR_MFB_SRC_RDY.value)} inframe={int(dut.lat_wr_in_frame_r.value)} "
+                    f"wrgate={int(dut.lat_wr_issue_ok.value)} newfr={int(dut.lat_wr_new_frame_s.value)} "
+                    f"rdvld={int(dut.NVME_RD_REQ_VLD.value)} mode={int(dut.lat_meas_mode.value)}")
+    mon = cocotb.start_soon(_lat_monitor())
+
+    # Read issue is gated by lat_meas_issue_ok, write issue at the frame boundary by
+    # lat_wr_issue_ok -- assert on whichever this mode actually drives.
+    gate = dut.lat_meas_issue_ok if mode == "rd" else dut.lat_wr_issue_ok
+    saw_gated = False
+    finished = False
+    trace = []
+    for _ in range(60000):
+        await RisingEdge(dut.DMA_CLK)
+        items = int(dut.lat_meas_fifo_items.value)
+        # Rolling trace so a violation reports HOW it got there instead of just that it did.
+        snap = (
+            f"items={items} outst={int(dut.lat_outstanding_r.value)} "
+            f"start={int(dut.lat_start_event_s.value)} opstat={int(dut.NVME_OP_STAT_VLD.value)} "
+            f"wr_sof={int(dut.NVME_WR_MFB_SOF.value)} wr_eof={int(dut.NVME_WR_MFB_EOF.value)} "
+            f"wr_src={int(dut.NVME_WR_MFB_SRC_RDY.value)} wr_dst={int(dut.NVME_WR_MFB_DST_RDY.value)} "
+            f"inframe={int(dut.lat_wr_in_frame_r.value)} wrgate={int(dut.lat_wr_issue_ok.value)} "
+            f"rdvld={int(dut.NVME_RD_REQ_VLD.value)} rdrdy={int(dut.NVME_RD_REQ_RDY.value)}"
+        )
+        trace.append(snap)
+        if len(trace) > 14:
+            trace.pop(0)
+        if items > 1:
+            dut._log.error("LAT QD1 VIOLATION, last cycles:\n  " + "\n  ".join(trace))
+        assert items <= 1, (
+            f"{items} operations outstanding during a latency measurement -- the meter pairs "
+            f"positionally, so this reports a wrong latency"
+        )
+        if int(gate.value) == 0:
+            saw_gated = True
+        # The write gate must never bite mid-frame -- that would stall a partial frame.
+        if mode == "wr" and int(dut.lat_wr_in_frame_r.value) == 1:
+            assert int(dut.lat_wr_issue_ok.value) == 1, \
+                "write gate withheld SRC_RDY mid-frame"
+        if saw_gated and int(dut.tst_finished.value) == 1:
+            finished = True
+            break
+
+    assert saw_gated, (
+        "the QD1 gate never engaged -- the generator was never actually throttled, so this run "
+        "did not exercise the fix"
+    )
+    assert finished, (
+        "tst_finished never asserted after the measurement run -- this is the hang: the FSM cannot "
+        "leave S_COUNT_TESTING_PACKETS and the host polls forever"
+    )
+
+    await e(lambda: setattr(test, "lat_meas_mode", False))()
+    # Same propagation budget as arming it: an MI write needs far more than a few DMA_CLK edges
+    # to reach the register through the nfb bridge.
+    for _ in range(400):
+        await RisingEdge(dut.DMA_CLK)
+    assert int(dut.lat_meas_mode.value) == 0, "lat_meas_mode did not clear"
+    assert int(dut.lat_meas_issue_ok.value) == 1 and int(dut.lat_wr_issue_ok.value) == 1, (
+        "a serialisation gate is still engaged with latency mode off -- it would throttle "
+        "throughput runs"
+    )
 
 
 @cocotb.test(timeout_time=2000, timeout_unit='us')
@@ -777,6 +1192,10 @@ async def test_user_core_reference_model(dut):
 
     await dev._reset()
     dev.dma_model.reset()
+    await _case_command_identity(dut, dev, test)
+
+    await dev._reset()
+    dev.dma_model.reset()
     await _case_one_write_frame(dut, dev, test)
 
     await dev._reset()
@@ -786,6 +1205,14 @@ async def test_user_core_reference_model(dut):
     await dev._reset()
     dev.dma_model.reset()
     await _case_small_read_burst(dut, dev, test, lba_num=3)
+
+    await dev._reset()
+    dev.dma_model.reset()
+    await _case_latency_qd1(dut, dev, test, mode="rd")
+
+    await dev._reset()
+    dev.dma_model.reset()
+    await _case_latency_qd1(dut, dev, test, mode="wr")
 
     # --- Stage 3: real iuventus_rw_test.py CLI-path functions + directed corner cases ---------
     await dev._reset()
@@ -802,6 +1229,10 @@ async def test_user_core_reference_model(dut):
 
     await dev._reset()
     dev.dma_model.reset()
+    await _case_throughput_multi_point(dut, dev, test, n_queues=NUM_QUEUES)
+
+    await dev._reset()
+    dev.dma_model.reset()
     await _case_rd_burst_and_rand(dut, dev, test)
 
     await dev._reset()
@@ -815,3 +1246,15 @@ async def test_user_core_reference_model(dut):
     await dev._reset()
     dev.dma_model.reset()
     await _case_integrity_checker(dut, dev, test)
+
+    await dev._reset()
+    dev.dma_model.reset()
+    await _case_mi_async_reset_asymmetry(dut, dev, test)
+
+    await dev._reset()
+    dev.dma_model.reset()
+    await _case_data_logger_mi_smoke(dut, dev, test)
+
+    await dev._reset()
+    dev.dma_model.reset()
+    await _case_write_gen_burst_mode(dut, dev, test)

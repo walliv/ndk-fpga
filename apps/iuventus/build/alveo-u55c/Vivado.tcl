@@ -58,10 +58,29 @@ set SYNTH_FLAGS(PROJ_ONLY) "0"
 # "1" ... synthesize the project
 set SYNTH_FLAGS(SYNTH_ONLY) "0"
 
-# Timing-closure directives for the N=4 x QD64 build (the QD64 config lands slightly negative on
-# the CQ/WRBUFF URAM-read path; AggressiveExplore route + post-place phys_opt closed it before).
+# Timing-closure directives for the N=4 x QD64 build. The directive search is exhausted here:
+# place ExtraTimingOpt with route AggressiveExplore measured best, and both alternatives tried
+# (place Explore, route NoTimingRelaxation) came out clearly worse.
 set SYNTH_FLAGS(ROUTE_DIRECTIVE)           "AggressiveExplore"
+# AggressiveExplore, not Explore: on this design Explore measured WNS -0.278 / TNS -378 against
+# AggressiveExplore's -0.191 / -210 on identical RTL.
 set SYNTH_FLAGS(PPLACE_PHYS_OPT_DIRECTIVE) "AggressiveExplore"
+# Post-route phys_opt: build/Vivado.inc.tcl only enables STEPS.POST_ROUTE_PHYS_OPT_DESIGN when
+# this variable exists, and no other app in the repo sets it. It is Vivado's last-mile step, worth
+# having on a design whose margin is tens of ps.
+set SYNTH_FLAGS(PROUTE_PHYS_OPT_DIRECTIVE) "AggressiveExplore"
+# PLACE_DIRECTIVE stays ExtraTimingOpt. AltSpreadLogic_medium trades timing for spreading, the
+# wrong trade on a design whose worst paths are inside the CQ write buffer.
+set SYNTH_FLAGS(PLACE_DIRECTIVE)           "ExtraTimingOpt"
+
+# Retiming is ON: with ~16 logic levels either side of a pipeline register deep in the DMA,
+# moving work across it by hand is zero-sum. Re-measure before disabling.
+set SYNTH_FLAGS(RETIMING)                  "true"
+
+# power_opt_design stays ON. Its clock-enable gating cells can land on a critical path, but turning
+# the step off costs about 0.14 ns across the whole design: the logic optimisation it also performs
+# is worth more than the gating costs.
+set SYNTH_FLAGS(POWER_OPT_DESIGN)          "true"
 
 # Associative array which is propagated throughout Modules.tcl files
 set APP_ARCHGRP(CORE_BASE)       $CORE_BASE
