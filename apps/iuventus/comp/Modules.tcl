@@ -68,6 +68,7 @@ if {$ARCHGRP_ARR(USR_CORE_ARCH) == "FULL"} {
     lappend MOD "$ENTITY_BASE/user_core_full_arch.vhd"
 } elseif {$ARCHGRP_ARR(USR_CORE_ARCH) == "TEST"} {
     lappend COMPONENTS [list "MI_ASYNC"                $MI_ASYNC_BASE        "FULL" ]
+    lappend COMPONENTS [list "FIFOX"                   $FIFOX_BASE           "FULL" ]
     lappend COMPONENTS [list "MFB_GENERATOR_MI32"      $MFB_GEN_BASE         "FULL" ]
     lappend COMPONENTS [list "MFB_RECONFIGURATOR"      $MFB_RECONF_BASE      "FULL" ]
     lappend COMPONENTS [list "MFB_PIPE"                $MFB_PIPE_BASE        "FULL" ]
@@ -77,6 +78,7 @@ if {$ARCHGRP_ARR(USR_CORE_ARCH) == "FULL"} {
     lappend COMPONENTS [list "EVENT_COUNTER"           $EVENT_CNTR_BASE      "FULL" ]
 
     lappend MOD "$ENTITY_BASE/iuventus_integrity_checker.vhd"
+    lappend MOD "$ENTITY_BASE/user_core_if_pipe.vhd"
     lappend MOD "$ENTITY_BASE/user_core_test_arch.vhd"
 } elseif {$ARCHGRP_ARR(USR_CORE_ARCH) == "GROUPBY"} {
     lappend COMPONENTS [list "MI_ASYNC"      $MI_ASYNC_BASE                       "FULL"]
@@ -87,7 +89,7 @@ if {$ARCHGRP_ARR(USR_CORE_ARCH) == "FULL"} {
 
     lappend MOD "$ENTITY_BASE/iuventus_groupby_lane.vhd"
     lappend MOD "$ENTITY_BASE/iuventus_groupby_engine.vhd"
-    lappend MOD "$ENTITY_BASE/groupby_if_pipe.vhd"
+    lappend MOD "$ENTITY_BASE/user_core_if_pipe.vhd"
     lappend MOD "$ENTITY_BASE/user_core_groupby_arch.vhd"
 } else {
     error "Unknown USR_CORE_ARCH '$ARCHGRP_ARR(USR_CORE_ARCH)'. Without a matching arm the design\

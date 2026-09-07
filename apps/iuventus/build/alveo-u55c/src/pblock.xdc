@@ -24,13 +24,15 @@ resize_pblock [get_pblocks pblock_wrbuff_drain] -add {CLOCKREGION_X4Y0:CLOCKREGI
 set_property IS_SOFT 0 [get_pblocks pblock_wrbuff_drain]
 
 
-create_pblock pblock_groupby
-# Everything the architecture builds except the interface pipeline. Naming the direct children
-# rather than user_core_i itself is what catches the MI register file, which is synthesised at the
-# architecture level and has no instance name of its own to list.
-add_cells_to_pblock [get_pblocks pblock_groupby] [get_cells -filter {NAME !~ "*if_pipe_i*"} core_logic_i/user_core_i/*]
-# The engine has no reason to sit next to the DMA and every reason not to: SLR0's left half is empty
-# while X4-X7 hold the DMA and PCIe. if_pipe_i stays out so the placer can spread its register
-# stages, data and reset alike, across the gap.
-resize_pblock [get_pblocks pblock_groupby] -add {CLOCKREGION_X0Y0:CLOCKREGION_X3Y3}
-set_property IS_SOFT 0 [get_pblocks pblock_groupby]
+create_pblock pblock_user_core
+# Everything the selected USER_CORE architecture builds, except its interface pipeline. Naming the
+# direct children rather than user_core_i itself is what catches each architecture's MI register
+# file, which is synthesised at the architecture level and has no instance name of its own to list.
+# The filter covers both architectures: GROUPBY names its pipeline if_pipe_i and TEST names it
+# user_core_if_pipe_i, so matching the shared substring excludes whichever one is built.
+add_cells_to_pblock [get_pblocks pblock_user_core] [get_cells -filter {NAME !~ "*if_pipe_i*"} core_logic_i/user_core_i/*]
+# The user core has no reason to sit next to the DMA and every reason not to: SLR0's left half is
+# empty while X4-X7 hold the DMA and PCIe. The pipeline stays out so the placer can spread its
+# register stages, data and reset alike, across the gap.
+resize_pblock [get_pblocks pblock_user_core] -add {CLOCKREGION_X0Y0:CLOCKREGION_X3Y3}
+set_property IS_SOFT 0 [get_pblocks pblock_user_core]

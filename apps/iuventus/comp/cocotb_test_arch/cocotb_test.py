@@ -357,9 +357,9 @@ async def _case_small_read_burst(dut, dev, test, lba_num):
     await aset(test, "contig_test", False)
     await aset(test, "tst_iterations", iterations)  # fires tst_trigg -- must be written LAST
 
-    # EVCR cross-check: wait for the first interval, confirm MI TOTAL_EVENTS matches this
-    # test's tally, read back before the next interval completes. Tallied from OP_STAT
-    # pins, since an accept-based tally would be off by what's in flight.
+    # EVCR cross-check: confirm MI-visible TOTAL_EVENTS matches this test's own completion tally
+    # for the first interval, read back before the next interval completes. Tallied from the
+    # architecture side of the pipeline, which leads the pins by its depth.
     internal = dut.iops_cntr_i
     prev_int_reached = False
     first_interval_events = None
@@ -367,15 +367,18 @@ async def _case_small_read_burst(dut, dev, test, lba_num):
     for _ in range(1000):
         await RisingEdge(dut.DMA_CLK)
         await ReadOnly()
-        if (bool(dut.NVME_OP_STAT_VLD.value)
-                and int(dut.NVME_OP_STAT_CODE.value) == OP_STAT_CODE_SUCCESS):
-            completions_since_reached += 1
+        # TOTAL_EVENTS latches the count through the PREVIOUS cycle, so a completion coincident
+        # with int_reached belongs to the next interval: close the interval before counting it.
         reached = bool(internal.int_reached.value)
+        pulse = (bool(dut.core_op_stat_vld.value)
+                 and int(dut.core_op_stat_code.value) == OP_STAT_CODE_SUCCESS)
         if reached and not prev_int_reached:
             first_interval_events = completions_since_reached
             completions_since_reached = 0
             break
         prev_int_reached = reached
+        if pulse:
+            completions_since_reached += 1
 
     assert first_interval_events is not None, (
         f"no EVCR interval (evcr_interval_cycles={EVCR_INTERVAL_CYCLES}) completed within 1000 "
@@ -551,19 +554,19 @@ async def _case_cli_throughput_point(dut, dev, test, n_queues, addressing="seq",
     clean_interval_events = None
     completions_since_reached = 0
     cycles_run = 0
-    # Stop as soon as the second interval boundary is captured, so evcr_total_events is read
-    # before a third interval completes, then keep running settle_cycles to accumulate more
-    # scoreboard-checked traffic.
+    # Stop at the second interval boundary (so evcr_total_events reads back before a THIRD
+    # interval completes), then keep running the remaining settle_cycles budget purely to
+    # accumulate more scoreboard-checked traffic.
     for _ in range(settle_cycles):
         await RisingEdge(dut.DMA_CLK)
         await ReadOnly()
         cycles_run += 1
-        # Tally the DUT's own successful-completion pulses: evcr_event_vld counts completions, so an
-        # accept-based tally would be off by whatever is in flight at the interval boundary.
-        if (bool(dut.NVME_OP_STAT_VLD.value)
-                and int(dut.NVME_OP_STAT_CODE.value) == OP_STAT_CODE_SUCCESS):
-            completions_since_reached += 1
+        # Tally successful-completion pulses (an accept-based tally would be off by what's in
+        # flight at the boundary): TOTAL_EVENTS latches through the PREVIOUS cycle, so a completion
+        # coincident with int_reached belongs to the next interval -- close it first.
         reached = bool(internal.int_reached.value)
+        pulse = (bool(dut.core_op_stat_vld.value)
+                 and int(dut.core_op_stat_code.value) == OP_STAT_CODE_SUCCESS)
         if reached and not prev_int_reached:
             intervals_seen += 1
             # Take the first FULLY-OBSERVED interval containing a completion; interval 1 is
@@ -575,6 +578,8 @@ async def _case_cli_throughput_point(dut, dev, test, n_queues, addressing="seq",
                 break
             completions_since_reached = 0
         prev_int_reached = reached
+        if pulse:
+            completions_since_reached += 1
 
     assert clean_interval_events is not None, (
         f"no fully-observed EVCR interval containing a completion within {settle_cycles} DMA_CLK "
@@ -823,24 +828,29 @@ async def _case_mi_async_reset_asymmetry(dut, dev, test):
     the rest of the suite."""
     NO_RESET, MASTER_RESET, SLAVE_RESET = 0, 1, 2
 
+    # The architecture runs off the interface pipeline's delayed reset copy, so the DMA-side reset
+    # reaches MI_ASYNC a few DMA_CLK cycles after DMA_RST moves, on top of the FSM's own
+    # cross-domain handshake. Settle long enough that neither is being raced.
+    SETTLE = 20
+
     async def _settle(cycles):
         for _ in range(cycles):
             await RisingEdge(dut.MI_CLK)
 
     dut.MI_RST.value = 0
     dut.DMA_RST.value = 0
-    await _settle(5)
+    await _settle(SETTLE)
     assert int(dut.mi_async_i.p_state.value) == NO_RESET, "did not start in NO_RESET"
 
     # MI_RST alone: RESET_M='1' while reset_s_sync(0) stays '0' -> MASTER_RESET.
     dut.MI_RST.value = 1
-    await _settle(5)
+    await _settle(SETTLE)
     got = int(dut.mi_async_i.p_state.value)
     assert got == MASTER_RESET, (
         f"expected MASTER_RESET ({MASTER_RESET}) with MI_RST alone asserted, got {got}"
     )
     dut.MI_RST.value = 0
-    await _settle(5)
+    await _settle(SETTLE)
     assert int(dut.mi_async_i.p_state.value) == NO_RESET, (
         "did not return to NO_RESET after MI_RST alone was cleared"
     )
@@ -848,13 +858,13 @@ async def _case_mi_async_reset_asymmetry(dut, dev, test):
     # DMA_RST alone: reset_s_sync(0)='1' (synced from RESET_S=DMA_RST) while RESET_M stays '0'
     # -> SLAVE_RESET.
     dut.DMA_RST.value = 1
-    await _settle(5)
+    await _settle(SETTLE)
     got = int(dut.mi_async_i.p_state.value)
     assert got == SLAVE_RESET, (
         f"expected SLAVE_RESET ({SLAVE_RESET}) with DMA_RST alone asserted, got {got}"
     )
     dut.DMA_RST.value = 0
-    await _settle(5)
+    await _settle(SETTLE)
     assert int(dut.mi_async_i.p_state.value) == NO_RESET, (
         "did not return to NO_RESET after DMA_RST alone was cleared"
     )
@@ -1079,10 +1089,10 @@ async def _case_latency_qd1(dut, dev, test, mode: str = "rd"):
         while True:
             await RisingEdge(dut.DMA_CLK)
             it = int(dut.lat_meas_fifo_items.value)
-            if int(dut.lat_start_event_s.value) == 1 or int(dut.NVME_OP_STAT_VLD.value) == 1 or it > 1:
+            if int(dut.lat_start_event_s.value) == 1 or int(dut.core_op_stat_vld.value) == 1 or it > 1:
                 dut._log.debug(
                     f"LATMON items={it} outst={int(dut.lat_outstanding_r.value)} "
-                    f"start={int(dut.lat_start_event_s.value)} opstat={int(dut.NVME_OP_STAT_VLD.value)} "
+                    f"start={int(dut.lat_start_event_s.value)} opstat={int(dut.core_op_stat_vld.value)} "
                     f"wr_sof={int(dut.NVME_WR_MFB_SOF.value)} wr_eof={int(dut.NVME_WR_MFB_EOF.value)} "
                     f"wr_src={int(dut.NVME_WR_MFB_SRC_RDY.value)} inframe={int(dut.lat_wr_in_frame_r.value)} "
                     f"wrgate={int(dut.lat_wr_issue_ok.value)} newfr={int(dut.lat_wr_new_frame_s.value)} "
@@ -1101,7 +1111,7 @@ async def _case_latency_qd1(dut, dev, test, mode: str = "rd"):
         # Rolling trace so a violation reports HOW it got there instead of just that it did.
         snap = (
             f"items={items} outst={int(dut.lat_outstanding_r.value)} "
-            f"start={int(dut.lat_start_event_s.value)} opstat={int(dut.NVME_OP_STAT_VLD.value)} "
+            f"start={int(dut.lat_start_event_s.value)} opstat={int(dut.core_op_stat_vld.value)} "
             f"wr_sof={int(dut.NVME_WR_MFB_SOF.value)} wr_eof={int(dut.NVME_WR_MFB_EOF.value)} "
             f"wr_src={int(dut.NVME_WR_MFB_SRC_RDY.value)} wr_dst={int(dut.NVME_WR_MFB_DST_RDY.value)} "
             f"inframe={int(dut.lat_wr_in_frame_r.value)} wrgate={int(dut.lat_wr_issue_ok.value)} "

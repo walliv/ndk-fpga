@@ -456,10 +456,10 @@ begin
         WR_MFB_DST_RDY  => eng_wr_mfb_dst_rdy
     );
 
-    -- Interface pipeline: the engine sits far from the DMA, so every interface between them is
-    -- registered here; the request path also expands the engine's scalar valid into the
-    -- per-queue vector the entity carries.
-    if_pipe_i : entity work.GROUPBY_IF_PIPE
+    -- Interface pipeline: the engine sits in its own corner of the die, far from the DMA. Every
+    -- interface between them is registered here; the request path also expands the engine's
+    -- scalar valid into the per-queue vector the entity carries.
+    if_pipe_i : entity work.USER_CORE_IF_PIPE
     generic map (
         NUM_QUEUES      => NUM_QUEUES,
         LBA_PTR_W       => SQE_LBA_PTR_W,
@@ -480,13 +480,17 @@ begin
         ENG_RD_REQ_QID     => eng_rd_req_qid,
         ENG_RD_REQ_VLD     => eng_rd_req_vld,
         ENG_RD_REQ_RDY     => eng_rd_req_rdy,
+        ENG_RD_REQ_CID     => open,
+        ENG_RD_REQ_CID_VLD => open,
 
         ENG_OP_STAT_TYPE => eng_op_stat_type,
         ENG_OP_STAT_CODE => eng_op_stat_code,
         ENG_OP_STAT_QID  => eng_op_stat_qid,
+        ENG_OP_STAT_CID  => open,
         ENG_OP_STAT_VLD  => eng_op_stat_vld,
 
         ENG_RD_MFB_DATA    => eng_rd_mfb_data,
+        ENG_RD_MFB_META    => open,
         ENG_RD_MFB_SOF     => eng_rd_mfb_sof,
         ENG_RD_MFB_EOF     => eng_rd_mfb_eof,
         ENG_RD_MFB_SOF_POS => eng_rd_mfb_sof_pos,
@@ -508,13 +512,17 @@ begin
         DMA_RD_REQ_QID     => NVME_RD_REQ_QID,
         DMA_RD_REQ_VLD     => NVME_RD_REQ_VLD,
         DMA_RD_REQ_RDY     => NVME_RD_REQ_RDY,
+        DMA_RD_REQ_CID     => NVME_RD_REQ_CID,
+        DMA_RD_REQ_CID_VLD => NVME_RD_REQ_CID_VLD,
 
         DMA_OP_STAT_TYPE => NVME_OP_STAT_TYPE,
         DMA_OP_STAT_CODE => NVME_OP_STAT_CODE,
         DMA_OP_STAT_QID  => NVME_OP_STAT_QID,
+        DMA_OP_STAT_CID  => NVME_OP_STAT_CID,
         DMA_OP_STAT_VLD  => NVME_OP_STAT_VLD,
 
         DMA_RD_MFB_DATA    => NVME_RD_MFB_DATA,
+        DMA_RD_MFB_META    => NVME_RD_MFB_META,
         DMA_RD_MFB_SOF     => NVME_RD_MFB_SOF,
         DMA_RD_MFB_EOF     => NVME_RD_MFB_EOF,
         DMA_RD_MFB_SOF_POS => NVME_RD_MFB_SOF_POS,
