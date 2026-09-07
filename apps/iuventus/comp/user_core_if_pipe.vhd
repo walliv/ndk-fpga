@@ -1,4 +1,4 @@
--- groupby_if_pipe.vhd: pipeline registers between the GROUPBY engine and the DMA interfaces
+-- user_core_if_pipe.vhd: pipeline registers between a USER_CORE architecture and the DMA
 -- Copyright (C) 2026 Universitaet Heidelberg, Institut fuer Technische Informatik (ZITI)
 -- Author(s): Vladislav Valek <vladislav.valek@stud.uni-heidelberg.de>
 --
@@ -11,16 +11,19 @@ use ieee.numeric_std.all;
 use work.math_pack.all;
 use work.type_pack.all;
 
--- Adds STAGES of registers so engine and DMA can sit far apart. The read-request path is
--- credit-based: the DMA's per-queue accept window is mirrored into credits at the engine, so
+-- Adds STAGES of registers to every interface between a USER_CORE architecture and the DMA, so the
+-- two can be placed far apart. The read-request path is credit-based: the DMA's per-queue accept
+-- window is mirrored into credits at the core, so both long spans carry only forward registers and
 -- neither end sees a stale ready.
-entity GROUPBY_IF_PIPE is
+entity USER_CORE_IF_PIPE is
     generic (
         NUM_QUEUES      : natural := 4;
         LBA_PTR_W       : natural := 64;
         MFB_REGION_SIZE : natural := 8;
         MFB_BLOCK_SIZE  : natural := 8;
         MFB_ITEM_WIDTH  : natural := 8;
+        -- Width of the completion's command identifier, carried with the operation status.
+        CID_W           : natural := 16;
         -- Register stages per direction on each interface.
         STAGES          : natural := 6;
         -- Per-queue request buffer at the DMA end; must exceed the 2*STAGES credit round trip so a
@@ -43,13 +46,17 @@ entity GROUPBY_IF_PIPE is
         ENG_RD_REQ_QID     : in  std_logic_vector(max(1, log2(NUM_QUEUES))-1 downto 0);
         ENG_RD_REQ_VLD     : in  std_logic;
         ENG_RD_REQ_RDY     : out std_logic_vector(NUM_QUEUES-1 downto 0);
+        ENG_RD_REQ_CID     : out std_logic_vector(CID_W-1 downto 0);
+        ENG_RD_REQ_CID_VLD : out std_logic;
 
         ENG_OP_STAT_TYPE : out std_logic;
         ENG_OP_STAT_CODE : out std_logic_vector(1 downto 0);
         ENG_OP_STAT_QID  : out std_logic_vector(max(1, log2(NUM_QUEUES))-1 downto 0);
+        ENG_OP_STAT_CID  : out std_logic_vector(CID_W-1 downto 0);
         ENG_OP_STAT_VLD  : out std_logic;
 
         ENG_RD_MFB_DATA    : out std_logic_vector(MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH-1 downto 0);
+        ENG_RD_MFB_META    : out std_logic_vector(max(1, log2(NUM_QUEUES)) + CID_W -1 downto 0);
         ENG_RD_MFB_SOF     : out std_logic_vector(0 downto 0);
         ENG_RD_MFB_EOF     : out std_logic_vector(0 downto 0);
         ENG_RD_MFB_SOF_POS : out std_logic_vector(max(1, log2(MFB_REGION_SIZE))-1 downto 0);
@@ -74,13 +81,17 @@ entity GROUPBY_IF_PIPE is
         DMA_RD_REQ_QID     : out std_logic_vector(max(1, log2(NUM_QUEUES))-1 downto 0);
         DMA_RD_REQ_VLD     : out std_logic_vector(NUM_QUEUES-1 downto 0);
         DMA_RD_REQ_RDY     : in  std_logic_vector(NUM_QUEUES-1 downto 0);
+        DMA_RD_REQ_CID     : in  std_logic_vector(CID_W-1 downto 0);
+        DMA_RD_REQ_CID_VLD : in  std_logic;
 
         DMA_OP_STAT_TYPE : in std_logic;
         DMA_OP_STAT_CODE : in std_logic_vector(1 downto 0);
         DMA_OP_STAT_QID  : in std_logic_vector(max(1, log2(NUM_QUEUES))-1 downto 0);
+        DMA_OP_STAT_CID  : in std_logic_vector(CID_W-1 downto 0);
         DMA_OP_STAT_VLD  : in std_logic;
 
         DMA_RD_MFB_DATA    : in  std_logic_vector(MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH-1 downto 0);
+        DMA_RD_MFB_META    : in  std_logic_vector(max(1, log2(NUM_QUEUES)) + CID_W -1 downto 0);
         DMA_RD_MFB_SOF     : in  std_logic_vector(0 downto 0);
         DMA_RD_MFB_EOF     : in  std_logic_vector(0 downto 0);
         DMA_RD_MFB_SOF_POS : in  std_logic_vector(max(1, log2(MFB_REGION_SIZE))-1 downto 0);
@@ -99,17 +110,18 @@ entity GROUPBY_IF_PIPE is
     );
 end entity;
 
-architecture FULL of GROUPBY_IF_PIPE is
+architecture FULL of USER_CORE_IF_PIPE is
 
     constant QID_W      : natural := max(1, log2(NUM_QUEUES));
     constant WR_META_W  : natural := QID_W + LBA_PTR_W;
+    constant RD_META_W  : natural := QID_W + CID_W;
     constant MFB_DATA_W : natural := MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH;
     constant SOF_POS_W  : natural := max(1, log2(MFB_REGION_SIZE));
     constant EOF_POS_W  : natural := log2(MFB_REGION_SIZE*MFB_BLOCK_SIZE);
     constant REQ_W      : natural := LBA_PTR_W + 8 + QID_W;
     constant FIFO_W     : natural := LBA_PTR_W + 8;
     constant CRED_W     : natural := log2(REQ_FIFO_ITEMS+1) + 1;
-    constant STAT_W     : natural := 1 + 2 + QID_W + 1;
+    constant STAT_W     : natural := 1 + 2 + QID_W + CID_W + 1;
 
     -- Forward request chain, engine to the per-queue buffers.
     type   req_pl_t is array (0 to STAGES) of std_logic_vector(REQ_W-1 downto 0);
@@ -148,6 +160,12 @@ architecture FULL of GROUPBY_IF_PIPE is
     -- Operation-status chain; the interface has no backpressure, so plain registers suffice.
     type   stat_pl_t is array (0 to STAGES) of std_logic_vector(STAT_W-1 downto 0);
     signal stat_pl : stat_pl_t;
+
+    type   cid_pl_t is array (0 to STAGES) of std_logic_vector(CID_W downto 0);
+    signal cid_pl : cid_pl_t;
+
+    type   rd_meta_t is array (0 to STAGES) of std_logic_vector(RD_META_W-1 downto 0);
+    signal rd_meta : rd_meta_t;
 
     type mfb_data_t is array (0 to STAGES) of std_logic_vector(MFB_DATA_W-1 downto 0);
     type mfb_meta_t is array (0 to STAGES) of std_logic_vector(WR_META_W-1 downto 0);
@@ -342,7 +360,7 @@ begin
     -- Operation status
     -- =========================================================================
 
-    stat_pl(0) <= DMA_OP_STAT_TYPE & DMA_OP_STAT_CODE & DMA_OP_STAT_QID & DMA_OP_STAT_VLD;
+    stat_pl(0) <= DMA_OP_STAT_TYPE & DMA_OP_STAT_CODE & DMA_OP_STAT_QID & DMA_OP_STAT_CID & DMA_OP_STAT_VLD;
 
     stat_chain_g : for s in 1 to STAGES generate
         stat_reg_p : process (CLK) is
@@ -358,14 +376,35 @@ begin
 
     ENG_OP_STAT_TYPE <= stat_pl(STAGES)(STAT_W-1);
     ENG_OP_STAT_CODE <= stat_pl(STAGES)(STAT_W-2 downto STAT_W-3);
-    ENG_OP_STAT_QID  <= stat_pl(STAGES)(QID_W downto 1);
+    ENG_OP_STAT_QID  <= stat_pl(STAGES)(QID_W + CID_W downto CID_W + 1);
+    ENG_OP_STAT_CID  <= stat_pl(STAGES)(CID_W downto 1);
     ENG_OP_STAT_VLD  <= stat_pl(STAGES)(0);
+
+    -- The accepted read's tag, which the DMA reports a few cycles behind the accept and which
+    -- nothing back-pressures, so it travels as plain registers rather than through a handshake.
+    cid_pl(0) <= DMA_RD_REQ_CID & DMA_RD_REQ_CID_VLD;
+
+    cid_chain_g : for s in 1 to STAGES generate
+        cid_reg_p : process (CLK) is
+        begin
+            if (rising_edge(CLK)) then
+                cid_pl(s) <= cid_pl(s-1);
+                if (rst_pl(s-1) = '1') then
+                    cid_pl(s)(0) <= '0';
+                end if;
+            end if;
+        end process;
+    end generate;
+
+    ENG_RD_REQ_CID     <= cid_pl(STAGES)(CID_W downto 1);
+    ENG_RD_REQ_CID_VLD <= cid_pl(STAGES)(0);
 
     -- =========================================================================
     -- Read data, DMA to engine
     -- =========================================================================
 
     rd_data(0)         <= DMA_RD_MFB_DATA;
+    rd_meta(0)         <= DMA_RD_MFB_META;
     rd_sof(0)          <= DMA_RD_MFB_SOF;
     rd_eof(0)          <= DMA_RD_MFB_EOF;
     rd_sof_pos(0)      <= DMA_RD_MFB_SOF_POS;
@@ -380,7 +419,7 @@ begin
             REGION_SIZE => MFB_REGION_SIZE,
             BLOCK_SIZE  => MFB_BLOCK_SIZE,
             ITEM_WIDTH  => MFB_ITEM_WIDTH,
-            META_WIDTH  => 0,
+            META_WIDTH  => RD_META_W,
             FAKE_PIPE   => false,
             USE_DST_RDY => true,
             PIPE_TYPE   => "SHREG",
@@ -390,7 +429,7 @@ begin
             CLK        => CLK,
             RESET      => rst_pl(s-1),
             RX_DATA    => rd_data(s-1),
-            RX_META    => (others => '0'),
+            RX_META    => rd_meta(s-1),
             RX_SOF_POS => rd_sof_pos(s-1),
             RX_EOF_POS => rd_eof_pos(s-1),
             RX_SOF     => rd_sof(s-1),
@@ -398,7 +437,7 @@ begin
             RX_SRC_RDY => rd_src_rdy(s-1),
             RX_DST_RDY => rd_dst_rdy(s-1),
             TX_DATA    => rd_data(s),
-            TX_META    => open,
+            TX_META    => rd_meta(s),
             TX_SOF_POS => rd_sof_pos(s),
             TX_EOF_POS => rd_eof_pos(s),
             TX_SOF     => rd_sof(s),
@@ -409,6 +448,7 @@ begin
     end generate;
 
     ENG_RD_MFB_DATA    <= rd_data(STAGES);
+    ENG_RD_MFB_META    <= rd_meta(STAGES);
     ENG_RD_MFB_SOF     <= rd_sof(STAGES);
     ENG_RD_MFB_EOF     <= rd_eof(STAGES);
     ENG_RD_MFB_SOF_POS <= rd_sof_pos(STAGES);
