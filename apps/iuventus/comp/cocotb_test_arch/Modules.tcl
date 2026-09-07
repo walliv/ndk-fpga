@@ -17,6 +17,8 @@ set DATA_LOGGER_BASE   "$OFM_PATH/comp/debug/data_logger"
 set LATENCY_METER_BASE "$OFM_PATH/comp/debug/latency_meter"
 set LFSR_GEN_BASE      "$OFM_PATH/comp/base/logic/lfsr_simple_random_gen"
 set EVENT_CNTR_BASE    "$OFM_PATH/comp/base/misc/event_counter"
+set MFB_PIPE_BASE      "$OFM_PATH/comp/mfb_tools/flow/pipe"
+set FIFOX_BASE         "$OFM_PATH/comp/base/fifo/fifox"
 
 # Packages
 lappend PACKAGES "$OFM_PATH/comp/base/pkg/math_pack.vhd"
@@ -34,8 +36,11 @@ lappend COMPONENTS [list "DATA_LOGGER"            $DATA_LOGGER_BASE    "FULL"]
 lappend COMPONENTS [list "LATENCY_METER"          $LATENCY_METER_BASE  "FULL"]
 lappend COMPONENTS [list "LFSR_SIMPLE_RANDOM_GEN" $LFSR_GEN_BASE       "FULL"]
 lappend COMPONENTS [list "EVENT_COUNTER"          $EVENT_CNTR_BASE     "FULL"]
+lappend COMPONENTS [list "MFB_PIPE"               $MFB_PIPE_BASE       "FULL"]
+lappend COMPONENTS [list "FIFOX"                  $FIFOX_BASE          "FULL"]
 
 # USER_CORE itself, straight from the app's own component directory (one level up).
 lappend MOD "$APP_COMP_BASE/iuventus_integrity_checker.vhd"
+lappend MOD "$APP_COMP_BASE/user_core_if_pipe.vhd"
 lappend MOD "$APP_COMP_BASE/user_core_ent.vhd"
 lappend MOD "$APP_COMP_BASE/user_core_test_arch.vhd"
