@@ -1,0 +1,158 @@
+{
+  "read_p0": [
+    {
+      "port": 0,
+      "cycles": 135186908,
+      "r_beats": 120946427,
+      "w_beats": 0,
+      "ar_stall": 4,
+      "aw_stall": 0
+    }
+  ],
+  "read_p1": [
+    {
+      "port": 1,
+      "cycles": 135207009,
+      "r_beats": 121055156,
+      "w_beats": 0,
+      "ar_stall": 4,
+      "aw_stall": 0
+    }
+  ],
+  "write_p0": [
+    {
+      "port": 0,
+      "cycles": 135206550,
+      "r_beats": 0,
+      "w_beats": 120800768,
+      "ar_stall": 0,
+      "aw_stall": 0
+    }
+  ],
+  "write_p1": [
+    {
+      "port": 1,
+      "cycles": 135170284,
+      "r_beats": 0,
+      "w_beats": 120767744,
+      "ar_stall": 0,
+      "aw_stall": 0
+    }
+  ],
+  "read_both": [
+    {
+      "port": 0,
+      "cycles": 135205974,
+      "r_beats": 121015439,
+      "w_beats": 0,
+      "ar_stall": 4,
+      "aw_stall": 0
+    },
+    {
+      "port": 1,
+      "cycles": 135205974,
+      "r_beats": 121015642,
+      "w_beats": 0,
+      "ar_stall": 4,
+      "aw_stall": 0
+    }
+  ],
+  "write_both": [
+    {
+      "port": 0,
+      "cycles": 135200421,
+      "r_beats": 0,
+      "w_beats": 120794704,
+      "ar_stall": 0,
+      "aw_stall": 0
+    },
+    {
+      "port": 1,
+      "cycles": 135200421,
+      "r_beats": 0,
+      "w_beats": 120794720,
+      "ar_stall": 0,
+      "aw_stall": 0
+    }
+  ],
+  "rw_p0": [
+    {
+      "port": 0,
+      "cycles": 135204894,
+      "r_beats": 52616592,
+      "w_beats": 65929248,
+      "ar_stall": 16768121,
+      "aw_stall": 0
+    }
+  ],
+  "rw_p1": [
+    {
+      "port": 1,
+      "cycles": 135204471,
+      "r_beats": 59120447,
+      "w_beats": 59166704,
+      "ar_stall": 17762217,
+      "aw_stall": 0
+    }
+  ],
+  "rw_both": [
+    {
+      "port": 0,
+      "cycles": 135262544,
+      "r_beats": 59168420,
+      "w_beats": 59192016,
+      "ar_stall": 18830215,
+      "aw_stall": 0
+    },
+    {
+      "port": 1,
+      "cycles": 135262544,
+      "r_beats": 59191792,
+      "w_beats": 59192112,
+      "ar_stall": 25353494,
+      "aw_stall": 0
+    }
+  ],
+  "burst": {
+    "15": [
+      {
+        "port": 0,
+        "cycles": 135204336,
+        "r_beats": 120962206,
+        "w_beats": 0,
+        "ar_stall": 4,
+        "aw_stall": 0
+      }
+    ],
+    "7": [
+      {
+        "port": 0,
+        "cycles": 135204633,
+        "r_beats": 121353675,
+        "w_beats": 0,
+        "ar_stall": 4,
+        "aw_stall": 0
+      }
+    ],
+    "3": [
+      {
+        "port": 0,
+        "cycles": 135208296,
+        "r_beats": 121153579,
+        "w_beats": 0,
+        "ar_stall": 4,
+        "aw_stall": 0
+      }
+    ],
+    "1": [
+      {
+        "port": 0,
+        "cycles": 135205929,
+        "r_beats": 105424773,
+        "w_beats": 0,
+        "ar_stall": 4,
+        "aw_stall": 0
+      }
+    ]
+  }
+}
