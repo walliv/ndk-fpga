@@ -103,6 +103,8 @@ end entity;
 architecture FULL of CORE_LOGIC is
     constant HEARTBEAT_CNT_W    : natural := 27;
     constant CLK_COUNT          : natural := 3;
+    -- Number of PCIe endpoints the ONE DMA_IUVENTUS instance serves (its own PCIE_ENDPOINTS
+    -- generic), not a DMA-instance count: dma_i below is instantiated once regardless of this value.
     constant DMA_STREAMS        : natural := PCIE_ENDPOINTS;
     constant IS_USP_PCIE_EP     : boolean := (PCIE_MOD_ARCH = "USP" or PCIE_MOD_ARCH = "USP_PCIE4" or PCIE_MOD_ARCH = "USP_PCIE4C");
     constant RESET_WIDTH        : natural := 10;
@@ -151,16 +153,10 @@ architecture FULL of CORE_LOGIC is
     constant HBM_SIZE_WIDTH  : natural := 3;
     constant HBM_RESP_WIDTH  : natural := 2;
 
-    -- One port per bank, BOTH directions: fill on AW/W/B, drain on AR/R. Fixed port pair per
-    -- buffer; see the DMA core's own documentation for the floorplan/pblock rationale.
-    constant HBM_WRBUFF_WR_PORT0 : natural := 19;
-    constant HBM_WRBUFF_WR_PORT1 : natural := 18;
-    constant HBM_WRBUFF_RD_PORT0 : natural := HBM_WRBUFF_WR_PORT0;
-    constant HBM_WRBUFF_RD_PORT1 : natural := HBM_WRBUFF_WR_PORT1;
-    constant HBM_RDBUFF_WR_PORT0 : natural := 28;
-    constant HBM_RDBUFF_WR_PORT1 : natural := 27;
-    constant HBM_RDBUFF_RD_PORT0 : natural := HBM_RDBUFF_WR_PORT0;
-    constant HBM_RDBUFF_RD_PORT1 : natural := HBM_RDBUFF_WR_PORT1;
+    -- One port per bank, BOTH directions: fill on AW/W/B, drain on AR/R. Index = ep*4 + buf*2 +
+    -- port (buf 0 = WRBUFF, 1 = RDBUFF); EP0 keeps 19/18/28/27, EP1 sits on stack 1's 24/25/29/30.
+    -- See the DMA core's own documentation for the floorplan/pblock rationale.
+    constant HBM_DMA_PORT : n_array_t(0 to 7) := (19, 18, 28, 27, 24, 25, 29, 30);
 
     -- Every port addresses only its own pseudo-channel, so every base is 0. The former
     -- hbm_port_base_f(idx) = idx * 0x2000_0000 global map is gone with the switch that needed it.
@@ -174,13 +170,17 @@ architecture FULL of CORE_LOGIC is
     constant HBM_RDBUFF_RD_PORT0_BASE : std_logic_vector(34-1 downto 0) := HBM_ZERO_BASE;
     constant HBM_RDBUFF_RD_PORT1_BASE : std_logic_vector(34-1 downto 0) := HBM_ZERO_BASE;
 
-    -- Ports the DMA drives directly. Membership is by EQUALITY, never a PORT0..PORT1 range: the
-    -- two numbers per buffer are independent and need not ascend. A port missing here is tied
-    -- off and never returns BRESP.
+    -- Ports the DMA drives directly: any HBM_DMA_PORT entry within the first 4*DMA_STREAMS slots
+    -- (the endpoints actually in use). A port missing here is tied off and never returns BRESP.
     function hbm_dma_driven_port_f (idx : natural) return boolean is
+        variable driven : boolean := false;
     begin
-        return idx = HBM_WRBUFF_WR_PORT0 or idx = HBM_WRBUFF_WR_PORT1 or
-               idx = HBM_RDBUFF_WR_PORT0 or idx = HBM_RDBUFF_WR_PORT1;
+        for p in 0 to 4*DMA_STREAMS-1 loop
+            if (idx = HBM_DMA_PORT(p)) then
+                driven := true;
+            end if;
+        end loop;
+        return driven;
     end function;
 
     -- Every DMA port drives BOTH directions, so this is simply "is it a DMA port". Kept as a
@@ -308,6 +308,30 @@ architecture FULL of CORE_LOGIC is
     signal pcie_cc_mfb_eof_pos : slv_array_t(DMA_STREAMS-1 downto 0)(PCIE_CC_MFB_REGIONS*max(1, log2(PCIE_CC_MFB_REGION_SIZE*PCIE_CC_MFB_BLOCK_SIZE))-1 downto 0);
     signal pcie_cc_mfb_src_rdy : std_logic_vector(DMA_STREAMS-1 downto 0);
     signal pcie_cc_mfb_dst_rdy : std_logic_vector(DMA_STREAMS-1 downto 0);
+
+    -- The single DMA instance's EP1 port group. Driven from pcie_clks/pcie_cq_mfb_*(1) when
+    -- DMA_STREAMS = 2, tied idle otherwise (ep1_g/no_ep1_g): a direct pcie_cq_mfb_data(1)-style
+    -- index would fail to elaborate at DMA_STREAMS = 1, since that array only has one element.
+    signal dma_ep1_pcie_clk : std_logic;
+    signal dma_ep1_pcie_rst : std_logic;
+
+    signal dma_ep1_cq_mfb_data    : std_logic_vector(PCIE_CQ_MFB_REGIONS*PCIE_CQ_MFB_REGION_SIZE*PCIE_CQ_MFB_BLOCK_SIZE*PCIE_CQ_MFB_ITEM_WIDTH-1 downto 0);
+    signal dma_ep1_cq_mfb_meta    : std_logic_vector(PCIE_CQ_MFB_REGIONS*PCIE_CQ_META_WIDTH -1 downto 0);
+    signal dma_ep1_cq_mfb_sof     : std_logic_vector(PCIE_CQ_MFB_REGIONS-1 downto 0);
+    signal dma_ep1_cq_mfb_eof     : std_logic_vector(PCIE_CQ_MFB_REGIONS-1 downto 0);
+    signal dma_ep1_cq_mfb_sof_pos : std_logic_vector(PCIE_CQ_MFB_REGIONS*max(1, log2(PCIE_CQ_MFB_REGION_SIZE))-1 downto 0);
+    signal dma_ep1_cq_mfb_eof_pos : std_logic_vector(PCIE_CQ_MFB_REGIONS*max(1, log2(PCIE_CQ_MFB_REGION_SIZE*PCIE_CQ_MFB_BLOCK_SIZE))-1 downto 0);
+    signal dma_ep1_cq_mfb_src_rdy : std_logic;
+    signal dma_ep1_cq_mfb_dst_rdy : std_logic;
+
+    signal dma_ep1_cc_mfb_data    : std_logic_vector(PCIE_CC_MFB_REGIONS*PCIE_CC_MFB_REGION_SIZE*PCIE_CC_MFB_BLOCK_SIZE*PCIE_CC_MFB_ITEM_WIDTH-1 downto 0);
+    signal dma_ep1_cc_mfb_meta    : std_logic_vector(PCIE_CC_MFB_REGIONS*PCIE_CC_META_WIDTH -1 downto 0);
+    signal dma_ep1_cc_mfb_sof     : std_logic_vector(PCIE_CC_MFB_REGIONS-1 downto 0);
+    signal dma_ep1_cc_mfb_eof     : std_logic_vector(PCIE_CC_MFB_REGIONS-1 downto 0);
+    signal dma_ep1_cc_mfb_sof_pos : std_logic_vector(PCIE_CC_MFB_REGIONS*max(1, log2(PCIE_CC_MFB_REGION_SIZE))-1 downto 0);
+    signal dma_ep1_cc_mfb_eof_pos : std_logic_vector(PCIE_CC_MFB_REGIONS*max(1, log2(PCIE_CC_MFB_REGION_SIZE*PCIE_CC_MFB_BLOCK_SIZE))-1 downto 0);
+    signal dma_ep1_cc_mfb_src_rdy : std_logic;
+    signal dma_ep1_cc_mfb_dst_rdy : std_logic;
 
     signal nvme_rd_req_lba_num : slv_array_t(DMA_STREAMS-1 downto 0)(7 downto 0);
     -- Head request page count per queue, carried alongside the shared payload bus so read
@@ -1931,284 +1955,484 @@ begin
     -- =========================================================================
     --  DMA MODULE
     -- =========================================================================
-    dma_g : for str in 0 to (DMA_STREAMS-1) generate
-        dma_i : entity work.DMA_IUVENTUS
-            generic map (
-                DEVICE => DEVICE,
-                MI_WIDTH => MI_WIDTH,
-                MI_SAME_CLK => FALSE,
+    -- One DMA instance serves both PCIe endpoints: CLK/RST and the plain-indexed ports below are
+    -- endpoint 0's; the PCIE_EP1_*/HBM_EP1_* ports carry endpoint 1's CQ/CC MFB and HBM pools.
+    dma_i : entity work.DMA_IUVENTUS
+        generic map (
+            DEVICE => DEVICE,
+            MI_WIDTH => MI_WIDTH,
+            MI_SAME_CLK => FALSE,
 
-                NUM_QUEUES => NUM_QUEUES,
-                -- QUEUE_DEPTH: per-queue outstanding-command depth. Larger NUM_QUEUES x
-                -- QUEUE_DEPTH may need AggressiveExplore route + phys_opt to close timing.
-                QUEUE_DEPTH => 64,
-                -- Production keepalive width (2**28 DMA_CLK cycles, ~1 s); explicitly assigned
-                -- (equals DMA_IUVENTUS's own default) per the "always assign every generic" rule.
-                FLUSH_DELAY_CNTR_WIDTH => 28,
+            NUM_QUEUES => NUM_QUEUES,
+            -- QUEUE_DEPTH: per-queue outstanding-command depth. Larger NUM_QUEUES x
+            -- QUEUE_DEPTH may need AggressiveExplore route + phys_opt to close timing.
+            QUEUE_DEPTH => 64,
+            -- Production keepalive width (2**28 DMA_CLK cycles, ~1 s); explicitly assigned
+            -- (equals DMA_IUVENTUS's own default) per the "always assign every generic" rule.
+            FLUSH_DELAY_CNTR_WIDTH => 28,
 
-                USR_MFB_REGIONS     => DMA_MFB_REGIONS,
-                USR_MFB_REGION_SIZE => DMA_MFB_REGION_SIZE,
-                USR_MFB_BLOCK_SIZE  => DMA_MFB_BLOCK_SIZE,
-                USR_MFB_ITEM_WIDTH  => DMA_MFB_ITEM_WIDTH,
+            USR_MFB_REGIONS     => DMA_MFB_REGIONS,
+            USR_MFB_REGION_SIZE => DMA_MFB_REGION_SIZE,
+            USR_MFB_BLOCK_SIZE  => DMA_MFB_BLOCK_SIZE,
+            USR_MFB_ITEM_WIDTH  => DMA_MFB_ITEM_WIDTH,
 
-                PCIE_MFB_REGIONS     => PCIE_RQ_MFB_REGIONS,
-                PCIE_MFB_REGION_SIZE => PCIE_RQ_MFB_REGION_SIZE,
-                PCIE_MFB_BLOCK_SIZE  => PCIE_RQ_MFB_BLOCK_SIZE,
-                PCIE_MFB_ITEM_WIDTH  => PCIE_RQ_MFB_ITEM_WIDTH,
+            PCIE_MFB_REGIONS     => PCIE_RQ_MFB_REGIONS,
+            PCIE_MFB_REGION_SIZE => PCIE_RQ_MFB_REGION_SIZE,
+            PCIE_MFB_BLOCK_SIZE  => PCIE_RQ_MFB_BLOCK_SIZE,
+            PCIE_MFB_ITEM_WIDTH  => PCIE_RQ_MFB_ITEM_WIDTH,
 
-                -- Enable the stall-class profiler, published as MI counters at 0x0A4..0x0C8.
-                -- Off by default; turned on to locate where the DMA spends stalled cycles.
-                PROFILE_EN => true,
+            -- Enable the stall-class profiler, published as MI counters at 0x0A4..0x0C8.
+            -- Off by default; turned on to locate where the DMA spends stalled cycles.
+            PROFILE_EN => true,
 
-                HBM_WRBUFF_WR_PORT0_BASE => HBM_WRBUFF_WR_PORT0_BASE,
-                HBM_WRBUFF_WR_PORT1_BASE => HBM_WRBUFF_WR_PORT1_BASE,
-                HBM_WRBUFF_RD_PORT0_BASE => HBM_WRBUFF_RD_PORT0_BASE,
-                HBM_WRBUFF_RD_PORT1_BASE => HBM_WRBUFF_RD_PORT1_BASE,
+            -- Streams feeding this one DMA instance: queue/endpoint plumbing only (see
+            -- DMA_IUVENTUS's own PCIE_ENDPOINTS generic comment).
+            PCIE_ENDPOINTS => DMA_STREAMS,
 
-                -- RDBUFF's own fill/drain port bases, same reuse pattern as WRBUFF's above. All
-                -- four MUST be driven with real values -- the entity's all-zero defaults are
-                -- elaboration-only (see DMA_IUVENTUS's own generic comment).
-                HBM_RDBUFF_WR_PORT0_BASE => HBM_RDBUFF_WR_PORT0_BASE,
-                HBM_RDBUFF_WR_PORT1_BASE => HBM_RDBUFF_WR_PORT1_BASE,
-                HBM_RDBUFF_RD_PORT0_BASE => HBM_RDBUFF_RD_PORT0_BASE,
-                HBM_RDBUFF_RD_PORT1_BASE => HBM_RDBUFF_RD_PORT1_BASE
-            )
-            port map (
-                CLK      => pcie_clks(str),
-                RST      => pcie_rsts(str),
+            HBM_WRBUFF_WR_PORT0_BASE => HBM_WRBUFF_WR_PORT0_BASE,
+            HBM_WRBUFF_WR_PORT1_BASE => HBM_WRBUFF_WR_PORT1_BASE,
+            HBM_WRBUFF_RD_PORT0_BASE => HBM_WRBUFF_RD_PORT0_BASE,
+            HBM_WRBUFF_RD_PORT1_BASE => HBM_WRBUFF_RD_PORT1_BASE,
 
-                NVME_RD_REQ_LBA_NUM => nvme_rd_req_lba_num(str),
-                NVME_RD_REQ_NPAGES_ALL => nvme_rd_req_npages_all(str),
-                NVME_RD_REQ_LBA_PTR => nvme_rd_req_lba_ptr(str),
-                NVME_RD_REQ_VLD     => nvme_rd_req_vld(str),
-                NVME_RD_REQ_RDY     => nvme_rd_req_rdy(str),
-                NVME_RD_REQ_QID     => nvme_rd_req_qid(str),
-                NVME_RD_REQ_CID     => nvme_rd_req_cid(str),
-                NVME_RD_REQ_CID_VLD => nvme_rd_req_cid_vld(str),
+            -- RDBUFF's own fill/drain port bases, same reuse pattern as WRBUFF's above. All
+            -- four MUST be driven with real values -- the entity's all-zero defaults are
+            -- elaboration-only (see DMA_IUVENTUS's own generic comment).
+            HBM_RDBUFF_WR_PORT0_BASE => HBM_RDBUFF_WR_PORT0_BASE,
+            HBM_RDBUFF_WR_PORT1_BASE => HBM_RDBUFF_WR_PORT1_BASE,
+            HBM_RDBUFF_RD_PORT0_BASE => HBM_RDBUFF_RD_PORT0_BASE,
+            HBM_RDBUFF_RD_PORT1_BASE => HBM_RDBUFF_RD_PORT1_BASE,
 
-                OP_STAT_TYPE => nvme_op_stat_type(str),
-                OP_STAT_QID  => nvme_op_stat_qid(str),
-                OP_STAT_CID  => nvme_op_stat_cid(str),
-                OP_STAT_CODE => nvme_op_stat_code(str),
-                OP_STAT_VLD  => nvme_op_stat_vld(str),
+            -- Endpoint 1's own HBM pools; only meaningful when DMA_STREAMS = 2. Every port
+            -- addresses its own pseudo-channel like EP0's above, so the base is 0 as well.
+            HBM_EP1_WRBUFF_WR_PORT0_BASE => HBM_ZERO_BASE,
+            HBM_EP1_WRBUFF_WR_PORT1_BASE => HBM_ZERO_BASE,
+            HBM_EP1_WRBUFF_RD_PORT0_BASE => HBM_ZERO_BASE,
+            HBM_EP1_WRBUFF_RD_PORT1_BASE => HBM_ZERO_BASE,
+            HBM_EP1_RDBUFF_WR_PORT0_BASE => HBM_ZERO_BASE,
+            HBM_EP1_RDBUFF_WR_PORT1_BASE => HBM_ZERO_BASE,
+            HBM_EP1_RDBUFF_RD_PORT0_BASE => HBM_ZERO_BASE,
+            HBM_EP1_RDBUFF_RD_PORT1_BASE => HBM_ZERO_BASE
+        )
+        port map (
+            CLK      => pcie_clks(0),
+            RST      => pcie_rsts(0),
 
-                WR_MFB_DATA    => nvme_wr_mfb_data(str),
-                WR_MFB_META    => nvme_wr_mfb_meta(str),
-                WR_MFB_SOF     => nvme_wr_mfb_sof(str),
-                WR_MFB_EOF     => nvme_wr_mfb_eof(str),
-                WR_MFB_SOF_POS => nvme_wr_mfb_sof_pos(str),
-                WR_MFB_EOF_POS => nvme_wr_mfb_eof_pos(str),
-                WR_MFB_SRC_RDY => nvme_wr_mfb_src_rdy(str),
-                WR_MFB_DST_RDY => nvme_wr_mfb_dst_rdy(str),
+            -- EP1's own PCIe user clock/reset; tied idle by no_ep1_g below when DMA_STREAMS = 1.
+            PCIE_EP1_CLK => dma_ep1_pcie_clk,
+            PCIE_EP1_RST => dma_ep1_pcie_rst,
 
-                RD_MFB_DATA    => nvme_rd_mfb_data(str),
-                RD_MFB_META    => nvme_rd_mfb_meta(str),
-                RD_MFB_SOF     => nvme_rd_mfb_sof(str),
-                RD_MFB_EOF     => nvme_rd_mfb_eof(str),
-                RD_MFB_SOF_POS => nvme_rd_mfb_sof_pos(str),
-                RD_MFB_EOF_POS => nvme_rd_mfb_eof_pos(str),
-                RD_MFB_SRC_RDY => nvme_rd_mfb_src_rdy(str),
-                RD_MFB_DST_RDY => nvme_rd_mfb_dst_rdy(str),
+            NVME_RD_REQ_LBA_NUM => nvme_rd_req_lba_num(0),
+            NVME_RD_REQ_NPAGES_ALL => nvme_rd_req_npages_all(0),
+            NVME_RD_REQ_LBA_PTR => nvme_rd_req_lba_ptr(0),
+            NVME_RD_REQ_VLD     => nvme_rd_req_vld(0),
+            NVME_RD_REQ_RDY     => nvme_rd_req_rdy(0),
+            NVME_RD_REQ_QID     => nvme_rd_req_qid(0),
+            NVME_RD_REQ_CID     => nvme_rd_req_cid(0),
+            NVME_RD_REQ_CID_VLD => nvme_rd_req_cid_vld(0),
 
-                PCIE_RQ_MFB_DATA    => pcie_rq_mfb_data(str),
-                PCIE_RQ_MFB_META    => pcie_rq_mfb_meta(str),
-                PCIE_RQ_MFB_SOF     => pcie_rq_mfb_sof(str),
-                PCIE_RQ_MFB_EOF     => pcie_rq_mfb_eof(str),
-                PCIE_RQ_MFB_SOF_POS => pcie_rq_mfb_sof_pos(str),
-                PCIE_RQ_MFB_EOF_POS => pcie_rq_mfb_eof_pos(str),
-                PCIE_RQ_MFB_SRC_RDY => pcie_rq_mfb_src_rdy(str),
-                PCIE_RQ_MFB_DST_RDY => pcie_rq_mfb_dst_rdy(str),
+            OP_STAT_TYPE => nvme_op_stat_type(0),
+            OP_STAT_QID  => nvme_op_stat_qid(0),
+            OP_STAT_CID  => nvme_op_stat_cid(0),
+            OP_STAT_CODE => nvme_op_stat_code(0),
+            OP_STAT_VLD  => nvme_op_stat_vld(0),
 
-                PCIE_CQ_MFB_DATA    => pcie_cq_mfb_data(str),
-                PCIE_CQ_MFB_META    => pcie_cq_mfb_meta(str),
-                PCIE_CQ_MFB_SOF     => pcie_cq_mfb_sof(str),
-                PCIE_CQ_MFB_EOF     => pcie_cq_mfb_eof(str),
-                PCIE_CQ_MFB_SOF_POS => pcie_cq_mfb_sof_pos(str),
-                PCIE_CQ_MFB_EOF_POS => pcie_cq_mfb_eof_pos(str),
-                PCIE_CQ_MFB_SRC_RDY => pcie_cq_mfb_src_rdy(str),
-                PCIE_CQ_MFB_DST_RDY => pcie_cq_mfb_dst_rdy(str),
+            WR_MFB_DATA    => nvme_wr_mfb_data(0),
+            WR_MFB_META    => nvme_wr_mfb_meta(0),
+            WR_MFB_SOF     => nvme_wr_mfb_sof(0),
+            WR_MFB_EOF     => nvme_wr_mfb_eof(0),
+            WR_MFB_SOF_POS => nvme_wr_mfb_sof_pos(0),
+            WR_MFB_EOF_POS => nvme_wr_mfb_eof_pos(0),
+            WR_MFB_SRC_RDY => nvme_wr_mfb_src_rdy(0),
+            WR_MFB_DST_RDY => nvme_wr_mfb_dst_rdy(0),
 
-                PCIE_CC_MFB_DATA    => pcie_cc_mfb_data(str),
-                PCIE_CC_MFB_META    => pcie_cc_mfb_meta(str),
-                PCIE_CC_MFB_SOF     => pcie_cc_mfb_sof(str),
-                PCIE_CC_MFB_EOF     => pcie_cc_mfb_eof(str),
-                PCIE_CC_MFB_SOF_POS => pcie_cc_mfb_sof_pos(str),
-                PCIE_CC_MFB_EOF_POS => pcie_cc_mfb_eof_pos(str),
-                PCIE_CC_MFB_SRC_RDY => pcie_cc_mfb_src_rdy(str),
-                PCIE_CC_MFB_DST_RDY => pcie_cc_mfb_dst_rdy(str),
+            RD_MFB_DATA    => nvme_rd_mfb_data(0),
+            RD_MFB_META    => nvme_rd_mfb_meta(0),
+            RD_MFB_SOF     => nvme_rd_mfb_sof(0),
+            RD_MFB_EOF     => nvme_rd_mfb_eof(0),
+            RD_MFB_SOF_POS => nvme_rd_mfb_sof_pos(0),
+            RD_MFB_EOF_POS => nvme_rd_mfb_eof_pos(0),
+            RD_MFB_SRC_RDY => nvme_rd_mfb_src_rdy(0),
+            RD_MFB_DST_RDY => nvme_rd_mfb_dst_rdy(0),
 
-                MI_CLK => usr_clks(MI_CLK_IDX),
-                MI_RST => usr_rsts(MI_CLK_IDX)(6),
+            -- Endpoint 1 has no doorbells of its own: RQ is single, driven from endpoint 0 only.
+            PCIE_RQ_MFB_DATA    => pcie_rq_mfb_data(0),
+            PCIE_RQ_MFB_META    => pcie_rq_mfb_meta(0),
+            PCIE_RQ_MFB_SOF     => pcie_rq_mfb_sof(0),
+            PCIE_RQ_MFB_EOF     => pcie_rq_mfb_eof(0),
+            PCIE_RQ_MFB_SOF_POS => pcie_rq_mfb_sof_pos(0),
+            PCIE_RQ_MFB_EOF_POS => pcie_rq_mfb_eof_pos(0),
+            PCIE_RQ_MFB_SRC_RDY => pcie_rq_mfb_src_rdy(0),
+            PCIE_RQ_MFB_DST_RDY => pcie_rq_mfb_dst_rdy(0),
 
-                MI_ADDR => dma_mi_addr(str),
-                MI_DWR  => dma_mi_dwr(str),
-                MI_BE   => dma_mi_be(str),
-                MI_RD   => dma_mi_rd(str),
-                MI_WR   => dma_mi_wr(str),
-                MI_DRD  => dma_mi_drd(str),
-                MI_ARDY => dma_mi_ardy(str),
-                MI_DRDY => dma_mi_drdy(str),
+            PCIE_CQ_MFB_DATA    => pcie_cq_mfb_data(0),
+            PCIE_CQ_MFB_META    => pcie_cq_mfb_meta(0),
+            PCIE_CQ_MFB_SOF     => pcie_cq_mfb_sof(0),
+            PCIE_CQ_MFB_EOF     => pcie_cq_mfb_eof(0),
+            PCIE_CQ_MFB_SOF_POS => pcie_cq_mfb_sof_pos(0),
+            PCIE_CQ_MFB_EOF_POS => pcie_cq_mfb_eof_pos(0),
+            PCIE_CQ_MFB_SRC_RDY => pcie_cq_mfb_src_rdy(0),
+            PCIE_CQ_MFB_DST_RDY => pcie_cq_mfb_dst_rdy(0),
 
-                -- WRBUFF fill/drain wire to fixed-index cdc_axi_* entries. Those indices are
-                -- singular, so this assumes DMA_STREAMS=1 -- a second stream would multi-drive
-                -- the same elements. The DMA presents AXI already in the HBM domain.
-                HBM_CLK   => hbm_450_clk,
-                HBM_RESET => hbm_450_rst_r(0),
+            -- EP1's own CQ stream; ep1_g/no_ep1_g below source/sink these from pcie_cq_mfb_*(1).
+            PCIE_EP1_CQ_MFB_DATA    => dma_ep1_cq_mfb_data,
+            PCIE_EP1_CQ_MFB_META    => dma_ep1_cq_mfb_meta,
+            PCIE_EP1_CQ_MFB_SOF     => dma_ep1_cq_mfb_sof,
+            PCIE_EP1_CQ_MFB_EOF     => dma_ep1_cq_mfb_eof,
+            PCIE_EP1_CQ_MFB_SOF_POS => dma_ep1_cq_mfb_sof_pos,
+            PCIE_EP1_CQ_MFB_EOF_POS => dma_ep1_cq_mfb_eof_pos,
+            PCIE_EP1_CQ_MFB_SRC_RDY => dma_ep1_cq_mfb_src_rdy,
+            PCIE_EP1_CQ_MFB_DST_RDY => dma_ep1_cq_mfb_dst_rdy,
 
-                HBM_WRBUFF_WR_AXI0_AWADDR  => cdc_axi_awaddr(HBM_WRBUFF_WR_PORT0),
-                HBM_WRBUFF_WR_AXI0_AWID    => cdc_axi_awid(HBM_WRBUFF_WR_PORT0),
-                HBM_WRBUFF_WR_AXI0_AWLEN   => cdc_axi_awlen(HBM_WRBUFF_WR_PORT0),
-                HBM_WRBUFF_WR_AXI0_AWSIZE  => cdc_axi_awsize(HBM_WRBUFF_WR_PORT0),
-                HBM_WRBUFF_WR_AXI0_AWBURST => cdc_axi_awburst(HBM_WRBUFF_WR_PORT0),
-                HBM_WRBUFF_WR_AXI0_AWVALID => cdc_axi_awvalid(HBM_WRBUFF_WR_PORT0),
-                HBM_WRBUFF_WR_AXI0_AWREADY => cdc_axi_awready(HBM_WRBUFF_WR_PORT0),
-                HBM_WRBUFF_WR_AXI0_WDATA   => cdc_axi_wdata(HBM_WRBUFF_WR_PORT0),
-                HBM_WRBUFF_WR_AXI0_WSTRB   => cdc_axi_wstrb(HBM_WRBUFF_WR_PORT0),
-                HBM_WRBUFF_WR_AXI0_WLAST   => cdc_axi_wlast(HBM_WRBUFF_WR_PORT0),
-                HBM_WRBUFF_WR_AXI0_WVALID  => cdc_axi_wvalid(HBM_WRBUFF_WR_PORT0),
-                HBM_WRBUFF_WR_AXI0_WREADY  => cdc_axi_wready(HBM_WRBUFF_WR_PORT0),
-                HBM_WRBUFF_WR_AXI0_BID     => cdc_axi_bid(HBM_WRBUFF_WR_PORT0),
-                HBM_WRBUFF_WR_AXI0_BRESP   => cdc_axi_bresp(HBM_WRBUFF_WR_PORT0),
-                HBM_WRBUFF_WR_AXI0_BVALID  => cdc_axi_bvalid(HBM_WRBUFF_WR_PORT0),
-                HBM_WRBUFF_WR_AXI0_BREADY  => cdc_axi_bready(HBM_WRBUFF_WR_PORT0),
+            PCIE_CC_MFB_DATA    => pcie_cc_mfb_data(0),
+            PCIE_CC_MFB_META    => pcie_cc_mfb_meta(0),
+            PCIE_CC_MFB_SOF     => pcie_cc_mfb_sof(0),
+            PCIE_CC_MFB_EOF     => pcie_cc_mfb_eof(0),
+            PCIE_CC_MFB_SOF_POS => pcie_cc_mfb_sof_pos(0),
+            PCIE_CC_MFB_EOF_POS => pcie_cc_mfb_eof_pos(0),
+            PCIE_CC_MFB_SRC_RDY => pcie_cc_mfb_src_rdy(0),
+            PCIE_CC_MFB_DST_RDY => pcie_cc_mfb_dst_rdy(0),
 
-                HBM_WRBUFF_WR_AXI1_AWADDR  => cdc_axi_awaddr(HBM_WRBUFF_WR_PORT1),
-                HBM_WRBUFF_WR_AXI1_AWID    => cdc_axi_awid(HBM_WRBUFF_WR_PORT1),
-                HBM_WRBUFF_WR_AXI1_AWLEN   => cdc_axi_awlen(HBM_WRBUFF_WR_PORT1),
-                HBM_WRBUFF_WR_AXI1_AWSIZE  => cdc_axi_awsize(HBM_WRBUFF_WR_PORT1),
-                HBM_WRBUFF_WR_AXI1_AWBURST => cdc_axi_awburst(HBM_WRBUFF_WR_PORT1),
-                HBM_WRBUFF_WR_AXI1_AWVALID => cdc_axi_awvalid(HBM_WRBUFF_WR_PORT1),
-                HBM_WRBUFF_WR_AXI1_AWREADY => cdc_axi_awready(HBM_WRBUFF_WR_PORT1),
-                HBM_WRBUFF_WR_AXI1_WDATA   => cdc_axi_wdata(HBM_WRBUFF_WR_PORT1),
-                HBM_WRBUFF_WR_AXI1_WSTRB   => cdc_axi_wstrb(HBM_WRBUFF_WR_PORT1),
-                HBM_WRBUFF_WR_AXI1_WLAST   => cdc_axi_wlast(HBM_WRBUFF_WR_PORT1),
-                HBM_WRBUFF_WR_AXI1_WVALID  => cdc_axi_wvalid(HBM_WRBUFF_WR_PORT1),
-                HBM_WRBUFF_WR_AXI1_WREADY  => cdc_axi_wready(HBM_WRBUFF_WR_PORT1),
-                HBM_WRBUFF_WR_AXI1_BID     => cdc_axi_bid(HBM_WRBUFF_WR_PORT1),
-                HBM_WRBUFF_WR_AXI1_BRESP   => cdc_axi_bresp(HBM_WRBUFF_WR_PORT1),
-                HBM_WRBUFF_WR_AXI1_BVALID  => cdc_axi_bvalid(HBM_WRBUFF_WR_PORT1),
-                HBM_WRBUFF_WR_AXI1_BREADY  => cdc_axi_bready(HBM_WRBUFF_WR_PORT1),
+            -- EP1's own CC stream; ep1_g below forwards these to pcie_cc_mfb_*(1).
+            PCIE_EP1_CC_MFB_DATA    => dma_ep1_cc_mfb_data,
+            PCIE_EP1_CC_MFB_META    => dma_ep1_cc_mfb_meta,
+            PCIE_EP1_CC_MFB_SOF     => dma_ep1_cc_mfb_sof,
+            PCIE_EP1_CC_MFB_EOF     => dma_ep1_cc_mfb_eof,
+            PCIE_EP1_CC_MFB_SOF_POS => dma_ep1_cc_mfb_sof_pos,
+            PCIE_EP1_CC_MFB_EOF_POS => dma_ep1_cc_mfb_eof_pos,
+            PCIE_EP1_CC_MFB_SRC_RDY => dma_ep1_cc_mfb_src_rdy,
+            PCIE_EP1_CC_MFB_DST_RDY => dma_ep1_cc_mfb_dst_rdy,
 
-                -- Single WRBUFF-read AXI3 port group.
-                HBM_WRBUFF_RD_AXI0_ARADDR  => cdc_axi_araddr(HBM_WRBUFF_RD_PORT0),
-                HBM_WRBUFF_RD_AXI0_ARID    => cdc_axi_arid(HBM_WRBUFF_RD_PORT0),
-                HBM_WRBUFF_RD_AXI0_ARLEN   => cdc_axi_arlen(HBM_WRBUFF_RD_PORT0),
-                HBM_WRBUFF_RD_AXI0_ARSIZE  => cdc_axi_arsize(HBM_WRBUFF_RD_PORT0),
-                HBM_WRBUFF_RD_AXI0_ARBURST => cdc_axi_arburst(HBM_WRBUFF_RD_PORT0),
-                HBM_WRBUFF_RD_AXI0_ARVALID => cdc_axi_arvalid(HBM_WRBUFF_RD_PORT0),
-                HBM_WRBUFF_RD_AXI0_ARREADY => cdc_axi_arready(HBM_WRBUFF_RD_PORT0),
-                HBM_WRBUFF_RD_AXI0_RDATA   => cdc_axi_rdata(HBM_WRBUFF_RD_PORT0),
-                HBM_WRBUFF_RD_AXI0_RID     => cdc_axi_rid(HBM_WRBUFF_RD_PORT0),
-                HBM_WRBUFF_RD_AXI0_RRESP   => cdc_axi_rresp(HBM_WRBUFF_RD_PORT0),
-                HBM_WRBUFF_RD_AXI0_RLAST   => cdc_axi_rlast(HBM_WRBUFF_RD_PORT0),
-                HBM_WRBUFF_RD_AXI0_RVALID  => cdc_axi_rvalid(HBM_WRBUFF_RD_PORT0),
-                HBM_WRBUFF_RD_AXI0_RREADY  => cdc_axi_rready(HBM_WRBUFF_RD_PORT0),
-                HBM_WRBUFF_RD_AXI1_ARADDR  => cdc_axi_araddr(HBM_WRBUFF_RD_PORT1),
-                HBM_WRBUFF_RD_AXI1_ARID    => cdc_axi_arid(HBM_WRBUFF_RD_PORT1),
-                HBM_WRBUFF_RD_AXI1_ARLEN   => cdc_axi_arlen(HBM_WRBUFF_RD_PORT1),
-                HBM_WRBUFF_RD_AXI1_ARSIZE  => cdc_axi_arsize(HBM_WRBUFF_RD_PORT1),
-                HBM_WRBUFF_RD_AXI1_ARBURST => cdc_axi_arburst(HBM_WRBUFF_RD_PORT1),
-                HBM_WRBUFF_RD_AXI1_ARVALID => cdc_axi_arvalid(HBM_WRBUFF_RD_PORT1),
-                HBM_WRBUFF_RD_AXI1_ARREADY => cdc_axi_arready(HBM_WRBUFF_RD_PORT1),
-                HBM_WRBUFF_RD_AXI1_RDATA   => cdc_axi_rdata(HBM_WRBUFF_RD_PORT1),
-                HBM_WRBUFF_RD_AXI1_RID     => cdc_axi_rid(HBM_WRBUFF_RD_PORT1),
-                HBM_WRBUFF_RD_AXI1_RRESP   => cdc_axi_rresp(HBM_WRBUFF_RD_PORT1),
-                HBM_WRBUFF_RD_AXI1_RLAST   => cdc_axi_rlast(HBM_WRBUFF_RD_PORT1),
-                HBM_WRBUFF_RD_AXI1_RVALID  => cdc_axi_rvalid(HBM_WRBUFF_RD_PORT1),
-                HBM_WRBUFF_RD_AXI1_RREADY  => cdc_axi_rready(HBM_WRBUFF_RD_PORT1),
+            MI_CLK => usr_clks(MI_CLK_IDX),
+            MI_RST => usr_rsts(MI_CLK_IDX)(6),
 
-                -- RDBUFF HBM fill/drain ports: same fixed-index cdc_axi_* pattern as WRBUFF above
-                -- (HBM_RDBUFF_WR_PORT0/1, HBM_RDBUFF_RD_PORT, see hbm_port_wiring_g/
-                -- hbm_axi_cdc_bridge_g); same DMA_STREAMS = 1 assumption applies here too.
-                HBM_RDBUFF_WR_AXI0_AWADDR  => cdc_axi_awaddr(HBM_RDBUFF_WR_PORT0),
-                HBM_RDBUFF_WR_AXI0_AWID    => cdc_axi_awid(HBM_RDBUFF_WR_PORT0),
-                HBM_RDBUFF_WR_AXI0_AWLEN   => cdc_axi_awlen(HBM_RDBUFF_WR_PORT0),
-                HBM_RDBUFF_WR_AXI0_AWSIZE  => cdc_axi_awsize(HBM_RDBUFF_WR_PORT0),
-                HBM_RDBUFF_WR_AXI0_AWBURST => cdc_axi_awburst(HBM_RDBUFF_WR_PORT0),
-                HBM_RDBUFF_WR_AXI0_AWVALID => cdc_axi_awvalid(HBM_RDBUFF_WR_PORT0),
-                HBM_RDBUFF_WR_AXI0_AWREADY => cdc_axi_awready(HBM_RDBUFF_WR_PORT0),
-                HBM_RDBUFF_WR_AXI0_WDATA   => cdc_axi_wdata(HBM_RDBUFF_WR_PORT0),
-                HBM_RDBUFF_WR_AXI0_WSTRB   => cdc_axi_wstrb(HBM_RDBUFF_WR_PORT0),
-                HBM_RDBUFF_WR_AXI0_WLAST   => cdc_axi_wlast(HBM_RDBUFF_WR_PORT0),
-                HBM_RDBUFF_WR_AXI0_WVALID  => cdc_axi_wvalid(HBM_RDBUFF_WR_PORT0),
-                HBM_RDBUFF_WR_AXI0_WREADY  => cdc_axi_wready(HBM_RDBUFF_WR_PORT0),
-                HBM_RDBUFF_WR_AXI0_BID     => cdc_axi_bid(HBM_RDBUFF_WR_PORT0),
-                HBM_RDBUFF_WR_AXI0_BRESP   => cdc_axi_bresp(HBM_RDBUFF_WR_PORT0),
-                HBM_RDBUFF_WR_AXI0_BVALID  => cdc_axi_bvalid(HBM_RDBUFF_WR_PORT0),
-                HBM_RDBUFF_WR_AXI0_BREADY  => cdc_axi_bready(HBM_RDBUFF_WR_PORT0),
+            MI_ADDR => dma_mi_addr(0),
+            MI_DWR  => dma_mi_dwr(0),
+            MI_BE   => dma_mi_be(0),
+            MI_RD   => dma_mi_rd(0),
+            MI_WR   => dma_mi_wr(0),
+            MI_DRD  => dma_mi_drd(0),
+            MI_ARDY => dma_mi_ardy(0),
+            MI_DRDY => dma_mi_drdy(0),
 
-                HBM_RDBUFF_WR_AXI1_AWADDR  => cdc_axi_awaddr(HBM_RDBUFF_WR_PORT1),
-                HBM_RDBUFF_WR_AXI1_AWID    => cdc_axi_awid(HBM_RDBUFF_WR_PORT1),
-                HBM_RDBUFF_WR_AXI1_AWLEN   => cdc_axi_awlen(HBM_RDBUFF_WR_PORT1),
-                HBM_RDBUFF_WR_AXI1_AWSIZE  => cdc_axi_awsize(HBM_RDBUFF_WR_PORT1),
-                HBM_RDBUFF_WR_AXI1_AWBURST => cdc_axi_awburst(HBM_RDBUFF_WR_PORT1),
-                HBM_RDBUFF_WR_AXI1_AWVALID => cdc_axi_awvalid(HBM_RDBUFF_WR_PORT1),
-                HBM_RDBUFF_WR_AXI1_AWREADY => cdc_axi_awready(HBM_RDBUFF_WR_PORT1),
-                HBM_RDBUFF_WR_AXI1_WDATA   => cdc_axi_wdata(HBM_RDBUFF_WR_PORT1),
-                HBM_RDBUFF_WR_AXI1_WSTRB   => cdc_axi_wstrb(HBM_RDBUFF_WR_PORT1),
-                HBM_RDBUFF_WR_AXI1_WLAST   => cdc_axi_wlast(HBM_RDBUFF_WR_PORT1),
-                HBM_RDBUFF_WR_AXI1_WVALID  => cdc_axi_wvalid(HBM_RDBUFF_WR_PORT1),
-                HBM_RDBUFF_WR_AXI1_WREADY  => cdc_axi_wready(HBM_RDBUFF_WR_PORT1),
-                HBM_RDBUFF_WR_AXI1_BID     => cdc_axi_bid(HBM_RDBUFF_WR_PORT1),
-                HBM_RDBUFF_WR_AXI1_BRESP   => cdc_axi_bresp(HBM_RDBUFF_WR_PORT1),
-                HBM_RDBUFF_WR_AXI1_BVALID  => cdc_axi_bvalid(HBM_RDBUFF_WR_PORT1),
-                HBM_RDBUFF_WR_AXI1_BREADY  => cdc_axi_bready(HBM_RDBUFF_WR_PORT1),
+            -- WRBUFF/RDBUFF fill/drain wire to fixed HBM_DMA_PORT entries. The DMA presents AXI
+            -- already in the HBM domain, so this is a straight index into cdc_axi_*.
+            HBM_CLK   => hbm_450_clk,
+            HBM_RESET => hbm_450_rst_r(0),
 
-                -- Single RDBUFF-read AXI3 port group.
-                HBM_RDBUFF_RD_AXI0_ARADDR  => cdc_axi_araddr(HBM_RDBUFF_RD_PORT0),
-                HBM_RDBUFF_RD_AXI0_ARID    => cdc_axi_arid(HBM_RDBUFF_RD_PORT0),
-                HBM_RDBUFF_RD_AXI0_ARLEN   => cdc_axi_arlen(HBM_RDBUFF_RD_PORT0),
-                HBM_RDBUFF_RD_AXI0_ARSIZE  => cdc_axi_arsize(HBM_RDBUFF_RD_PORT0),
-                HBM_RDBUFF_RD_AXI0_ARBURST => cdc_axi_arburst(HBM_RDBUFF_RD_PORT0),
-                HBM_RDBUFF_RD_AXI0_ARVALID => cdc_axi_arvalid(HBM_RDBUFF_RD_PORT0),
-                HBM_RDBUFF_RD_AXI0_ARREADY => cdc_axi_arready(HBM_RDBUFF_RD_PORT0),
-                HBM_RDBUFF_RD_AXI0_RDATA   => cdc_axi_rdata(HBM_RDBUFF_RD_PORT0),
-                HBM_RDBUFF_RD_AXI0_RID     => cdc_axi_rid(HBM_RDBUFF_RD_PORT0),
-                HBM_RDBUFF_RD_AXI0_RRESP   => cdc_axi_rresp(HBM_RDBUFF_RD_PORT0),
-                HBM_RDBUFF_RD_AXI0_RLAST   => cdc_axi_rlast(HBM_RDBUFF_RD_PORT0),
-                HBM_RDBUFF_RD_AXI0_RVALID  => cdc_axi_rvalid(HBM_RDBUFF_RD_PORT0),
-                HBM_RDBUFF_RD_AXI0_RREADY  => cdc_axi_rready(HBM_RDBUFF_RD_PORT0),
-                HBM_RDBUFF_RD_AXI1_ARADDR  => cdc_axi_araddr(HBM_RDBUFF_RD_PORT1),
-                HBM_RDBUFF_RD_AXI1_ARID    => cdc_axi_arid(HBM_RDBUFF_RD_PORT1),
-                HBM_RDBUFF_RD_AXI1_ARLEN   => cdc_axi_arlen(HBM_RDBUFF_RD_PORT1),
-                HBM_RDBUFF_RD_AXI1_ARSIZE  => cdc_axi_arsize(HBM_RDBUFF_RD_PORT1),
-                HBM_RDBUFF_RD_AXI1_ARBURST => cdc_axi_arburst(HBM_RDBUFF_RD_PORT1),
-                HBM_RDBUFF_RD_AXI1_ARVALID => cdc_axi_arvalid(HBM_RDBUFF_RD_PORT1),
-                HBM_RDBUFF_RD_AXI1_ARREADY => cdc_axi_arready(HBM_RDBUFF_RD_PORT1),
-                HBM_RDBUFF_RD_AXI1_RDATA   => cdc_axi_rdata(HBM_RDBUFF_RD_PORT1),
-                HBM_RDBUFF_RD_AXI1_RID     => cdc_axi_rid(HBM_RDBUFF_RD_PORT1),
-                HBM_RDBUFF_RD_AXI1_RRESP   => cdc_axi_rresp(HBM_RDBUFF_RD_PORT1),
-                HBM_RDBUFF_RD_AXI1_RLAST   => cdc_axi_rlast(HBM_RDBUFF_RD_PORT1),
-                HBM_RDBUFF_RD_AXI1_RVALID  => cdc_axi_rvalid(HBM_RDBUFF_RD_PORT1),
-                HBM_RDBUFF_RD_AXI1_RREADY  => cdc_axi_rready(HBM_RDBUFF_RD_PORT1),
+            HBM_WRBUFF_WR_AXI0_AWADDR  => cdc_axi_awaddr(HBM_DMA_PORT(0)),
+            HBM_WRBUFF_WR_AXI0_AWID    => cdc_axi_awid(HBM_DMA_PORT(0)),
+            HBM_WRBUFF_WR_AXI0_AWLEN   => cdc_axi_awlen(HBM_DMA_PORT(0)),
+            HBM_WRBUFF_WR_AXI0_AWSIZE  => cdc_axi_awsize(HBM_DMA_PORT(0)),
+            HBM_WRBUFF_WR_AXI0_AWBURST => cdc_axi_awburst(HBM_DMA_PORT(0)),
+            HBM_WRBUFF_WR_AXI0_AWVALID => cdc_axi_awvalid(HBM_DMA_PORT(0)),
+            HBM_WRBUFF_WR_AXI0_AWREADY => cdc_axi_awready(HBM_DMA_PORT(0)),
+            HBM_WRBUFF_WR_AXI0_WDATA   => cdc_axi_wdata(HBM_DMA_PORT(0)),
+            HBM_WRBUFF_WR_AXI0_WSTRB   => cdc_axi_wstrb(HBM_DMA_PORT(0)),
+            HBM_WRBUFF_WR_AXI0_WLAST   => cdc_axi_wlast(HBM_DMA_PORT(0)),
+            HBM_WRBUFF_WR_AXI0_WVALID  => cdc_axi_wvalid(HBM_DMA_PORT(0)),
+            HBM_WRBUFF_WR_AXI0_WREADY  => cdc_axi_wready(HBM_DMA_PORT(0)),
+            HBM_WRBUFF_WR_AXI0_BID     => cdc_axi_bid(HBM_DMA_PORT(0)),
+            HBM_WRBUFF_WR_AXI0_BRESP   => cdc_axi_bresp(HBM_DMA_PORT(0)),
+            HBM_WRBUFF_WR_AXI0_BVALID  => cdc_axi_bvalid(HBM_DMA_PORT(0)),
+            HBM_WRBUFF_WR_AXI0_BREADY  => cdc_axi_bready(HBM_DMA_PORT(0)),
 
-                STAT_WRBUFF_UNALIGNED_BURST => open,
-                STAT_WRBUFF_WR_BRESP_ERR    => open,
-                STAT_WRBUFF_RD_RRESP_ERR    => open,
-                STAT_WRBUFF_SPARSE_BE       => open,
-                STAT_WRBUFF_DROPPED_FRAME   => open,
+            HBM_WRBUFF_WR_AXI1_AWADDR  => cdc_axi_awaddr(HBM_DMA_PORT(1)),
+            HBM_WRBUFF_WR_AXI1_AWID    => cdc_axi_awid(HBM_DMA_PORT(1)),
+            HBM_WRBUFF_WR_AXI1_AWLEN   => cdc_axi_awlen(HBM_DMA_PORT(1)),
+            HBM_WRBUFF_WR_AXI1_AWSIZE  => cdc_axi_awsize(HBM_DMA_PORT(1)),
+            HBM_WRBUFF_WR_AXI1_AWBURST => cdc_axi_awburst(HBM_DMA_PORT(1)),
+            HBM_WRBUFF_WR_AXI1_AWVALID => cdc_axi_awvalid(HBM_DMA_PORT(1)),
+            HBM_WRBUFF_WR_AXI1_AWREADY => cdc_axi_awready(HBM_DMA_PORT(1)),
+            HBM_WRBUFF_WR_AXI1_WDATA   => cdc_axi_wdata(HBM_DMA_PORT(1)),
+            HBM_WRBUFF_WR_AXI1_WSTRB   => cdc_axi_wstrb(HBM_DMA_PORT(1)),
+            HBM_WRBUFF_WR_AXI1_WLAST   => cdc_axi_wlast(HBM_DMA_PORT(1)),
+            HBM_WRBUFF_WR_AXI1_WVALID  => cdc_axi_wvalid(HBM_DMA_PORT(1)),
+            HBM_WRBUFF_WR_AXI1_WREADY  => cdc_axi_wready(HBM_DMA_PORT(1)),
+            HBM_WRBUFF_WR_AXI1_BID     => cdc_axi_bid(HBM_DMA_PORT(1)),
+            HBM_WRBUFF_WR_AXI1_BRESP   => cdc_axi_bresp(HBM_DMA_PORT(1)),
+            HBM_WRBUFF_WR_AXI1_BVALID  => cdc_axi_bvalid(HBM_DMA_PORT(1)),
+            HBM_WRBUFF_WR_AXI1_BREADY  => cdc_axi_bready(HBM_DMA_PORT(1)),
 
-                -- RDBUFF HBM datapath statistics: not yet wired to an MI counter, same as
-                -- STAT_WRBUFF_* above (see DMA_IUVENTUS's own STAT_RDBUFF_* port comment).
-                STAT_RDBUFF_RD_RRESP_ERR => open,
-                STAT_RDBUFF_RD_UNALIGNED => open
-            );
-    end generate ;
+            -- Single WRBUFF-read AXI3 port group.
+            HBM_WRBUFF_RD_AXI0_ARADDR  => cdc_axi_araddr(HBM_DMA_PORT(0)),
+            HBM_WRBUFF_RD_AXI0_ARID    => cdc_axi_arid(HBM_DMA_PORT(0)),
+            HBM_WRBUFF_RD_AXI0_ARLEN   => cdc_axi_arlen(HBM_DMA_PORT(0)),
+            HBM_WRBUFF_RD_AXI0_ARSIZE  => cdc_axi_arsize(HBM_DMA_PORT(0)),
+            HBM_WRBUFF_RD_AXI0_ARBURST => cdc_axi_arburst(HBM_DMA_PORT(0)),
+            HBM_WRBUFF_RD_AXI0_ARVALID => cdc_axi_arvalid(HBM_DMA_PORT(0)),
+            HBM_WRBUFF_RD_AXI0_ARREADY => cdc_axi_arready(HBM_DMA_PORT(0)),
+            HBM_WRBUFF_RD_AXI0_RDATA   => cdc_axi_rdata(HBM_DMA_PORT(0)),
+            HBM_WRBUFF_RD_AXI0_RID     => cdc_axi_rid(HBM_DMA_PORT(0)),
+            HBM_WRBUFF_RD_AXI0_RRESP   => cdc_axi_rresp(HBM_DMA_PORT(0)),
+            HBM_WRBUFF_RD_AXI0_RLAST   => cdc_axi_rlast(HBM_DMA_PORT(0)),
+            HBM_WRBUFF_RD_AXI0_RVALID  => cdc_axi_rvalid(HBM_DMA_PORT(0)),
+            HBM_WRBUFF_RD_AXI0_RREADY  => cdc_axi_rready(HBM_DMA_PORT(0)),
+            HBM_WRBUFF_RD_AXI1_ARADDR  => cdc_axi_araddr(HBM_DMA_PORT(1)),
+            HBM_WRBUFF_RD_AXI1_ARID    => cdc_axi_arid(HBM_DMA_PORT(1)),
+            HBM_WRBUFF_RD_AXI1_ARLEN   => cdc_axi_arlen(HBM_DMA_PORT(1)),
+            HBM_WRBUFF_RD_AXI1_ARSIZE  => cdc_axi_arsize(HBM_DMA_PORT(1)),
+            HBM_WRBUFF_RD_AXI1_ARBURST => cdc_axi_arburst(HBM_DMA_PORT(1)),
+            HBM_WRBUFF_RD_AXI1_ARVALID => cdc_axi_arvalid(HBM_DMA_PORT(1)),
+            HBM_WRBUFF_RD_AXI1_ARREADY => cdc_axi_arready(HBM_DMA_PORT(1)),
+            HBM_WRBUFF_RD_AXI1_RDATA   => cdc_axi_rdata(HBM_DMA_PORT(1)),
+            HBM_WRBUFF_RD_AXI1_RID     => cdc_axi_rid(HBM_DMA_PORT(1)),
+            HBM_WRBUFF_RD_AXI1_RRESP   => cdc_axi_rresp(HBM_DMA_PORT(1)),
+            HBM_WRBUFF_RD_AXI1_RLAST   => cdc_axi_rlast(HBM_DMA_PORT(1)),
+            HBM_WRBUFF_RD_AXI1_RVALID  => cdc_axi_rvalid(HBM_DMA_PORT(1)),
+            HBM_WRBUFF_RD_AXI1_RREADY  => cdc_axi_rready(HBM_DMA_PORT(1)),
 
-    -- MI interface connection
+            -- RDBUFF HBM fill/drain ports: same fixed HBM_DMA_PORT pattern as WRBUFF above (see
+            -- hbm_port_wiring_g/hbm_axi_cdc_bridge_g).
+            HBM_RDBUFF_WR_AXI0_AWADDR  => cdc_axi_awaddr(HBM_DMA_PORT(2)),
+            HBM_RDBUFF_WR_AXI0_AWID    => cdc_axi_awid(HBM_DMA_PORT(2)),
+            HBM_RDBUFF_WR_AXI0_AWLEN   => cdc_axi_awlen(HBM_DMA_PORT(2)),
+            HBM_RDBUFF_WR_AXI0_AWSIZE  => cdc_axi_awsize(HBM_DMA_PORT(2)),
+            HBM_RDBUFF_WR_AXI0_AWBURST => cdc_axi_awburst(HBM_DMA_PORT(2)),
+            HBM_RDBUFF_WR_AXI0_AWVALID => cdc_axi_awvalid(HBM_DMA_PORT(2)),
+            HBM_RDBUFF_WR_AXI0_AWREADY => cdc_axi_awready(HBM_DMA_PORT(2)),
+            HBM_RDBUFF_WR_AXI0_WDATA   => cdc_axi_wdata(HBM_DMA_PORT(2)),
+            HBM_RDBUFF_WR_AXI0_WSTRB   => cdc_axi_wstrb(HBM_DMA_PORT(2)),
+            HBM_RDBUFF_WR_AXI0_WLAST   => cdc_axi_wlast(HBM_DMA_PORT(2)),
+            HBM_RDBUFF_WR_AXI0_WVALID  => cdc_axi_wvalid(HBM_DMA_PORT(2)),
+            HBM_RDBUFF_WR_AXI0_WREADY  => cdc_axi_wready(HBM_DMA_PORT(2)),
+            HBM_RDBUFF_WR_AXI0_BID     => cdc_axi_bid(HBM_DMA_PORT(2)),
+            HBM_RDBUFF_WR_AXI0_BRESP   => cdc_axi_bresp(HBM_DMA_PORT(2)),
+            HBM_RDBUFF_WR_AXI0_BVALID  => cdc_axi_bvalid(HBM_DMA_PORT(2)),
+            HBM_RDBUFF_WR_AXI0_BREADY  => cdc_axi_bready(HBM_DMA_PORT(2)),
+
+            HBM_RDBUFF_WR_AXI1_AWADDR  => cdc_axi_awaddr(HBM_DMA_PORT(3)),
+            HBM_RDBUFF_WR_AXI1_AWID    => cdc_axi_awid(HBM_DMA_PORT(3)),
+            HBM_RDBUFF_WR_AXI1_AWLEN   => cdc_axi_awlen(HBM_DMA_PORT(3)),
+            HBM_RDBUFF_WR_AXI1_AWSIZE  => cdc_axi_awsize(HBM_DMA_PORT(3)),
+            HBM_RDBUFF_WR_AXI1_AWBURST => cdc_axi_awburst(HBM_DMA_PORT(3)),
+            HBM_RDBUFF_WR_AXI1_AWVALID => cdc_axi_awvalid(HBM_DMA_PORT(3)),
+            HBM_RDBUFF_WR_AXI1_AWREADY => cdc_axi_awready(HBM_DMA_PORT(3)),
+            HBM_RDBUFF_WR_AXI1_WDATA   => cdc_axi_wdata(HBM_DMA_PORT(3)),
+            HBM_RDBUFF_WR_AXI1_WSTRB   => cdc_axi_wstrb(HBM_DMA_PORT(3)),
+            HBM_RDBUFF_WR_AXI1_WLAST   => cdc_axi_wlast(HBM_DMA_PORT(3)),
+            HBM_RDBUFF_WR_AXI1_WVALID  => cdc_axi_wvalid(HBM_DMA_PORT(3)),
+            HBM_RDBUFF_WR_AXI1_WREADY  => cdc_axi_wready(HBM_DMA_PORT(3)),
+            HBM_RDBUFF_WR_AXI1_BID     => cdc_axi_bid(HBM_DMA_PORT(3)),
+            HBM_RDBUFF_WR_AXI1_BRESP   => cdc_axi_bresp(HBM_DMA_PORT(3)),
+            HBM_RDBUFF_WR_AXI1_BVALID  => cdc_axi_bvalid(HBM_DMA_PORT(3)),
+            HBM_RDBUFF_WR_AXI1_BREADY  => cdc_axi_bready(HBM_DMA_PORT(3)),
+
+            -- Single RDBUFF-read AXI3 port group.
+            HBM_RDBUFF_RD_AXI0_ARADDR  => cdc_axi_araddr(HBM_DMA_PORT(2)),
+            HBM_RDBUFF_RD_AXI0_ARID    => cdc_axi_arid(HBM_DMA_PORT(2)),
+            HBM_RDBUFF_RD_AXI0_ARLEN   => cdc_axi_arlen(HBM_DMA_PORT(2)),
+            HBM_RDBUFF_RD_AXI0_ARSIZE  => cdc_axi_arsize(HBM_DMA_PORT(2)),
+            HBM_RDBUFF_RD_AXI0_ARBURST => cdc_axi_arburst(HBM_DMA_PORT(2)),
+            HBM_RDBUFF_RD_AXI0_ARVALID => cdc_axi_arvalid(HBM_DMA_PORT(2)),
+            HBM_RDBUFF_RD_AXI0_ARREADY => cdc_axi_arready(HBM_DMA_PORT(2)),
+            HBM_RDBUFF_RD_AXI0_RDATA   => cdc_axi_rdata(HBM_DMA_PORT(2)),
+            HBM_RDBUFF_RD_AXI0_RID     => cdc_axi_rid(HBM_DMA_PORT(2)),
+            HBM_RDBUFF_RD_AXI0_RRESP   => cdc_axi_rresp(HBM_DMA_PORT(2)),
+            HBM_RDBUFF_RD_AXI0_RLAST   => cdc_axi_rlast(HBM_DMA_PORT(2)),
+            HBM_RDBUFF_RD_AXI0_RVALID  => cdc_axi_rvalid(HBM_DMA_PORT(2)),
+            HBM_RDBUFF_RD_AXI0_RREADY  => cdc_axi_rready(HBM_DMA_PORT(2)),
+            HBM_RDBUFF_RD_AXI1_ARADDR  => cdc_axi_araddr(HBM_DMA_PORT(3)),
+            HBM_RDBUFF_RD_AXI1_ARID    => cdc_axi_arid(HBM_DMA_PORT(3)),
+            HBM_RDBUFF_RD_AXI1_ARLEN   => cdc_axi_arlen(HBM_DMA_PORT(3)),
+            HBM_RDBUFF_RD_AXI1_ARSIZE  => cdc_axi_arsize(HBM_DMA_PORT(3)),
+            HBM_RDBUFF_RD_AXI1_ARBURST => cdc_axi_arburst(HBM_DMA_PORT(3)),
+            HBM_RDBUFF_RD_AXI1_ARVALID => cdc_axi_arvalid(HBM_DMA_PORT(3)),
+            HBM_RDBUFF_RD_AXI1_ARREADY => cdc_axi_arready(HBM_DMA_PORT(3)),
+            HBM_RDBUFF_RD_AXI1_RDATA   => cdc_axi_rdata(HBM_DMA_PORT(3)),
+            HBM_RDBUFF_RD_AXI1_RID     => cdc_axi_rid(HBM_DMA_PORT(3)),
+            HBM_RDBUFF_RD_AXI1_RRESP   => cdc_axi_rresp(HBM_DMA_PORT(3)),
+            HBM_RDBUFF_RD_AXI1_RLAST   => cdc_axi_rlast(HBM_DMA_PORT(3)),
+            HBM_RDBUFF_RD_AXI1_RVALID  => cdc_axi_rvalid(HBM_DMA_PORT(3)),
+            HBM_RDBUFF_RD_AXI1_RREADY  => cdc_axi_rready(HBM_DMA_PORT(3)),
+
+            -- Endpoint 1's own HBM pools; hbm_port_wiring_g picks up HBM_DMA_PORT(4..7) as
+            -- DMA-driven only when DMA_STREAMS = 2 (hbm_dma_driven_port_f), same cdc_axi_* pattern.
+            HBM_EP1_WRBUFF_WR_AXI0_AWADDR  => cdc_axi_awaddr(HBM_DMA_PORT(4)),
+            HBM_EP1_WRBUFF_WR_AXI0_AWID    => cdc_axi_awid(HBM_DMA_PORT(4)),
+            HBM_EP1_WRBUFF_WR_AXI0_AWLEN   => cdc_axi_awlen(HBM_DMA_PORT(4)),
+            HBM_EP1_WRBUFF_WR_AXI0_AWSIZE  => cdc_axi_awsize(HBM_DMA_PORT(4)),
+            HBM_EP1_WRBUFF_WR_AXI0_AWBURST => cdc_axi_awburst(HBM_DMA_PORT(4)),
+            HBM_EP1_WRBUFF_WR_AXI0_AWVALID => cdc_axi_awvalid(HBM_DMA_PORT(4)),
+            HBM_EP1_WRBUFF_WR_AXI0_AWREADY => cdc_axi_awready(HBM_DMA_PORT(4)),
+            HBM_EP1_WRBUFF_WR_AXI0_WDATA   => cdc_axi_wdata(HBM_DMA_PORT(4)),
+            HBM_EP1_WRBUFF_WR_AXI0_WSTRB   => cdc_axi_wstrb(HBM_DMA_PORT(4)),
+            HBM_EP1_WRBUFF_WR_AXI0_WLAST   => cdc_axi_wlast(HBM_DMA_PORT(4)),
+            HBM_EP1_WRBUFF_WR_AXI0_WVALID  => cdc_axi_wvalid(HBM_DMA_PORT(4)),
+            HBM_EP1_WRBUFF_WR_AXI0_WREADY  => cdc_axi_wready(HBM_DMA_PORT(4)),
+            HBM_EP1_WRBUFF_WR_AXI0_BID     => cdc_axi_bid(HBM_DMA_PORT(4)),
+            HBM_EP1_WRBUFF_WR_AXI0_BRESP   => cdc_axi_bresp(HBM_DMA_PORT(4)),
+            HBM_EP1_WRBUFF_WR_AXI0_BVALID  => cdc_axi_bvalid(HBM_DMA_PORT(4)),
+            HBM_EP1_WRBUFF_WR_AXI0_BREADY  => cdc_axi_bready(HBM_DMA_PORT(4)),
+
+            HBM_EP1_WRBUFF_WR_AXI1_AWADDR  => cdc_axi_awaddr(HBM_DMA_PORT(5)),
+            HBM_EP1_WRBUFF_WR_AXI1_AWID    => cdc_axi_awid(HBM_DMA_PORT(5)),
+            HBM_EP1_WRBUFF_WR_AXI1_AWLEN   => cdc_axi_awlen(HBM_DMA_PORT(5)),
+            HBM_EP1_WRBUFF_WR_AXI1_AWSIZE  => cdc_axi_awsize(HBM_DMA_PORT(5)),
+            HBM_EP1_WRBUFF_WR_AXI1_AWBURST => cdc_axi_awburst(HBM_DMA_PORT(5)),
+            HBM_EP1_WRBUFF_WR_AXI1_AWVALID => cdc_axi_awvalid(HBM_DMA_PORT(5)),
+            HBM_EP1_WRBUFF_WR_AXI1_AWREADY => cdc_axi_awready(HBM_DMA_PORT(5)),
+            HBM_EP1_WRBUFF_WR_AXI1_WDATA   => cdc_axi_wdata(HBM_DMA_PORT(5)),
+            HBM_EP1_WRBUFF_WR_AXI1_WSTRB   => cdc_axi_wstrb(HBM_DMA_PORT(5)),
+            HBM_EP1_WRBUFF_WR_AXI1_WLAST   => cdc_axi_wlast(HBM_DMA_PORT(5)),
+            HBM_EP1_WRBUFF_WR_AXI1_WVALID  => cdc_axi_wvalid(HBM_DMA_PORT(5)),
+            HBM_EP1_WRBUFF_WR_AXI1_WREADY  => cdc_axi_wready(HBM_DMA_PORT(5)),
+            HBM_EP1_WRBUFF_WR_AXI1_BID     => cdc_axi_bid(HBM_DMA_PORT(5)),
+            HBM_EP1_WRBUFF_WR_AXI1_BRESP   => cdc_axi_bresp(HBM_DMA_PORT(5)),
+            HBM_EP1_WRBUFF_WR_AXI1_BVALID  => cdc_axi_bvalid(HBM_DMA_PORT(5)),
+            HBM_EP1_WRBUFF_WR_AXI1_BREADY  => cdc_axi_bready(HBM_DMA_PORT(5)),
+
+            HBM_EP1_WRBUFF_RD_AXI0_ARADDR  => cdc_axi_araddr(HBM_DMA_PORT(4)),
+            HBM_EP1_WRBUFF_RD_AXI0_ARID    => cdc_axi_arid(HBM_DMA_PORT(4)),
+            HBM_EP1_WRBUFF_RD_AXI0_ARLEN   => cdc_axi_arlen(HBM_DMA_PORT(4)),
+            HBM_EP1_WRBUFF_RD_AXI0_ARSIZE  => cdc_axi_arsize(HBM_DMA_PORT(4)),
+            HBM_EP1_WRBUFF_RD_AXI0_ARBURST => cdc_axi_arburst(HBM_DMA_PORT(4)),
+            HBM_EP1_WRBUFF_RD_AXI0_ARVALID => cdc_axi_arvalid(HBM_DMA_PORT(4)),
+            HBM_EP1_WRBUFF_RD_AXI0_ARREADY => cdc_axi_arready(HBM_DMA_PORT(4)),
+            HBM_EP1_WRBUFF_RD_AXI0_RDATA   => cdc_axi_rdata(HBM_DMA_PORT(4)),
+            HBM_EP1_WRBUFF_RD_AXI0_RID     => cdc_axi_rid(HBM_DMA_PORT(4)),
+            HBM_EP1_WRBUFF_RD_AXI0_RRESP   => cdc_axi_rresp(HBM_DMA_PORT(4)),
+            HBM_EP1_WRBUFF_RD_AXI0_RLAST   => cdc_axi_rlast(HBM_DMA_PORT(4)),
+            HBM_EP1_WRBUFF_RD_AXI0_RVALID  => cdc_axi_rvalid(HBM_DMA_PORT(4)),
+            HBM_EP1_WRBUFF_RD_AXI0_RREADY  => cdc_axi_rready(HBM_DMA_PORT(4)),
+            HBM_EP1_WRBUFF_RD_AXI1_ARADDR  => cdc_axi_araddr(HBM_DMA_PORT(5)),
+            HBM_EP1_WRBUFF_RD_AXI1_ARID    => cdc_axi_arid(HBM_DMA_PORT(5)),
+            HBM_EP1_WRBUFF_RD_AXI1_ARLEN   => cdc_axi_arlen(HBM_DMA_PORT(5)),
+            HBM_EP1_WRBUFF_RD_AXI1_ARSIZE  => cdc_axi_arsize(HBM_DMA_PORT(5)),
+            HBM_EP1_WRBUFF_RD_AXI1_ARBURST => cdc_axi_arburst(HBM_DMA_PORT(5)),
+            HBM_EP1_WRBUFF_RD_AXI1_ARVALID => cdc_axi_arvalid(HBM_DMA_PORT(5)),
+            HBM_EP1_WRBUFF_RD_AXI1_ARREADY => cdc_axi_arready(HBM_DMA_PORT(5)),
+            HBM_EP1_WRBUFF_RD_AXI1_RDATA   => cdc_axi_rdata(HBM_DMA_PORT(5)),
+            HBM_EP1_WRBUFF_RD_AXI1_RID     => cdc_axi_rid(HBM_DMA_PORT(5)),
+            HBM_EP1_WRBUFF_RD_AXI1_RRESP   => cdc_axi_rresp(HBM_DMA_PORT(5)),
+            HBM_EP1_WRBUFF_RD_AXI1_RLAST   => cdc_axi_rlast(HBM_DMA_PORT(5)),
+            HBM_EP1_WRBUFF_RD_AXI1_RVALID  => cdc_axi_rvalid(HBM_DMA_PORT(5)),
+            HBM_EP1_WRBUFF_RD_AXI1_RREADY  => cdc_axi_rready(HBM_DMA_PORT(5)),
+
+            HBM_EP1_RDBUFF_WR_AXI0_AWADDR  => cdc_axi_awaddr(HBM_DMA_PORT(6)),
+            HBM_EP1_RDBUFF_WR_AXI0_AWID    => cdc_axi_awid(HBM_DMA_PORT(6)),
+            HBM_EP1_RDBUFF_WR_AXI0_AWLEN   => cdc_axi_awlen(HBM_DMA_PORT(6)),
+            HBM_EP1_RDBUFF_WR_AXI0_AWSIZE  => cdc_axi_awsize(HBM_DMA_PORT(6)),
+            HBM_EP1_RDBUFF_WR_AXI0_AWBURST => cdc_axi_awburst(HBM_DMA_PORT(6)),
+            HBM_EP1_RDBUFF_WR_AXI0_AWVALID => cdc_axi_awvalid(HBM_DMA_PORT(6)),
+            HBM_EP1_RDBUFF_WR_AXI0_AWREADY => cdc_axi_awready(HBM_DMA_PORT(6)),
+            HBM_EP1_RDBUFF_WR_AXI0_WDATA   => cdc_axi_wdata(HBM_DMA_PORT(6)),
+            HBM_EP1_RDBUFF_WR_AXI0_WSTRB   => cdc_axi_wstrb(HBM_DMA_PORT(6)),
+            HBM_EP1_RDBUFF_WR_AXI0_WLAST   => cdc_axi_wlast(HBM_DMA_PORT(6)),
+            HBM_EP1_RDBUFF_WR_AXI0_WVALID  => cdc_axi_wvalid(HBM_DMA_PORT(6)),
+            HBM_EP1_RDBUFF_WR_AXI0_WREADY  => cdc_axi_wready(HBM_DMA_PORT(6)),
+            HBM_EP1_RDBUFF_WR_AXI0_BID     => cdc_axi_bid(HBM_DMA_PORT(6)),
+            HBM_EP1_RDBUFF_WR_AXI0_BRESP   => cdc_axi_bresp(HBM_DMA_PORT(6)),
+            HBM_EP1_RDBUFF_WR_AXI0_BVALID  => cdc_axi_bvalid(HBM_DMA_PORT(6)),
+            HBM_EP1_RDBUFF_WR_AXI0_BREADY  => cdc_axi_bready(HBM_DMA_PORT(6)),
+
+            HBM_EP1_RDBUFF_WR_AXI1_AWADDR  => cdc_axi_awaddr(HBM_DMA_PORT(7)),
+            HBM_EP1_RDBUFF_WR_AXI1_AWID    => cdc_axi_awid(HBM_DMA_PORT(7)),
+            HBM_EP1_RDBUFF_WR_AXI1_AWLEN   => cdc_axi_awlen(HBM_DMA_PORT(7)),
+            HBM_EP1_RDBUFF_WR_AXI1_AWSIZE  => cdc_axi_awsize(HBM_DMA_PORT(7)),
+            HBM_EP1_RDBUFF_WR_AXI1_AWBURST => cdc_axi_awburst(HBM_DMA_PORT(7)),
+            HBM_EP1_RDBUFF_WR_AXI1_AWVALID => cdc_axi_awvalid(HBM_DMA_PORT(7)),
+            HBM_EP1_RDBUFF_WR_AXI1_AWREADY => cdc_axi_awready(HBM_DMA_PORT(7)),
+            HBM_EP1_RDBUFF_WR_AXI1_WDATA   => cdc_axi_wdata(HBM_DMA_PORT(7)),
+            HBM_EP1_RDBUFF_WR_AXI1_WSTRB   => cdc_axi_wstrb(HBM_DMA_PORT(7)),
+            HBM_EP1_RDBUFF_WR_AXI1_WLAST   => cdc_axi_wlast(HBM_DMA_PORT(7)),
+            HBM_EP1_RDBUFF_WR_AXI1_WVALID  => cdc_axi_wvalid(HBM_DMA_PORT(7)),
+            HBM_EP1_RDBUFF_WR_AXI1_WREADY  => cdc_axi_wready(HBM_DMA_PORT(7)),
+            HBM_EP1_RDBUFF_WR_AXI1_BID     => cdc_axi_bid(HBM_DMA_PORT(7)),
+            HBM_EP1_RDBUFF_WR_AXI1_BRESP   => cdc_axi_bresp(HBM_DMA_PORT(7)),
+            HBM_EP1_RDBUFF_WR_AXI1_BVALID  => cdc_axi_bvalid(HBM_DMA_PORT(7)),
+            HBM_EP1_RDBUFF_WR_AXI1_BREADY  => cdc_axi_bready(HBM_DMA_PORT(7)),
+
+            HBM_EP1_RDBUFF_RD_AXI0_ARADDR  => cdc_axi_araddr(HBM_DMA_PORT(6)),
+            HBM_EP1_RDBUFF_RD_AXI0_ARID    => cdc_axi_arid(HBM_DMA_PORT(6)),
+            HBM_EP1_RDBUFF_RD_AXI0_ARLEN   => cdc_axi_arlen(HBM_DMA_PORT(6)),
+            HBM_EP1_RDBUFF_RD_AXI0_ARSIZE  => cdc_axi_arsize(HBM_DMA_PORT(6)),
+            HBM_EP1_RDBUFF_RD_AXI0_ARBURST => cdc_axi_arburst(HBM_DMA_PORT(6)),
+            HBM_EP1_RDBUFF_RD_AXI0_ARVALID => cdc_axi_arvalid(HBM_DMA_PORT(6)),
+            HBM_EP1_RDBUFF_RD_AXI0_ARREADY => cdc_axi_arready(HBM_DMA_PORT(6)),
+            HBM_EP1_RDBUFF_RD_AXI0_RDATA   => cdc_axi_rdata(HBM_DMA_PORT(6)),
+            HBM_EP1_RDBUFF_RD_AXI0_RID     => cdc_axi_rid(HBM_DMA_PORT(6)),
+            HBM_EP1_RDBUFF_RD_AXI0_RRESP   => cdc_axi_rresp(HBM_DMA_PORT(6)),
+            HBM_EP1_RDBUFF_RD_AXI0_RLAST   => cdc_axi_rlast(HBM_DMA_PORT(6)),
+            HBM_EP1_RDBUFF_RD_AXI0_RVALID  => cdc_axi_rvalid(HBM_DMA_PORT(6)),
+            HBM_EP1_RDBUFF_RD_AXI0_RREADY  => cdc_axi_rready(HBM_DMA_PORT(6)),
+            HBM_EP1_RDBUFF_RD_AXI1_ARADDR  => cdc_axi_araddr(HBM_DMA_PORT(7)),
+            HBM_EP1_RDBUFF_RD_AXI1_ARID    => cdc_axi_arid(HBM_DMA_PORT(7)),
+            HBM_EP1_RDBUFF_RD_AXI1_ARLEN   => cdc_axi_arlen(HBM_DMA_PORT(7)),
+            HBM_EP1_RDBUFF_RD_AXI1_ARSIZE  => cdc_axi_arsize(HBM_DMA_PORT(7)),
+            HBM_EP1_RDBUFF_RD_AXI1_ARBURST => cdc_axi_arburst(HBM_DMA_PORT(7)),
+            HBM_EP1_RDBUFF_RD_AXI1_ARVALID => cdc_axi_arvalid(HBM_DMA_PORT(7)),
+            HBM_EP1_RDBUFF_RD_AXI1_ARREADY => cdc_axi_arready(HBM_DMA_PORT(7)),
+            HBM_EP1_RDBUFF_RD_AXI1_RDATA   => cdc_axi_rdata(HBM_DMA_PORT(7)),
+            HBM_EP1_RDBUFF_RD_AXI1_RID     => cdc_axi_rid(HBM_DMA_PORT(7)),
+            HBM_EP1_RDBUFF_RD_AXI1_RRESP   => cdc_axi_rresp(HBM_DMA_PORT(7)),
+            HBM_EP1_RDBUFF_RD_AXI1_RLAST   => cdc_axi_rlast(HBM_DMA_PORT(7)),
+            HBM_EP1_RDBUFF_RD_AXI1_RVALID  => cdc_axi_rvalid(HBM_DMA_PORT(7)),
+            HBM_EP1_RDBUFF_RD_AXI1_RREADY  => cdc_axi_rready(HBM_DMA_PORT(7)),
+
+            STAT_WRBUFF_UNALIGNED_BURST => open,
+            STAT_WRBUFF_WR_BRESP_ERR    => open,
+            STAT_WRBUFF_RD_RRESP_ERR    => open,
+            STAT_WRBUFF_SPARSE_BE       => open,
+            STAT_WRBUFF_DROPPED_FRAME   => open,
+
+            -- RDBUFF HBM datapath statistics: not yet wired to an MI counter, same as
+            -- STAT_WRBUFF_* above (see DMA_IUVENTUS's own STAT_RDBUFF_* port comment).
+            STAT_RDBUFF_RD_RRESP_ERR => open,
+            STAT_RDBUFF_RD_UNALIGNED => open
+        );
+
+    -- Endpoint 1's CQ/CC MFB and PCIe user clock/reset feed the single DMA instance's EP1 ports;
+    -- with one endpoint there is nothing to source them from, so they idle instead.
+    ep1_g : if (DMA_STREAMS = 2) generate
+        dma_ep1_pcie_clk <= pcie_clks(1);
+        dma_ep1_pcie_rst <= pcie_rsts(1);
+
+        dma_ep1_cq_mfb_data    <= pcie_cq_mfb_data(1);
+        dma_ep1_cq_mfb_meta    <= pcie_cq_mfb_meta(1);
+        dma_ep1_cq_mfb_sof     <= pcie_cq_mfb_sof(1);
+        dma_ep1_cq_mfb_eof     <= pcie_cq_mfb_eof(1);
+        dma_ep1_cq_mfb_sof_pos <= pcie_cq_mfb_sof_pos(1);
+        dma_ep1_cq_mfb_eof_pos <= pcie_cq_mfb_eof_pos(1);
+        dma_ep1_cq_mfb_src_rdy <= pcie_cq_mfb_src_rdy(1);
+        pcie_cq_mfb_dst_rdy(1) <= dma_ep1_cq_mfb_dst_rdy;
+
+        pcie_cc_mfb_data(1)    <= dma_ep1_cc_mfb_data;
+        pcie_cc_mfb_meta(1)    <= dma_ep1_cc_mfb_meta;
+        pcie_cc_mfb_sof(1)     <= dma_ep1_cc_mfb_sof;
+        pcie_cc_mfb_eof(1)     <= dma_ep1_cc_mfb_eof;
+        pcie_cc_mfb_sof_pos(1) <= dma_ep1_cc_mfb_sof_pos;
+        pcie_cc_mfb_eof_pos(1) <= dma_ep1_cc_mfb_eof_pos;
+        pcie_cc_mfb_src_rdy(1) <= dma_ep1_cc_mfb_src_rdy;
+        dma_ep1_cc_mfb_dst_rdy <= pcie_cc_mfb_dst_rdy(1);
+
+        -- Endpoint 1 has no doorbells: nothing ever offers it a submission, so RQ idles.
+        pcie_rq_mfb_src_rdy(1) <= '0';
+        pcie_rq_mfb_data(1)    <= (others => '0');
+        pcie_rq_mfb_meta(1)    <= (others => '0');
+        pcie_rq_mfb_sof(1)     <= (others => '0');
+        pcie_rq_mfb_eof(1)     <= (others => '0');
+        pcie_rq_mfb_sof_pos(1) <= (others => '0');
+        pcie_rq_mfb_eof_pos(1) <= (others => '0');
+    end generate;
+
+    no_ep1_g : if (DMA_STREAMS = 1) generate
+        dma_ep1_pcie_clk       <= pcie_clks(0);
+        dma_ep1_pcie_rst       <= '1';
+        dma_ep1_cq_mfb_data    <= (others => '0');
+        dma_ep1_cq_mfb_meta    <= (others => '0');
+        dma_ep1_cq_mfb_sof     <= (others => '0');
+        dma_ep1_cq_mfb_eof     <= (others => '0');
+        dma_ep1_cq_mfb_sof_pos <= (others => '0');
+        dma_ep1_cq_mfb_eof_pos <= (others => '0');
+        dma_ep1_cq_mfb_src_rdy <= '0';
+        dma_ep1_cc_mfb_dst_rdy <= '0';
+    end generate;
+
+    -- MI interface connection: the single DMA's MI port sits behind MI_ADC_PORT_DMA, endpoint 0's
+    -- own address space. Endpoint 1's PF0 is a dummy the nfb driver never binds, so its MI is
+    -- terminated below instead of feeding a second DMA instance.
     dma_mi_pr : process (all)
     begin
-        -- Connect directly to MTC by default
-        dma_mi_dwr                         <= mi_dwr;
-        dma_mi_addr                        <= mi_addr;
-        dma_mi_rd                          <= mi_rd;
-        dma_mi_wr                          <= mi_wr;
-        dma_mi_be                          <= mi_be;
-        mi_drd (PCIE_ENDPOINTS-1 downto 1) <= dma_mi_drd (PCIE_ENDPOINTS-1 downto 1);
-        mi_ardy(PCIE_ENDPOINTS-1 downto 1) <= dma_mi_ardy(PCIE_ENDPOINTS-1 downto 1);
-        mi_drdy(PCIE_ENDPOINTS-1 downto 1) <= dma_mi_drdy(PCIE_ENDPOINTS-1 downto 1);
-
-        -- Connect to MI ADC for PCIe Endpoint 0
         dma_mi_dwr (0)               <= mi_adc_dwr(MI_ADC_PORT_DMA);
         dma_mi_addr(0)               <= mi_adc_addr(MI_ADC_PORT_DMA);
         dma_mi_rd (0)                <= mi_adc_rd(MI_ADC_PORT_DMA);
@@ -2218,6 +2442,27 @@ begin
         mi_adc_ardy(MI_ADC_PORT_DMA) <= dma_mi_ardy(0);
         mi_adc_drdy(MI_ADC_PORT_DMA) <= dma_mi_drdy(0);
     end process;
+
+    -- Terminates endpoint 1's PF0 MTC so it never hangs a read/write: no register file behind it,
+    -- just a small BRAM test space, matching the pattern already used for MI_ADC_PORT_TEST.
+    ep1_mi_term_g : if (DMA_STREAMS = 2) generate
+        mi_test_space_ep1_i : entity work.MI_TEST_SPACE
+            generic map (
+                DEVICE => DEVICE
+            )
+            port map (
+                CLK     => usr_clks(MI_CLK_IDX),
+                RESET   => usr_rsts(MI_CLK_IDX)(9),
+                MI_DWR  => mi_dwr(1),
+                MI_ADDR => mi_addr(1),
+                MI_BE   => mi_be(1),
+                MI_RD   => mi_rd(1),
+                MI_WR   => mi_wr(1),
+                MI_DRD  => mi_drd(1),
+                MI_ARDY => mi_ardy(1),
+                MI_DRDY => mi_drdy(1)
+            );
+    end generate;
 
     -- =========================================================================
     --  THE APPLICATION

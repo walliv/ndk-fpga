@@ -10,12 +10,12 @@ resize_pblock [get_pblocks pblock_pcie_i] -add {CLOCKREGION_X7Y0:CLOCKREGION_X7Y
 set_property IS_SOFT 0 [get_pblocks pblock_pcie_i]
 
 create_pblock pblock_dma
-add_cells_to_pblock [get_pblocks pblock_dma] [get_cells -quiet [list {core_logic_i/dma_g[0].dma_i/card2nvme_ctrl_i} {core_logic_i/dma_g[0].dma_i/nvme2card_ctrl_i}]]
+add_cells_to_pblock [get_pblocks pblock_dma] [get_cells -quiet [list {core_logic_i/dma_i/card2nvme_ctrl_i} {core_logic_i/dma_i/nvme2card_ctrl_i}]]
 resize_pblock [get_pblocks pblock_dma] -add {CLOCKREGION_X4Y0:CLOCKREGION_X6Y3}
 set_property IS_SOFT 0 [get_pblocks pblock_dma]
 
 create_pblock pblock_wrbuff_drain
-add_cells_to_pblock [get_pblocks pblock_wrbuff_drain] [get_cells -quiet [list {core_logic_i/dma_g[0].dma_i/nvme2card_ctrl_i/hbm_stream_writer_i}]]
+add_cells_to_pblock [get_pblocks pblock_wrbuff_drain] [get_cells -quiet [list {core_logic_i/dma_i/nvme2card_ctrl_i/hbm_stream_writer_i}]]
 # X4Y0:X5Y1 follows the WRBUFF HBM ports, which now sit under X4Y0. The previous X5Y0:X6Y1 box ran
 # at 90-98% SLICE occupancy in every one of its four regions, and being IS_SOFT 0 it left the
 # placer no way out; X4Y0/X4Y1 are the least occupied regions inside the enclosing DMA pblock.
