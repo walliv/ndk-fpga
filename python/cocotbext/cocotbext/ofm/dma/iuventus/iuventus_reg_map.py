@@ -121,6 +121,18 @@ class IuventusMiRegMap(IntEnum):
     PROF_ALLOC_WAIT_WR_CNTR_H   = 0x174
     PROF_ALLOC_WAIT_PEND_CNTR_L = 0x178
     PROF_ALLOC_WAIT_PEND_CNTR_H = 0x17C
+    # Endpoint-1 counterparts (EP1_ prefix) of the BADDR_L, PRP_LIST_PTR_L and *_PAGES_FREE
+    # registers above; only meaningful when the core was elaborated with PCIE_ENDPOINTS=2.
+    EP1_RDBUFF_BADDR_L              = 0x180
+    EP1_RDBUFF_BADDR_H              = 0x184
+    EP1_RDBUFF_PRP_LIST_PTR_L       = 0x188
+    EP1_RDBUFF_PRP_LIST_PTR_H       = 0x18C
+    EP1_WRBUFF_BADDR_L              = 0x190
+    EP1_WRBUFF_BADDR_H              = 0x194
+    EP1_WRBUFF_PRP_LIST_PTR_L       = 0x198
+    EP1_WRBUFF_PRP_LIST_PTR_H       = 0x19C
+    EP1_RD_PAGES_FREE               = 0x1A0
+    EP1_WR_PAGES_FREE               = 0x1A4
 
 
 # Base offset and per-queue slot stride of the PER-QUEUE 2D register block. Queue 0 is q=0 of it
