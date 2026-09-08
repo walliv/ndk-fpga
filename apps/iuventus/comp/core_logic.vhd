@@ -150,9 +150,6 @@ architecture FULL of CORE_LOGIC is
     constant HBM_LEN_WIDTH   : natural := 4;
     constant HBM_SIZE_WIDTH  : natural := 3;
     constant HBM_RESP_WIDTH  : natural := 2;
-    -- Stack 0 is ports 0..15, stack 1 is 16..31. The smoke port sits at 16 -- the first port of
-    -- stack 1 -- so every connected port lives in one stack and stack 0 is left entirely unused.
-    constant HBM_SMOKE_PORT  : natural := 16;
 
     -- One port per bank, BOTH directions: fill on AW/W/B, drain on AR/R. Fixed port pair per
     -- buffer; see the DMA core's own documentation for the floorplan/pblock rationale.
@@ -177,17 +174,9 @@ architecture FULL of CORE_LOGIC is
     constant HBM_RDBUFF_RD_PORT0_BASE : std_logic_vector(34-1 downto 0) := HBM_ZERO_BASE;
     constant HBM_RDBUFF_RD_PORT1_BASE : std_logic_vector(34-1 downto 0) := HBM_ZERO_BASE;
 
-    -- True only for the smoke port: the DMA-driven ports (28..31) are excluded so the smoke-test
-    -- demux cannot collide with them. PORT_SEL's fallback maps to the smoke port, which is also
-    -- its reset value.
-    function hbm_port_wired_f (idx : natural) return boolean is
-    begin
-        return (idx = HBM_SMOKE_PORT);
-    end function;
-
-    -- Ports the DMA drives directly, rather than through the smoke-test demux. Membership is by
-    -- EQUALITY, never a PORT0..PORT1 range: the two numbers per buffer are independent and need
-    -- not ascend. A port missing here is tied off and never returns BRESP.
+    -- Ports the DMA drives directly. Membership is by EQUALITY, never a PORT0..PORT1 range: the
+    -- two numbers per buffer are independent and need not ascend. A port missing here is tied
+    -- off and never returns BRESP.
     function hbm_dma_driven_port_f (idx : natural) return boolean is
     begin
         return idx = HBM_WRBUFF_WR_PORT0 or idx = HBM_WRBUFF_WR_PORT1 or
@@ -197,14 +186,6 @@ architecture FULL of CORE_LOGIC is
     -- Every DMA port drives BOTH directions, so this is simply "is it a DMA port". Kept as a
     -- named function because AXI_PIPE still takes separate WRITE_EN/READ_EN.
     function hbm_read_port_f (idx : natural) return boolean is
-    begin
-        return hbm_dma_driven_port_f(idx);
-    end function;
-
-    -- Ports on the 450 MHz HBM clock (mmcm_450_i): the same set as hbm_dma_driven_port_f, named
-    -- separately since clock domain and AXI-driver are logically distinct even though they
-    -- coincide. Take port numbers from the constants above, not this comment.
-    function hbm_450_port_f (idx : natural) return boolean is
     begin
         return hbm_dma_driven_port_f(idx);
     end function;
@@ -369,7 +350,7 @@ architecture FULL of CORE_LOGIC is
     signal nvme_wr_mfb_src_rdy : std_logic_vector(DMA_STREAMS -1 downto 0);
     signal nvme_wr_mfb_dst_rdy : std_logic_vector(DMA_STREAMS -1 downto 0);
 
-    -- HBM AXI3 per-port clock/reset + IP-ready/init-done (Phase 0 smoke test)
+    -- HBM AXI3 per-port clock/reset + IP-ready/init-done
     signal hbm_axi_aclk     : std_logic_vector(HBM_PORTS -1 downto 0);
     signal hbm_axi_areset_n : std_logic_vector(HBM_PORTS -1 downto 0);
     signal hbm_ready        : std_logic_vector(1 downto 0);
@@ -377,8 +358,8 @@ architecture FULL of CORE_LOGIC is
     signal hbm_cattrip_int  : std_logic_vector(1 downto 0);
     signal hbm_init_done    : std_logic;
 
-    -- Dedicated 450 MHz port clock (MMCME4_BASE from SYSCLK) drives the DMA-driven data ports
-    -- (hbm_450_port_f). hbm_450_arstn is the synchronized reset counterpart of pll_locked/global_reset,
+    -- Dedicated 450 MHz port clock (MMCME4_BASE from SYSCLK) drives every HBM port
+    -- (hbm_port_wiring_g). hbm_450_arstn is the synchronized reset counterpart of pll_locked/global_reset,
     -- active-low to match hbm_axi_areset_n's polarity.
     signal hbm_450_clkfbout : std_logic;
     signal hbm_450_clk_raw : std_logic;
@@ -459,42 +440,6 @@ architecture FULL of CORE_LOGIC is
     signal cdc_axi_bresp  : slv_array_t(HBM_PORTS-1 downto 0)(HBM_RESP_WIDTH-1 downto 0);
     signal cdc_axi_bvalid : std_logic_vector(HBM_PORTS-1 downto 0);
     signal cdc_axi_bready : std_logic_vector(HBM_PORTS-1 downto 0);
-
-    -- HBM_SMOKE_TEST's single AXI group, demuxed onto the wired port selected by PORT_SEL
-    -- (see hbm_port_wiring_g). Software must only change PORT_SEL while both FSMs are idle.
-    signal smk_awaddr       : std_logic_vector(HBM_ADDR_WIDTH -1 downto 0);
-    signal smk_awburst      : std_logic_vector(HBM_BURST_WIDTH -1 downto 0);
-    signal smk_awid         : std_logic_vector(HBM_ID_WIDTH -1 downto 0);
-    signal smk_awlen        : std_logic_vector(HBM_LEN_WIDTH -1 downto 0);
-    signal smk_awsize       : std_logic_vector(HBM_SIZE_WIDTH -1 downto 0);
-    signal smk_awvalid      : std_logic;
-    signal smk_awready      : std_logic;
-    signal smk_wdata        : std_logic_vector(HBM_DATA_WIDTH -1 downto 0);
-    signal smk_wdata_parity : std_logic_vector((HBM_DATA_WIDTH/8) -1 downto 0);
-    signal smk_wlast        : std_logic;
-    signal smk_wstrb        : std_logic_vector((HBM_DATA_WIDTH/8) -1 downto 0);
-    signal smk_wvalid       : std_logic;
-    signal smk_wready       : std_logic;
-    signal smk_bid          : std_logic_vector(HBM_ID_WIDTH -1 downto 0);
-    signal smk_bresp        : std_logic_vector(HBM_RESP_WIDTH -1 downto 0);
-    signal smk_bvalid       : std_logic;
-    signal smk_bready       : std_logic;
-    signal smk_araddr       : std_logic_vector(HBM_ADDR_WIDTH -1 downto 0);
-    signal smk_arburst      : std_logic_vector(HBM_BURST_WIDTH -1 downto 0);
-    signal smk_arid         : std_logic_vector(HBM_ID_WIDTH -1 downto 0);
-    signal smk_arlen        : std_logic_vector(HBM_LEN_WIDTH -1 downto 0);
-    signal smk_arsize       : std_logic_vector(HBM_SIZE_WIDTH -1 downto 0);
-    signal smk_arvalid      : std_logic;
-    signal smk_arready      : std_logic;
-    signal smk_rdata        : std_logic_vector(HBM_DATA_WIDTH -1 downto 0);
-    signal smk_rdata_parity : std_logic_vector((HBM_DATA_WIDTH/8) -1 downto 0);
-    signal smk_rid          : std_logic_vector(HBM_ID_WIDTH -1 downto 0);
-    signal smk_rlast        : std_logic;
-    signal smk_rresp        : std_logic_vector(HBM_RESP_WIDTH -1 downto 0);
-    signal smk_rvalid       : std_logic;
-    signal smk_rready       : std_logic;
-    signal smk_port_sel     : std_logic_vector(4 downto 0);
-    signal smk_sel_port     : natural range 0 to HBM_PORTS-1;
 
     component hbm_ip
         port (
@@ -1612,8 +1557,8 @@ begin
     end generate;
 
     -- Dedicated 450 MHz HBM port clock: MMCM fed from SYSCLK. VCO = 100 MHz * CLKFBOUT_MULT_F(13.5)
-    -- / DIVCLK_DIVIDE(1) = 1350 MHz, /CLKOUT0_DIVIDE_F(3.0) = 450 MHz. Drives DMA-driven ports'
-    -- AXI3 via hbm_axi_cdc_bridge_g; the smoke port stays on MI clock.
+    -- / DIVCLK_DIVIDE(1) = 1350 MHz, /CLKOUT0_DIVIDE_F(3.0) = 450 MHz. Every HBM port runs on this
+    -- clock, per PG276's single shared ARESET_N across the switch (hbm_port_wiring_g).
     mmcm_450_i : component MMCME4_BASE
         generic map (
             BANDWIDTH        => "OPTIMIZED",
@@ -2365,21 +2310,16 @@ begin
 
     STATUS_LEDS(1) <= (and app_pcie_link_up);
 
-    -- HBM smoke-test wiring. PG276: the switch ties every port's ARESET_N together, so an unused
+    -- HBM port wiring. PG276: the switch ties every port's ARESET_N together, so an unused
     -- port held in reset would reset the whole stack -- every port gets the same clock and a
     -- deasserted reset; unused ports tie their master-driven inputs inactive.
-    smk_sel_port <= to_integer(unsigned(smk_port_sel))
-                    when hbm_port_wired_f(to_integer(unsigned(smk_port_sel)))
-                    else HBM_SMOKE_PORT;
-
     hbm_port_wiring_g : for i in 0 to HBM_PORTS-1 generate
-        -- hbm_450_port_f selects the 450 MHz clock/reset per port; the smoke port uses the MI clock/reset.
-        hbm_axi_aclk(i)     <= hbm_450_clk when hbm_450_port_f(i) else usr_clks(MI_CLK_IDX);
-        hbm_axi_areset_n(i) <= hbm_450_arstn when hbm_450_port_f(i) else (not usr_rsts(MI_CLK_IDX)(9));
+        hbm_axi_aclk(i)     <= hbm_450_clk;
+        hbm_axi_areset_n(i) <= hbm_450_arstn;
 
         -- DMA-driven ports (hbm_dma_driven_port_f) take DMA_IUVENTUS's already-450 MHz AXI
-        -- through an AXI_PIPE before hbm_axi_*(i). dma_driven_port_g, wired_port_g, and
-        -- unused_port_g partition all HBM_PORTS exactly -- every port matches one branch.
+        -- through an AXI_PIPE before hbm_axi_*(i). dma_driven_port_g and unused_port_g partition
+        -- all HBM_PORTS exactly -- every port matches one branch.
         dma_driven_port_g : if (hbm_dma_driven_port_f(i)) generate
             hbm_axi_wdata_parity(i) <= (others => '0');
             -- DMA_IUVENTUS's AXI is already in the 450 MHz domain, so this only pipes it onward
@@ -2475,31 +2415,7 @@ begin
             );
         end generate;
 
-        wired_port_g : if (hbm_port_wired_f(i)) generate
-            -- Payload/address fields may fan out unconditionally (a transaction only starts on a
-            -- VALID); the handshake signals are gated on the selected port.
-            hbm_axi_araddr(i)       <= smk_araddr;
-            hbm_axi_arburst(i)      <= smk_arburst;
-            hbm_axi_arid(i)         <= smk_arid;
-            hbm_axi_arlen(i)        <= smk_arlen;
-            hbm_axi_arsize(i)       <= smk_arsize;
-            hbm_axi_arvalid(i)      <= smk_arvalid when (smk_sel_port = i) else '0';
-            hbm_axi_awaddr(i)       <= smk_awaddr;
-            hbm_axi_awburst(i)      <= smk_awburst;
-            hbm_axi_awid(i)         <= smk_awid;
-            hbm_axi_awlen(i)        <= smk_awlen;
-            hbm_axi_awsize(i)       <= smk_awsize;
-            hbm_axi_awvalid(i)      <= smk_awvalid when (smk_sel_port = i) else '0';
-            hbm_axi_wdata(i)        <= smk_wdata;
-            hbm_axi_wdata_parity(i) <= smk_wdata_parity;
-            hbm_axi_wlast(i)        <= smk_wlast;
-            hbm_axi_wstrb(i)        <= smk_wstrb;
-            hbm_axi_wvalid(i)       <= smk_wvalid when (smk_sel_port = i) else '0';
-            hbm_axi_rready(i)       <= smk_rready when (smk_sel_port = i) else '0';
-            hbm_axi_bready(i)       <= smk_bready when (smk_sel_port = i) else '0';
-        end generate;
-
-        unused_port_g : if (not hbm_port_wired_f(i) and not hbm_dma_driven_port_f(i)) generate
+        unused_port_g : if (not hbm_dma_driven_port_f(i)) generate
             -- tie ALL master-driven inputs of unused ports inactive
             hbm_axi_araddr(i)       <= (others => '0');
             hbm_axi_arburst(i)      <= (others => '0');
@@ -2523,20 +2439,6 @@ begin
         end generate;
     end generate;
 
-    -- Response mux back to the smoke-test FSM
-    smk_awready      <= hbm_axi_awready(smk_sel_port);
-    smk_wready       <= hbm_axi_wready(smk_sel_port);
-    smk_bid          <= hbm_axi_bid(smk_sel_port);
-    smk_bresp        <= hbm_axi_bresp(smk_sel_port);
-    smk_bvalid       <= hbm_axi_bvalid(smk_sel_port);
-    smk_arready      <= hbm_axi_arready(smk_sel_port);
-    smk_rdata        <= hbm_axi_rdata(smk_sel_port);
-    smk_rdata_parity <= hbm_axi_rdata_parity(smk_sel_port);
-    smk_rid          <= hbm_axi_rid(smk_sel_port);
-    smk_rlast        <= hbm_axi_rlast(smk_sel_port);
-    smk_rresp        <= hbm_axi_rresp(smk_sel_port);
-    smk_rvalid       <= hbm_axi_rvalid(smk_sel_port);
-
     hbm_ready_sync_g : for i in 0 to 1 generate
         hbm_ready_sync_i : xpm_cdc_single
             generic map (
@@ -2558,72 +2460,6 @@ begin
     -- HBM_CATTRIP is asserted by the IP on an uncorrectable stack over-temperature; OR the two
     -- stacks together onto the single top-level pin.
     HBM_CATTRIP <= or hbm_cattrip_int;
-
-    hbm_smoke_test_i : entity work.HBM_SMOKE_TEST
-        generic map (
-            MI_WIDTH           => MI_WIDTH,
-            SMOKE_PORT_DEFAULT => HBM_SMOKE_PORT,
-            HBM_ADDR_WIDTH     => HBM_ADDR_WIDTH,
-            HBM_DATA_WIDTH     => HBM_DATA_WIDTH,
-            HBM_ID_WIDTH       => HBM_ID_WIDTH,
-            HBM_LEN_WIDTH      => HBM_LEN_WIDTH,
-            HBM_SIZE_WIDTH     => HBM_SIZE_WIDTH,
-            HBM_BURST_WIDTH    => HBM_BURST_WIDTH,
-            HBM_RESP_WIDTH     => HBM_RESP_WIDTH
-        )
-        port map (
-            CLK => usr_clks(MI_CLK_IDX),
-            RST => usr_rsts(MI_CLK_IDX)(9),
-
-            MI_DWR  => mi_adc_dwr (MI_ADC_PORT_HBM_DBG),
-            MI_ADDR => mi_adc_addr(MI_ADC_PORT_HBM_DBG),
-            MI_BE   => mi_adc_be (MI_ADC_PORT_HBM_DBG),
-            MI_RD   => mi_adc_rd (MI_ADC_PORT_HBM_DBG),
-            MI_WR   => mi_adc_wr (MI_ADC_PORT_HBM_DBG),
-            MI_DRD  => mi_adc_drd (MI_ADC_PORT_HBM_DBG),
-            MI_ARDY => mi_adc_ardy(MI_ADC_PORT_HBM_DBG),
-            MI_DRDY => mi_adc_drdy(MI_ADC_PORT_HBM_DBG),
-
-            HBM_INIT_DONE => hbm_init_done,
-
-            PORT_SEL => smk_port_sel,
-
-            AXI_AWADDR  => smk_awaddr,
-            AXI_AWBURST => smk_awburst,
-            AXI_AWID    => smk_awid,
-            AXI_AWLEN   => smk_awlen,
-            AXI_AWSIZE  => smk_awsize,
-            AXI_AWVALID => smk_awvalid,
-            AXI_AWREADY => smk_awready,
-
-            AXI_WDATA        => smk_wdata,
-            AXI_WDATA_PARITY => smk_wdata_parity,
-            AXI_WLAST        => smk_wlast,
-            AXI_WSTRB        => smk_wstrb,
-            AXI_WVALID       => smk_wvalid,
-            AXI_WREADY       => smk_wready,
-
-            AXI_BID    => smk_bid,
-            AXI_BRESP  => smk_bresp,
-            AXI_BVALID => smk_bvalid,
-            AXI_BREADY => smk_bready,
-
-            AXI_ARADDR  => smk_araddr,
-            AXI_ARBURST => smk_arburst,
-            AXI_ARID    => smk_arid,
-            AXI_ARLEN   => smk_arlen,
-            AXI_ARSIZE  => smk_arsize,
-            AXI_ARVALID => smk_arvalid,
-            AXI_ARREADY => smk_arready,
-
-            AXI_RDATA        => smk_rdata,
-            AXI_RDATA_PARITY => smk_rdata_parity,
-            AXI_RID          => smk_rid,
-            AXI_RLAST        => smk_rlast,
-            AXI_RRESP        => smk_rresp,
-            AXI_RVALID       => smk_rvalid,
-            AXI_RREADY       => smk_rready
-        );
 
     hbm_i : hbm_ip
         port map (

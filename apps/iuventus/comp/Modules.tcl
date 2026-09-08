@@ -96,7 +96,6 @@ if {$ARCHGRP_ARR(USR_CORE_ARCH) == "FULL"} {
            elaborates USER_CORE with no architecture, which fails later with an unrelated message."
 }
 
-lappend MOD "$ENTITY_BASE/hbm_smoke_test.vhd"
 # this change: per-channel AXI3 pipeline stage (built on PIPE above) inserted on the 450 MHz side
 # of the HBM port connections -- see core_logic.vhd's hbm_450_pipe_i.
 lappend MOD "$ENTITY_BASE/axi_pipe.vhd"
