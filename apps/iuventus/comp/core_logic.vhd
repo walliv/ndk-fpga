@@ -153,10 +153,10 @@ architecture FULL of CORE_LOGIC is
     constant HBM_SIZE_WIDTH  : natural := 3;
     constant HBM_RESP_WIDTH  : natural := 2;
 
-    -- One port per bank, BOTH directions: fill on AW/W/B, drain on AR/R. Index = ep*4 + buf*2 +
-    -- port (buf 0 = WRBUFF, 1 = RDBUFF). The DMA core's documentation gives the floorplan behind
-    -- the port choice.
-    constant HBM_DMA_PORT : n_array_t(0 to 7) := (19, 18, 28, 27, 24, 25, 29, 30);
+    -- One port per bank, both directions. Index = ep*4 + buf*2 + port (buf 0 = WRBUFF). Stack-1
+    -- clock regions: X4Y0 16-19, X5Y0 20-24, X6Y0 25-29, X7Y0 30-31; endpoint 1 takes X6, beside
+    -- its PCIe block in X7Y0, and no pool straddles two regions.
+    constant HBM_DMA_PORT : n_array_t(0 to 7) := (19, 18, 20, 21, 25, 26, 28, 29);
 
     -- Every port addresses only its own pseudo-channel, so every base is 0. The former
     -- hbm_port_base_f(idx) = idx * 0x2000_0000 global map is gone with the switch that needed it.
@@ -241,6 +241,10 @@ architecture FULL of CORE_LOGIC is
 
     signal usr_rsts   : slv_array_t(CLK_COUNT -1 downto 0)(RESET_WIDTH -1 downto 0);
     signal pcie_rsts  : std_logic_vector(PCIE_ENDPOINTS-1 downto 0);
+    -- Two register stages between the PCIe reset synchroniser, which lives beside the hard block in
+    -- X7, and the DMA spread over X0-X6: a synchronous reset tolerates the delay, a 4.6 ns route on
+    -- a 4 ns clock does not.
+    signal dma_rst_pipe_r : std_logic_vector(1 downto 0) := (others => '1');
     signal rst_mi     : std_logic_vector(RESET_WIDTH-1 downto 0);
     signal rst_dma    : std_logic_vector(RESET_WIDTH-1 downto 0);
     signal rst_dma_x2 : std_logic_vector(RESET_WIDTH-1 downto 0);
@@ -373,15 +377,15 @@ architecture FULL of CORE_LOGIC is
     signal hbm_cattrip_int  : std_logic_vector(1 downto 0);
     signal hbm_init_done    : std_logic;
 
-    -- Dedicated 450 MHz port clock (MMCME4_BASE from SYSCLK) drives every HBM port
-    -- (hbm_port_wiring_g). hbm_450_arstn is the synchronized reset counterpart of pll_locked/global_reset,
-    -- active-low to match hbm_axi_areset_n's polarity.
+    -- Dedicated 450 MHz port clock (MMCME4_BASE from SYSCLK) for every HBM port.
     signal hbm_450_clkfbout : std_logic;
     signal hbm_450_clk_raw : std_logic;
     signal hbm_450_clk     : std_logic;
     signal hbm_450_locked  : std_logic;
-    signal hbm_450_rst_r   : std_logic_vector(0 downto 0);
-    signal hbm_450_arstn   : std_logic;
+    -- One replica per HBM port plus one for the DMA: a single 450 MHz reset flop driving every
+    -- port's ARESET_N and the CDC bridges would spend the 2.2 ns period on its fan-out net alone.
+    constant HBM_RST_REPLICAS : natural := HBM_PORTS + 1;
+    signal hbm_450_rst_r   : std_logic_vector(HBM_RST_REPLICAS -1 downto 0);
 
     signal hbm_axi_araddr  : slv_array_t(HBM_PORTS-1 downto 0)(HBM_ADDR_WIDTH-1 downto 0);
     signal hbm_axi_arburst : slv_array_t(HBM_PORTS-1 downto 0)(HBM_BURST_WIDTH-1 downto 0);
@@ -1625,15 +1629,13 @@ begin
         generic map (
             TWO_REG  => FALSE,
             OUT_REG  => TRUE,
-            REPLICAS => 1
+            REPLICAS => HBM_RST_REPLICAS
         )
         port map (
             CLK        => hbm_450_clk,
             ASYNC_RST  => (not pll_locked) or (not hbm_450_locked),
-            OUT_RST(0) => hbm_450_rst_r(0)
+            OUT_RST    => hbm_450_rst_r
         );
-
-    hbm_450_arstn <= not hbm_450_rst_r(0);
 
     global_reset_i : entity work.ASYNC_RESET
         generic map (
@@ -1947,6 +1949,13 @@ begin
     -- =========================================================================
     -- One DMA instance serves both PCIe endpoints: CLK/RST and the plain-indexed ports below are
     -- endpoint 0's; the PCIE_EP1_*/HBM_EP1_* ports carry endpoint 1's CQ/CC MFB and HBM pools.
+    dma_rst_pipe_p : process (pcie_clks(0)) is
+    begin
+        if (rising_edge(pcie_clks(0))) then
+            dma_rst_pipe_r <= dma_rst_pipe_r(0) & pcie_rsts(0);
+        end if;
+    end process;
+
     dma_i : entity work.DMA_IUVENTUS
         generic map (
             DEVICE => DEVICE,
@@ -1979,6 +1988,8 @@ begin
             -- DMA_IUVENTUS's own PCIE_ENDPOINTS generic comment).
             PCIE_ENDPOINTS => DMA_STREAMS,
 
+            WRBUFF_FIFO_DEPTH => 1024,
+
             HBM_WRBUFF_WR_PORT0_BASE => HBM_WRBUFF_WR_PORT0_BASE,
             HBM_WRBUFF_WR_PORT1_BASE => HBM_WRBUFF_WR_PORT1_BASE,
             HBM_WRBUFF_RD_PORT0_BASE => HBM_WRBUFF_RD_PORT0_BASE,
@@ -2005,7 +2016,7 @@ begin
         )
         port map (
             CLK      => pcie_clks(0),
-            RST      => pcie_rsts(0),
+            RST      => dma_rst_pipe_r(1),
 
             -- EP1's own PCIe user clock/reset; tied idle by no_ep1_g below when DMA_STREAMS = 1.
             PCIE_EP1_CLK => dma_ep1_pcie_clk,
@@ -2110,7 +2121,7 @@ begin
             -- WRBUFF/RDBUFF fill/drain wire to fixed HBM_DMA_PORT entries. The DMA presents AXI
             -- already in the HBM domain, so this is a straight index into cdc_axi_*.
             HBM_CLK   => hbm_450_clk,
-            HBM_RESET => hbm_450_rst_r(0),
+            HBM_RESET => hbm_450_rst_r(HBM_PORTS),
 
             HBM_WRBUFF_WR_AXI0_AWADDR  => cdc_axi_awaddr(HBM_DMA_PORT(0)),
             HBM_WRBUFF_WR_AXI0_AWID    => cdc_axi_awid(HBM_DMA_PORT(0)),
@@ -2538,7 +2549,7 @@ begin
     -- tie their master-driven inputs inactive.
     hbm_port_wiring_g : for i in 0 to HBM_PORTS-1 generate
         hbm_axi_aclk(i)     <= hbm_450_clk;
-        hbm_axi_areset_n(i) <= hbm_450_arstn;
+        hbm_axi_areset_n(i) <= not hbm_450_rst_r(i);
 
         -- DMA-driven ports take DMA_IUVENTUS's 450 MHz AXI through an AXI_PIPE; dma_driven_port_g
         -- and unused_port_g partition HBM_PORTS exactly.
@@ -2565,7 +2576,7 @@ begin
             )
             port map (
                 CLK   => hbm_450_clk,
-                RESET => hbm_450_rst_r(0),
+                RESET => hbm_450_rst_r(i),
 
                 M_AXI_AWADDR  => cdc_axi_awaddr(i),
                 M_AXI_AWID    => cdc_axi_awid(i),
