@@ -114,10 +114,13 @@ lappend SYNTH_FLAGS(CONSTR) "$CARD_BASE/src/pblock.xdc"
 # probe are readable over MI instead. Uncomment to capture received data over JTAG.
 # lappend SYNTH_FLAGS(CONSTR) "$CARD_BASE/src/ilas.xdc"
 
-lappend SYNTH_FLAGS(CONSTR) "$COMBO_BASE/cards/amd/alveo-u55c/constr/pcie_half.xdc"
+# SYSRST_N, both SYSCLK pairs and lanes 0-3 live in pcie_x4.xdc; pcie_x8.xdc adds lanes 4-7 and
+# pcie_x16.xdc lanes 8-15, mirroring cards/amd/alveo-u55c/src/Vivado.inc.tcl.
+lappend SYNTH_FLAGS(CONSTR) "$COMBO_BASE/cards/amd/alveo-u55c/constr/pcie_x4.xdc"
+lappend SYNTH_FLAGS(CONSTR) "$COMBO_BASE/cards/amd/alveo-u55c/constr/pcie_x8.xdc"
 
 if {$PCIE_ENDPOINT_MODE == 0 || $PCIE_ENDPOINT_MODE == 1} {
-    lappend SYNTH_FLAGS(CONSTR) "$COMBO_BASE/cards/amd/alveo-u55c/constr/pcie_full.xdc"
+    lappend SYNTH_FLAGS(CONSTR) "$COMBO_BASE/cards/amd/alveo-u55c/constr/pcie_x16.xdc"
 }
 
 # Call main function which handle targets
