@@ -35,6 +35,12 @@ set IP [get_ips $IP_COMP_NAME]
 set VENDOR_ID {18ec}
 set PF0_DEVICE_ID {c000}
 
+# Endpoint 1's PF0 is a dummy the nfb driver never binds (only c000 matches its probe), so give it
+# a distinct ID rather than let two PF0s on the same card collide on c000.
+if {$endpoint_idx == 1} {
+    set PF0_DEVICE_ID {c021}
+}
+
 # ==============================================================================
 # common properties they should be the same for all cards
 # ==============================================================================
@@ -153,11 +159,19 @@ if {$PARAMS(DMA_TYPE) == 6} {
 # iuventus_sizing_pkg.vhd, or address masking truncates. Data apertures are 64-bit and take two
 # slots each; 32-bit would force 2 GiB below 4 GiB.
 if {$PARAMS(DMA_TYPE) == 5} {
+    # Endpoint 0 keeps c020; endpoint 1's PF1 (its own data function) gets a distinct ID so the
+    # two peer BARs never look like the same device to anything enumerating both endpoints.
+    if {$endpoint_idx == 1} {
+        set PF1_DEVICE_ID {c022}
+    } else {
+        set PF1_DEVICE_ID {c020}
+    }
+
     lappend config_list \
         CONFIG.TL_PF_ENABLE_REG {2} \
         CONFIG.copy_pf0 {false} \
-        CONFIG.PF1_DEVICE_ID {c020} \
-        CONFIG.PF1_SUBSYSTEM_ID {c020} \
+        CONFIG.PF1_DEVICE_ID [subst $PF1_DEVICE_ID] \
+        CONFIG.PF1_SUBSYSTEM_ID [subst $PF1_DEVICE_ID] \
         CONFIG.pf1_bar0_size {16} \
         CONFIG.pf1_bar0_64bit {false} \
         CONFIG.pf1_bar0_scale {Kilobytes} \
