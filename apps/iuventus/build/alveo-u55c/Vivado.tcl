@@ -110,14 +110,16 @@ lappend HIERARCHY(MOD) "$CARD_BASE/src/card_top.vhd"
 # --------- Add constraints to the design ---------------------------------------
 lappend SYNTH_FLAGS(CONSTR) "$CARD_BASE/src/general.xdc"
 lappend SYNTH_FLAGS(CONSTR) "$CARD_BASE/src/pblock.xdc"
-# ILA left out: its capture paths are the only timing-failing group, and the counters it would
-# probe are readable over MI instead. Uncomment to capture received data over JTAG.
+# ILA left out: its capture paths fail timing, and its counters are readable over MI.
 # lappend SYNTH_FLAGS(CONSTR) "$CARD_BASE/src/ilas.xdc"
 
-lappend SYNTH_FLAGS(CONSTR) "$COMBO_BASE/cards/amd/alveo-u55c/constr/pcie_half.xdc"
+# pcie_x4.xdc holds SYSRST_N, both SYSCLK pairs and lanes 0-3; pcie_x8.xdc adds 4-7, pcie_x16.xdc
+# 8-15.
+lappend SYNTH_FLAGS(CONSTR) "$COMBO_BASE/cards/amd/alveo-u55c/constr/pcie_x4.xdc"
+lappend SYNTH_FLAGS(CONSTR) "$COMBO_BASE/cards/amd/alveo-u55c/constr/pcie_x8.xdc"
 
 if {$PCIE_ENDPOINT_MODE == 0 || $PCIE_ENDPOINT_MODE == 1} {
-    lappend SYNTH_FLAGS(CONSTR) "$COMBO_BASE/cards/amd/alveo-u55c/constr/pcie_full.xdc"
+    lappend SYNTH_FLAGS(CONSTR) "$COMBO_BASE/cards/amd/alveo-u55c/constr/pcie_x16.xdc"
 }
 
 # Call main function which handle targets
