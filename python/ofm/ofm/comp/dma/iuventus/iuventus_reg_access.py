@@ -364,6 +364,44 @@ class DMAIuventusRegAccess(nfb.BaseComp):
     def wrbuff_prp_list_ptr(self, value: int) -> None:
         self._comp.write64(IuventusMiRegMap.WRBUFF_PRP_LIST_PTR_L.value, value)
 
+    # ==== Endpoint-1 counterparts (only meaningful when the core was elaborated with
+    # PCIE_ENDPOINTS=2; register/constant plumbing only, the datapath still uses endpoint 0) ====
+    @property
+    def rdbuff_baddr_ep1(self) -> int:
+        return self._comp.read64(IuventusMiRegMap.EP1_RDBUFF_BADDR_L.value)
+    @rdbuff_baddr_ep1.setter
+    def rdbuff_baddr_ep1(self, value: int) -> None:
+        self._comp.write64(IuventusMiRegMap.EP1_RDBUFF_BADDR_L.value, value)
+
+    @property
+    def rdbuff_prp_list_ptr_ep1(self) -> int:
+        return self._comp.read64(IuventusMiRegMap.EP1_RDBUFF_PRP_LIST_PTR_L.value)
+    @rdbuff_prp_list_ptr_ep1.setter
+    def rdbuff_prp_list_ptr_ep1(self, value: int) -> None:
+        self._comp.write64(IuventusMiRegMap.EP1_RDBUFF_PRP_LIST_PTR_L.value, value)
+
+    @property
+    def wrbuff_baddr_ep1(self) -> int:
+        return self._comp.read64(IuventusMiRegMap.EP1_WRBUFF_BADDR_L.value)
+    @wrbuff_baddr_ep1.setter
+    def wrbuff_baddr_ep1(self, value: int) -> None:
+        self._comp.write64(IuventusMiRegMap.EP1_WRBUFF_BADDR_L.value, value)
+
+    @property
+    def wrbuff_prp_list_ptr_ep1(self) -> int:
+        return self._comp.read64(IuventusMiRegMap.EP1_WRBUFF_PRP_LIST_PTR_L.value)
+    @wrbuff_prp_list_ptr_ep1.setter
+    def wrbuff_prp_list_ptr_ep1(self, value: int) -> None:
+        self._comp.write64(IuventusMiRegMap.EP1_WRBUFF_PRP_LIST_PTR_L.value, value)
+
+    @property
+    def rd_pages_free_ep1(self) -> int:
+        return self._comp.read32(IuventusMiRegMap.EP1_RD_PAGES_FREE.value) & 0xFFFF
+
+    @property
+    def wr_pages_free_ep1(self) -> int:
+        return self._comp.read32(IuventusMiRegMap.EP1_WR_PAGES_FREE.value) & 0xFFFF
+
     @property
     def last_cq_entry(self) -> CQEntry:
         cq_ent_read = int.from_bytes(self._comp.read(IuventusMiRegMap.LAST_CQ_ENTRY_0.value, 16), sys.byteorder)
