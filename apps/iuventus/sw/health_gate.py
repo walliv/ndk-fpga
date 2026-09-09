@@ -25,6 +25,12 @@ TOTAL_CYCLES_ADDR = 0x158
 # Bit 16 of DESIGN_ERR is the stop-timeout flag; bits below it are the sticky per-queue wedge
 # flags. Both clear only on a design RST -- no CONTROL bit resets them, bit 5 having been retired.
 DESIGN_ERR_STOP_TIMEOUT = 16
+# Bit 17: a completed READ's drain entry was dropped by a full rd_cpl queue -- its pages are leaked
+# for good and every later read starves once the pool is gone.
+DESIGN_ERR_RD_CPL_OVF = 17
+# Bit 18: a PCIe CQ stream was back-pressured (a full read-request header FIFO); the PCIe core may
+# not tolerate a stalled posted write, so a run that sets it is suspect.
+DESIGN_ERR_CQ_BACKPRESSURED = 18
 # A queue delivering less than this share of the busiest queue's completions is treated as wedged
 # or starved rather than merely unlucky.
 QUEUE_BALANCE_MIN = 0.25
@@ -54,6 +60,10 @@ def decode_design_err(val, num_queues):
     reasons = []
     if val & (1 << DESIGN_ERR_STOP_TIMEOUT):
         reasons.append("STOP_TIMEOUT (a stop that did not complete)")
+    if val & (1 << DESIGN_ERR_RD_CPL_OVF):
+        reasons.append("RD_CPL_OVF (a read completion's drain was dropped: leaked pages)")
+    if val & (1 << DESIGN_ERR_CQ_BACKPRESSURED):
+        reasons.append("CQ_BACKPRESSURED (a PCIe CQ stream was stalled by the DMA)")
     wedged = [q for q in range(min(num_queues, DESIGN_ERR_STOP_TIMEOUT)) if val & (1 << q)]
     if wedged:
         reasons.append("queue wedge flags: %s" % ", ".join(str(q) for q in wedged))
