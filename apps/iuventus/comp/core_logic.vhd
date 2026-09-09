@@ -241,6 +241,10 @@ architecture FULL of CORE_LOGIC is
 
     signal usr_rsts   : slv_array_t(CLK_COUNT -1 downto 0)(RESET_WIDTH -1 downto 0);
     signal pcie_rsts  : std_logic_vector(PCIE_ENDPOINTS-1 downto 0);
+    -- Two register stages between the PCIe reset synchroniser, which lives beside the hard block in
+    -- X7, and the DMA spread over X0-X6: a synchronous reset tolerates the delay, a 4.6 ns route on
+    -- a 4 ns clock does not.
+    signal dma_rst_pipe_r : std_logic_vector(1 downto 0) := (others => '1');
     signal rst_mi     : std_logic_vector(RESET_WIDTH-1 downto 0);
     signal rst_dma    : std_logic_vector(RESET_WIDTH-1 downto 0);
     signal rst_dma_x2 : std_logic_vector(RESET_WIDTH-1 downto 0);
@@ -1957,6 +1961,13 @@ begin
     -- =========================================================================
     -- One DMA instance serves both PCIe endpoints: CLK/RST and the plain-indexed ports below are
     -- endpoint 0's; the PCIE_EP1_*/HBM_EP1_* ports carry endpoint 1's CQ/CC MFB and HBM pools.
+    dma_rst_pipe_p : process (pcie_clks(0)) is
+    begin
+        if (rising_edge(pcie_clks(0))) then
+            dma_rst_pipe_r <= dma_rst_pipe_r(0) & pcie_rsts(0);
+        end if;
+    end process;
+
     dma_i : entity work.DMA_IUVENTUS
         generic map (
             DEVICE => DEVICE,
@@ -2015,7 +2026,7 @@ begin
         )
         port map (
             CLK      => pcie_clks(0),
-            RST      => pcie_rsts(0),
+            RST      => dma_rst_pipe_r(1),
 
             -- EP1's own PCIe user clock/reset; tied idle by no_ep1_g below when DMA_STREAMS = 1.
             PCIE_EP1_CLK => dma_ep1_pcie_clk,

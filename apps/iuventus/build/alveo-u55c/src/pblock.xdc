@@ -10,7 +10,9 @@ resize_pblock [get_pblocks pblock_pcie_i] -add {CLOCKREGION_X7Y0:CLOCKREGION_X7Y
 set_property IS_SOFT 0 [get_pblocks pblock_pcie_i]
 
 create_pblock pblock_dma
-add_cells_to_pblock [get_pblocks pblock_dma] [get_cells -quiet [list {core_logic_i/dma_i/card2nvme_ctrl_i} {core_logic_i/dma_i/nvme2card_ctrl_i}]]
+# NVME_SW_MANAGER joins the controllers: its data-logger enables reach the completion buffer's
+# BRAMs through eleven LUT levels, which a placement next to the MI bridge in X7 cannot afford.
+add_cells_to_pblock [get_pblocks pblock_dma] [get_cells -quiet [list {core_logic_i/dma_i/card2nvme_ctrl_i} {core_logic_i/dma_i/nvme2card_ctrl_i} {core_logic_i/dma_i/nvme_sw_manager_i}]]
 # Four columns: both endpoints' datapaths and responders put 160 block-RAM tiles in the DMA, and
 # X4-X6 alone holds 164, which pushed the completion buffer's BRAMs out of reach of CQE_PROCESSOR.
 resize_pblock [get_pblocks pblock_dma] -add {CLOCKREGION_X4Y0:CLOCKREGION_X6Y3 CLOCKREGION_X3Y0:CLOCKREGION_X3Y0 CLOCKREGION_X3Y3:CLOCKREGION_X3Y3}
@@ -49,6 +51,14 @@ foreach {alloc col} {rd_alloc_g[0].rd_alloc_i X0 rd_alloc_g[1].rd_alloc_i X1 wr_
     set_property IS_SOFT 0 [get_pblocks $pb]
 }
 
+
+create_pblock pblock_if_pipes
+# The USER_CORE interface pipes and their request FIFOs sit in the free row above OP_CTRL, next to
+# the user core and clear of the allocator columns, where their twelve-level FIFO logic was
+# routing through congested fabric.
+add_cells_to_pblock [get_pblocks pblock_if_pipes] [get_cells -quiet [list {core_logic_i/user_core_i/user_core_if_pipe_i} {core_logic_i/dma_i/wr_mfb_pipe_i}]]
+resize_pblock [get_pblocks pblock_if_pipes] -add {CLOCKREGION_X1Y3:CLOCKREGION_X2Y3}
+set_property IS_SOFT 0 [get_pblocks pblock_if_pipes]
 
 create_pblock pblock_user_core
 # Everything the selected USER_CORE architecture builds, except its interface pipeline. Naming the
