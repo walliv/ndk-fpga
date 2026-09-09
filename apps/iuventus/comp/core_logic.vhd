@@ -387,14 +387,16 @@ architecture FULL of CORE_LOGIC is
     signal hbm_init_done    : std_logic;
 
     -- Dedicated 450 MHz port clock (MMCME4_BASE from SYSCLK) drives every HBM port
-    -- (hbm_port_wiring_g). hbm_450_arstn is the synchronized reset counterpart of pll_locked/global_reset,
+    -- (hbm_port_wiring_g). hbm_450_rst_r is the synchronized reset counterpart of pll_locked/global_reset,
     -- active-low to match hbm_axi_areset_n's polarity.
     signal hbm_450_clkfbout : std_logic;
     signal hbm_450_clk_raw : std_logic;
     signal hbm_450_clk     : std_logic;
     signal hbm_450_locked  : std_logic;
-    signal hbm_450_rst_r   : std_logic_vector(0 downto 0);
-    signal hbm_450_arstn   : std_logic;
+    -- One replica per HBM port plus one for the DMA: a single 450 MHz reset flop drove every
+    -- port's ARESET_N and the CDC bridges, and its fan-out net alone ate the 2.2 ns period.
+    constant HBM_RST_REPLICAS : natural := HBM_PORTS + 1;
+    signal hbm_450_rst_r   : std_logic_vector(HBM_RST_REPLICAS -1 downto 0);
 
     signal hbm_axi_araddr  : slv_array_t(HBM_PORTS-1 downto 0)(HBM_ADDR_WIDTH-1 downto 0);
     signal hbm_axi_arburst : slv_array_t(HBM_PORTS-1 downto 0)(HBM_BURST_WIDTH-1 downto 0);
@@ -1639,15 +1641,13 @@ begin
         generic map (
             TWO_REG  => FALSE,
             OUT_REG  => TRUE,
-            REPLICAS => 1
+            REPLICAS => HBM_RST_REPLICAS
         )
         port map (
             CLK        => hbm_450_clk,
             ASYNC_RST  => (not pll_locked) or (not hbm_450_locked),
-            OUT_RST(0) => hbm_450_rst_r(0)
+            OUT_RST    => hbm_450_rst_r
         );
-
-    hbm_450_arstn <= not hbm_450_rst_r(0);
 
     global_reset_i : entity work.ASYNC_RESET
         generic map (
@@ -2128,7 +2128,7 @@ begin
             -- WRBUFF/RDBUFF fill/drain wire to fixed HBM_DMA_PORT entries. The DMA presents AXI
             -- already in the HBM domain, so this is a straight index into cdc_axi_*.
             HBM_CLK   => hbm_450_clk,
-            HBM_RESET => hbm_450_rst_r(0),
+            HBM_RESET => hbm_450_rst_r(HBM_PORTS),
 
             HBM_WRBUFF_WR_AXI0_AWADDR  => cdc_axi_awaddr(HBM_DMA_PORT(0)),
             HBM_WRBUFF_WR_AXI0_AWID    => cdc_axi_awid(HBM_DMA_PORT(0)),
@@ -2571,7 +2571,7 @@ begin
     -- deasserted reset; unused ports tie their master-driven inputs inactive.
     hbm_port_wiring_g : for i in 0 to HBM_PORTS-1 generate
         hbm_axi_aclk(i)     <= hbm_450_clk;
-        hbm_axi_areset_n(i) <= hbm_450_arstn;
+        hbm_axi_areset_n(i) <= not hbm_450_rst_r(i);
 
         -- DMA-driven ports (hbm_dma_driven_port_f) take DMA_IUVENTUS's already-450 MHz AXI
         -- through an AXI_PIPE before hbm_axi_*(i). dma_driven_port_g and unused_port_g partition
@@ -2599,7 +2599,7 @@ begin
             )
             port map (
                 CLK   => hbm_450_clk,
-                RESET => hbm_450_rst_r(0),
+                RESET => hbm_450_rst_r(i),
 
                 M_AXI_AWADDR  => cdc_axi_awaddr(i),
                 M_AXI_AWID    => cdc_axi_awid(i),
