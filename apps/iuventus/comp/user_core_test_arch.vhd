@@ -580,8 +580,9 @@ begin
                 rd_mfb_id_vld_reg <= '0';
             elsif (core_rd_mfb_sof(0)(0) = '1' and core_rd_mfb_src_rdy(0) = '1'
                    and nvme_rd_mfb_dst_rdy_s = '1') then
-                rd_mfb_cid_reg    <= core_rd_mfb_meta(0)(CQ_ENTRY_CMD_ID_W -1 downto 0);
-                rd_mfb_qid_reg    <= core_rd_mfb_meta(0)(CQ_ENTRY_CMD_ID_W + QID_W -1 downto CQ_ENTRY_CMD_ID_W);
+                -- DMA_IUVENTUS lays RD_MFB_META out as CID & QID: the queue sits in the low bits.
+                rd_mfb_qid_reg    <= core_rd_mfb_meta(0)(QID_W -1 downto 0);
+                rd_mfb_cid_reg    <= core_rd_mfb_meta(0)(QID_W + CQ_ENTRY_CMD_ID_W -1 downto QID_W);
                 rd_mfb_id_vld_reg <= '1';
             end if;
         end if;

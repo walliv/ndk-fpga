@@ -331,7 +331,8 @@ class SimplifiedDmaModel:
         # Same identity the accept published, so a consumer can match returned data to its request.
         await self._rd_mfb_driver.send(MfbTransactionWithMeta(
             data=pattern,
-            meta=(self._inflight_qid << CQ_ENTRY_CMD_ID_W) | self._inflight_cid,
+            # DMA_IUVENTUS drives RD_MFB_META as CID & QID (queue in the low bits).
+            meta=(self._inflight_cid << QID_W) | self._inflight_qid,
         ))
 
         # Wait for THIS completion's OP_STAT_VLD to dispatch, not just queue, before re-arming RDY:
