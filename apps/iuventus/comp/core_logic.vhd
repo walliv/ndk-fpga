@@ -154,9 +154,10 @@ architecture FULL of CORE_LOGIC is
     constant HBM_RESP_WIDTH  : natural := 2;
 
     -- One port per bank, BOTH directions: fill on AW/W/B, drain on AR/R. Index = ep*4 + buf*2 +
-    -- port (buf 0 = WRBUFF, 1 = RDBUFF); EP0 keeps 19/18/28/27, EP1 sits on stack 1's 24/25/29/30.
-    -- See the DMA core's own documentation for the floorplan/pblock rationale.
-    constant HBM_DMA_PORT : n_array_t(0 to 7) := (19, 18, 28, 27, 24, 25, 29, 30);
+    -- port (buf 0 = WRBUFF, 1 = RDBUFF). Stack-1 ports land in clock regions X4Y0 (16-19), X5Y0
+    -- (20-24), X6Y0 (25-29), X7Y0 (30-31): endpoint 0 takes X4/X5, endpoint 1 sits in X6 beside its
+    -- PCIe block at X7Y0, and no pool straddles two regions.
+    constant HBM_DMA_PORT : n_array_t(0 to 7) := (19, 18, 20, 21, 25, 26, 28, 29);
 
     -- Every port addresses only its own pseudo-channel, so every base is 0. The former
     -- hbm_port_base_f(idx) = idx * 0x2000_0000 global map is gone with the switch that needed it.
