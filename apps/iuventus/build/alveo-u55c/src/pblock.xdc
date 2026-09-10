@@ -36,9 +36,17 @@ set_property IS_SOFT 0 [get_pblocks pblock_wrbuff_drain]
 
 create_pblock pblock_ep1_wrbuff_drain
 add_cells_to_pblock [get_pblocks pblock_ep1_wrbuff_drain] [get_cells -quiet [list {core_logic_i/dma_i/nvme2card_ctrl_i/ep_g[1].ep_datapath_i/hbm_stream_writer_i}]]
-# Endpoint 1 fills WRBUFF through HBM ports 24 and 25, which sit under X6Y0.
-resize_pblock [get_pblocks pblock_ep1_wrbuff_drain] -add {CLOCKREGION_X6Y0:CLOCKREGION_X6Y1}
+# Endpoint 1 fills WRBUFF through HBM ports 25 and 26, which sit under X6Y0. Three regions, not
+# two: at two the block RAM was 94 % occupied, which scatters whatever else needs a tile there.
+resize_pblock [get_pblocks pblock_ep1_wrbuff_drain] -add {CLOCKREGION_X6Y0:CLOCKREGION_X6Y2}
 set_property IS_SOFT 0 [get_pblocks pblock_ep1_wrbuff_drain]
+
+# Endpoint 1's four clock-domain bridges belong beside the ports they drive (25/26 and 28/29, all
+# in column X6): unconstrained, one of them routed 4.36 ns between two of its own registers.
+create_pblock pblock_ep1_hbm_cdc
+add_cells_to_pblock [get_pblocks pblock_ep1_hbm_cdc] [get_cells -quiet [list {core_logic_i/dma_i/ep1_iface_g.hbm_cdc_ep1_wrbuff0_i} {core_logic_i/dma_i/ep1_iface_g.hbm_cdc_ep1_wrbuff1_i} {core_logic_i/dma_i/ep1_iface_g.hbm_cdc_ep1_rdbuff0_i} {core_logic_i/dma_i/ep1_iface_g.hbm_cdc_ep1_rdbuff1_i}]]
+resize_pblock [get_pblocks pblock_ep1_hbm_cdc] -add {CLOCKREGION_X6Y0:CLOCKREGION_X6Y3}
+set_property IS_SOFT 1 [get_pblocks pblock_ep1_hbm_cdc]
 
 create_pblock pblock_opctrl
 add_cells_to_pblock [get_pblocks pblock_opctrl] [get_cells -quiet [list {core_logic_i/dma_i/operation_control_i}]]
