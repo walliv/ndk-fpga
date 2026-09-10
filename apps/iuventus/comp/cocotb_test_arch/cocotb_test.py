@@ -37,6 +37,8 @@ import cocotbext.nfb  # noqa: E402 (must follow the compat shim above)
 from cocotbext.ofm.mi.drivers import MIRequestDriver  # noqa: E402
 from cocotbext.ofm.mfb.properties import attach_mfb_properties  # noqa: E402
 
+from endpoint_view import attach_endpoint_mfb_properties  # noqa: E402
+
 from dma_iuventus_model import QID_W, SimplifiedDmaModel  # noqa: E402
 from user_core_model import ReadReqModel, WriteFrameModel, ExpectedReadReq, ExpectedWrFrame  # noqa: E402
 from scoreboard import Scoreboard  # noqa: E402
@@ -88,9 +90,12 @@ class IuventusUserCoreNfbDevice(cocotbext.nfb.NfbDevice):
         # needs to know about MI_CLK.
         self.mi = [MIRequestDriver(self._dut, "MI", self._dut.MI_CLK)]
 
-        # Conformance watchdog on NVME_RD_MFB and NVME_WR_MFB, both of which run on DMA_CLK. It
-        # only samples, so it sits behind the SimplifiedDmaModel that drives and monitors them.
-        self.mfb_props = attach_mfb_properties(self._dut, self._dut.DMA_CLK, reset=self._dut.DMA_RST)
+        # Conformance watchdog (sampling only) on the DMA_CLK MFBs: NVME_WR_MFB, and NVME_RD_MFB once
+        # per endpoint. Discovery cannot index the per-endpoint arrays, so it skips them.
+        self.mfb_props = attach_mfb_properties(self._dut, self._dut.DMA_CLK, reset=self._dut.DMA_RST,
+                                               exclude=("CORE_RD_MFB", "NVME_RD_MFB"))
+        self.mfb_props.update(attach_endpoint_mfb_properties(self._dut, self._dut.DMA_CLK,
+                                                             reset=self._dut.DMA_RST))
 
 
     async def _reset(self):
