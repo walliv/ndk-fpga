@@ -287,6 +287,10 @@ architecture TEST of USER_CORE is
     -- boundary -- deasserting SRC_RDY mid-frame would stall a partially-transferred frame.
     signal lat_wr_in_frame_r    : std_logic;
     signal lat_wr_issue_ok      : std_logic;
+    -- Registered "the meter still holds a pair". lat_wr_issue_ok fans out to every SRL enable of
+    -- the write pipe, so the meter's own FIFO status must not reach that net directly -- one net
+    -- from the meter to the pipe cannot make both hops in a period.
+    signal lat_meas_fifo_ne_r   : std_logic;
     signal lat_wr_new_frame_s   : std_logic;
     -- The meter's own START_EVENT, shared with the interlock so both count the same thing.
     signal lat_start_event_s    : std_logic;
@@ -891,8 +895,24 @@ begin
     -- from the offered beat's own SOF makes this pure frame admission.
     lat_wr_new_frame_s <= '1' when (lat_wr_in_frame_r = '0' and (or pip_nvme_wr_sof) = '1') else '0';
 
+    lat_meas_fifo_ne_p : process (DMA_CLK) is
+    begin
+        if (rising_edge(DMA_CLK)) then
+            if (core_rst = '1' or data_logger_rst = '1') then
+                lat_meas_fifo_ne_r <= '0';
+            elsif (unsigned(lat_meas_fifo_items) /= 0) then
+                lat_meas_fifo_ne_r <= '1';
+            else
+                lat_meas_fifo_ne_r <= '0';
+            end if;
+        end if;
+    end process;
+
+    -- lat_outstanding_r stays LIVE here: it already covers the cycle the FIFO status is about to
+    -- rise in, so the registered term can only ever release the gate late, never admit a second
+    -- frame early. Delaying that term too would let a single-beat frame over-issue.
     lat_wr_issue_ok    <= '0' when (lat_meas_mode = '1' and lat_wr_new_frame_s = '1' and
-                                    (lat_outstanding_r = '1' or unsigned(lat_meas_fifo_items) /= 0)) else
+                                    (lat_outstanding_r = '1' or lat_meas_fifo_ne_r = '1')) else
  '1';
 
     -- Both terms are needed: the register closes the accept-to-STATUS gap, the FIFO term holds
