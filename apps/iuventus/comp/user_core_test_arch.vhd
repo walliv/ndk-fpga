@@ -234,6 +234,12 @@ architecture TEST of USER_CORE is
     -- Sector size the namespace is formatted with. The write generator is configured in bytes,
     -- so its frame length converts to a count of LBAs by this.
     constant SECT_SIZE_B              : natural := 512;
+    -- Widths of one write frame's LBA count (length/SECT_SIZE_B) and of the per-cycle advance, one
+    -- read (lba_num+1) plus one write per region: at these widths one ADDR_CNTR_WIDTH carry chain
+    -- separates seq_addr_cntr from its D input.
+    constant WR_LBA_CNT_W             : natural := GEN_LENGTH_WIDTH - log2(SECT_SIZE_B) + 1;
+    constant SEQ_DELTA_W              : natural := log2(2**core_rd_req_lba_num'length
+                                                        + DMA_MFB_REGIONS*2**(WR_LBA_CNT_W -1) + 1);
 
     -- QID_W is log2 rounded up, so at NUM_QUEUES = 1 or 3 a QID value can name a queue that does
     -- not exist. Indexing a per-queue array with it directly would be an out-of-range fatal.
@@ -280,6 +286,10 @@ architecture TEST of USER_CORE is
     -- boundary -- deasserting SRC_RDY mid-frame would stall a partially-transferred frame.
     signal lat_wr_in_frame_r    : std_logic;
     signal lat_wr_issue_ok      : std_logic;
+    -- Registered "the meter still holds a pair". lat_wr_issue_ok fans out to every SRL enable of
+    -- the write pipe, so the meter's own FIFO status must not reach that net directly -- one net
+    -- from the meter to the pipe cannot make both hops in a period.
+    signal lat_meas_fifo_ne_r   : std_logic;
     signal lat_wr_new_frame_s   : std_logic;
     -- The meter's own START_EVENT, shared with the interlock so both count the same thing.
     signal lat_start_event_s    : std_logic;
@@ -293,6 +303,7 @@ architecture TEST of USER_CORE is
     -- collapsing sequential throughput.
     type   seq_addr_cntr_arr_t is array (0 to NUM_QUEUES -1) of unsigned(ADDR_CNTR_WIDTH -1 downto 0);
     type   tst_addr_arr_t is array (0 to NUM_QUEUES -1) of std_logic_vector(ADDR_CNTR_WIDTH -1 downto 0);
+    type   seq_delta_arr_t is array (0 to NUM_QUEUES -1) of unsigned(SEQ_DELTA_W -1 downto 0);
     signal seq_addr_cntr        : seq_addr_cntr_arr_t;
     signal seq_addr_sel_reg     : std_logic_vector(7 downto 0);
     signal seq_addr_sel_vld     : std_logic;
@@ -366,7 +377,7 @@ architecture TEST of USER_CORE is
     -- regions of one word can each start a frame, each with its own QID.
     signal gen_nvme_wr_accept  : std_logic_vector(DMA_MFB_REGIONS -1 downto 0);
     -- Number of LBAs one generated write frame covers.
-    signal wr_frame_lba_cnt    : unsigned(ADDR_CNTR_WIDTH -1 downto 0);
+    signal wr_frame_lba_cnt    : unsigned(WR_LBA_CNT_W -1 downto 0);
 
     -- Registered stage between MFB_RECONFIGURATOR and the WR MFB outputs. Breaks the
     -- DMA-to-user-core critical path: core_wr_mfb_dst_rdy is driven combinationally from inside
@@ -884,8 +895,24 @@ begin
     -- from the offered beat's own SOF makes this pure frame admission.
     lat_wr_new_frame_s <= '1' when (lat_wr_in_frame_r = '0' and (or pip_nvme_wr_sof) = '1') else '0';
 
+    lat_meas_fifo_ne_p : process (DMA_CLK) is
+    begin
+        if (rising_edge(DMA_CLK)) then
+            if (core_rst = '1' or data_logger_rst = '1') then
+                lat_meas_fifo_ne_r <= '0';
+            elsif (unsigned(lat_meas_fifo_items) /= 0) then
+                lat_meas_fifo_ne_r <= '1';
+            else
+                lat_meas_fifo_ne_r <= '0';
+            end if;
+        end if;
+    end process;
+
+    -- lat_outstanding_r stays unregistered: it covers the cycle the FIFO status rises in, so the
+    -- registered FIFO term can only release the gate late, never early. Registering it too would
+    -- let a single-beat frame over-issue.
     lat_wr_issue_ok    <= '0' when (lat_meas_mode = '1' and lat_wr_new_frame_s = '1' and
-                                    (lat_outstanding_r = '1' or unsigned(lat_meas_fifo_items) /= 0)) else
+                                    (lat_outstanding_r = '1' or lat_meas_fifo_ne_r = '1')) else
  '1';
 
     -- Both terms are needed: the register closes the accept-to-STATUS gap, the FIFO term holds
@@ -1371,29 +1398,30 @@ begin
     -- MFB_GENERATOR_MI32 publishes frame length only via meta ([channel|length], same register
     -- every region), in bytes; software sets it to (lba_num+1)*512, so length/512 is a 1-based
     -- LBA count, rounded up so a sub-sector frame still claims one LBA.
-    wr_frame_lba_cnt <= shift_right(resize(unsigned(gen_mfb_meta(GEN_LENGTH_WIDTH -1 downto 0)), ADDR_CNTR_WIDTH)
-                                    + (SECT_SIZE_B -1), log2(SECT_SIZE_B));
+    wr_frame_lba_cnt <= resize(shift_right(resize(unsigned(gen_mfb_meta(GEN_LENGTH_WIDTH -1 downto 0)), GEN_LENGTH_WIDTH + 1)
+                                           + (SECT_SIZE_B -1), log2(SECT_SIZE_B)), WR_LBA_CNT_W);
 
     seq_addr_cntr_p : process (DMA_CLK)
-        variable next_addr_v : seq_addr_cntr_arr_t;
-        variable wr_idx_v    : natural;
+        variable delta_v  : seq_delta_arr_t;
+        variable sum_v    : unsigned(ADDR_CNTR_WIDTH -1 downto 0);
+        variable fold_v   : unsigned(ADDR_CNTR_WIDTH downto 0);
+        variable wr_idx_v : natural;
     begin
         if (rising_edge(DMA_CLK)) then
             if (core_rst = '1' or data_logger_rst = '1' or tst_trigg = '1') then
                 seq_addr_cntr <= (others => resize(unsigned(nvme_rd_req_lba_ptr_reg), ADDR_CNTR_WIDTH));
             elsif (tst_finished = '0' or contig_test = '1') then
-                -- A read and a write can be accepted in the same cycle, on the same queue, so both
-                -- increments accumulate in one variable; an if/elsif chain would drop one of them
-                -- and let the two streams overlap.
-                next_addr_v := seq_addr_cntr;
+                -- Read and write accepts can coincide on one queue, so both increments accumulate
+                -- in one variable; an if/elsif chain would drop one and overlap the streams.
+                -- SEQ_DELTA_W bounds the sum, saving a wide carry chain.
+                delta_v := (others => (others => '0'));
 
                 -- Advance when accepted, not when it completes: waiting leaves the address
                 -- undefined for the round trip, so requests issued meanwhile repeat the previous
                 -- LBA, capping in-flight commands to one per queue. lba_num is 0-based: advance by
                 -- lba_num+1.
                 if (rd_req_accepted_s = '1') then
-                    next_addr_v(seq_idx_f(unsigned(nvme_rd_req_qid_s))) := next_addr_v(seq_idx_f(unsigned(nvme_rd_req_qid_s)))
-                                                                           + resize(unsigned(core_rd_req_lba_num), ADDR_CNTR_WIDTH) + 1;
+                    delta_v(seq_idx_f(unsigned(nvme_rd_req_qid_s))) := resize(unsigned(core_rd_req_lba_num), SEQ_DELTA_W) + 1;
                 end if;
 
                 -- Writes read the same per-queue address and must advance it too: otherwise every
@@ -1404,20 +1432,23 @@ begin
                     wr_idx_v := seq_idx_f(unsigned(gen_nvme_wr_qid_mskd((r+1)*QID_W -1 downto r*QID_W)));
 
                     if (gen_nvme_wr_accept(r) = '1') then
-                        next_addr_v(wr_idx_v) := next_addr_v(wr_idx_v) + wr_frame_lba_cnt;
+                        delta_v(wr_idx_v) := delta_v(wr_idx_v) + resize(wr_frame_lba_cnt, SEQ_DELTA_W);
                     end if;
                 end loop;
 
-                -- Fold at the namespace end. One accepted read plus one accepted write advance
-                -- by at most a few hundred LBAs, so the overshoot is always less than the count
-                -- and a single conditional subtract brings it back in range.
+                -- Fold at the namespace end. One accepted read plus one accepted write advance by
+                -- at most a few hundred LBAs, so a single conditional subtract always suffices; its
+                -- own borrow out of bit ADDR_CNTR_WIDTH is the >= compare, so the two share a chain.
                 for q in 0 to NUM_QUEUES -1 loop
-                    if (next_addr_v(q) >= TST_LBA_COUNT) then
-                        next_addr_v(q) := next_addr_v(q) - TST_LBA_COUNT;
+                    sum_v  := seq_addr_cntr(q) + resize(delta_v(q), ADDR_CNTR_WIDTH);
+                    fold_v := resize(sum_v, ADDR_CNTR_WIDTH + 1) - resize(TST_LBA_COUNT, ADDR_CNTR_WIDTH + 1);
+
+                    if (fold_v(ADDR_CNTR_WIDTH) = '0') then
+                        seq_addr_cntr(q) <= fold_v(ADDR_CNTR_WIDTH -1 downto 0);
+                    else
+                        seq_addr_cntr(q) <= sum_v;
                     end if;
                 end loop;
-
-                seq_addr_cntr <= next_addr_v;
             end if;
         end if;
     end process;
