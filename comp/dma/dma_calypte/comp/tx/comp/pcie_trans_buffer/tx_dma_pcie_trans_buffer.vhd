@@ -55,9 +55,10 @@ entity TX_DMA_PCIE_TRANS_BUFFER is
         -- widens by log2(CHANNELS) bits.
         MEM_PARTITIONING : boolean := TRUE;
 
-        -- XPM output-register latency for read ports. 1 (default): none, RD_DATA_VLD_* follows
-        -- RD_EN_* one cycle later. 2: XPM's output register adds a BRAM cycle; rd_vld_p/rd_pipe_reg_p
-        -- match it. TDP (2-region) read path only.
+        -- Read-port latency: cycles from RD_EN_* to RD_DATA_VLD_*. 1 (default): none. 2: XPM's
+        -- output register adds a BRAM cycle. 3: 2 plus a register on the REQUEST (rd_req_reg_g),
+        -- so the address never reaches the BRAM enable/address decode in the requester's own
+        -- cycle. 2 and 3 are TDP (2-region) read path only.
         READ_LATENCY : natural := 1;
 
         -- Number of input registers
@@ -237,6 +238,21 @@ architecture FULL of TX_DMA_PCIE_TRANS_BUFFER is
     signal rd_data_bram_bank   : slv_array_3d_t(1 downto 0)(MEM_ARRAYS -1 downto 0)(MFB_REGIONS -1 downto 0)(MFB_LENGTH -1 downto 0);
 
     -- ==== Read path signals ====
+    -- READ_LATENCY's third cycle, when asked for, is spent HERE and not in the memory: the XPM
+    -- output register stays at 2 (XPM_RD_LATENCY) and rd_req_reg_g adds the request stage.
+    constant RD_REQ_REG     : boolean := (READ_LATENCY = 3);
+    constant XPM_RD_LATENCY : natural := tsel(READ_LATENCY >= 2, 2, 1);
+
+    -- The read request as the rest of this architecture sees it: the ports themselves, or their
+    -- registered copies at READ_LATENCY => 3 (see rd_req_reg_g). Every downstream stage is fed
+    -- from these, so the internal pipeline alignment is the same at 2 and 3.
+    signal rd_addr_a_q : std_logic_vector(RD_ADDR_A'range);
+    signal rd_addr_b_q : std_logic_vector(RD_ADDR_B'range);
+    signal rd_chan_a_q : std_logic_vector(RD_CHAN_A'range);
+    signal rd_chan_b_q : std_logic_vector(RD_CHAN_B'range);
+    signal rd_en_a_q   : std_logic;
+    signal rd_en_b_q   : std_logic;
+
     -- Effective RD_ADDR/RD_CHAN per region-slot: with SPLIT_READ_PORTS, slot P maps 1:1 to a port;
     -- else both broadcast from port A and race the same read (the unstalled one succeeds).
     signal rd_addr_eff : slv_array_t(MFB_REGIONS -1 downto 0)(POINTER_WIDTH -1 downto 0);
@@ -332,15 +348,15 @@ begin
         report "TX_DMA_PCIE_TRANS_BUFFER: READ_BARREL_SHIFTER_EN must have exactly MFB_REGIONS elements!"
         severity FAILURE;
 
-    assert (READ_LATENCY = 1 or READ_LATENCY = 2)
-        report "TX_DMA_PCIE_TRANS_BUFFER: READ_LATENCY must be 1 (no output register) or 2 (XPM output register)!"
+    assert (READ_LATENCY >= 1 and READ_LATENCY <= 3)
+        report "TX_DMA_PCIE_TRANS_BUFFER: READ_LATENCY must be 1 (no output register), 2 (XPM output register) or 3 (plus a request register)!"
         severity FAILURE;
 
-    -- READ_LATENCY=2's extra stage only exists on the TDP (2-region) read-valid/pipe registers
+    -- The extra stage of READ_LATENCY >= 2 only exists on the TDP (2-region) read-valid/pipe registers
     -- (rd_vld_p/rd_pipe_reg_p); the SDP path (MFB_REGIONS=1) keeps a fixed 1-cycle RD_DATA_VLD_A,
     -- so this combination is unsupported.
-    assert (not (READ_LATENCY = 2 and MFB_REGIONS = 1))
-        report "TX_DMA_PCIE_TRANS_BUFFER: READ_LATENCY => 2 is only implemented for the 2-region (TDP) read path!"
+    assert (not (READ_LATENCY >= 2 and MFB_REGIONS = 1))
+        report "TX_DMA_PCIE_TRANS_BUFFER: READ_LATENCY => 2 or 3 is only implemented for the 2-region (TDP) read path!"
         severity FAILURE;
 
     -- =============================================================================================
@@ -871,10 +887,10 @@ begin
                     READ_DATA_WIDTH_B  => MFB_LENGTH,
                     ADDR_WIDTH_B       => BANK_ADDR_W,
                     READ_RESET_VALUE_B => "0",
-                    -- Fed from READ_LATENCY for consistency with the TDP array below; the elaboration
-                    -- assert guarantees this is always 1 here (READ_LATENCY=2 + MFB_REGIONS=1 is
-                    -- rejected), matching rd_data_vld_reg_p's fixed 1-cycle RD_DATA_VLD_A.
-                    READ_LATENCY_B     => READ_LATENCY,
+                    -- Fed from XPM_RD_LATENCY for consistency with the TDP array below; the
+                    -- elaboration assert guarantees this is always 1 here (READ_LATENCY >= 2 +
+                    -- MFB_REGIONS=1 is rejected), matching rd_data_vld_reg_p's fixed 1 cycle.
+                    READ_LATENCY_B     => XPM_RD_LATENCY,
                     WRITE_MODE_B       => XPM_WRITE_MODE
                 )
                 port map (
@@ -989,10 +1005,10 @@ begin
                     BYTE_WRITE_WIDTH_A => 8,
                     ADDR_WIDTH_A       => BANK_ADDR_W,
                     READ_RESET_VALUE_A => "0",
-                    -- Fed from the READ_LATENCY generic (1 = today's no-output-register behaviour,
-                    -- 2 = XPM output register); rd_vld_p/rd_pipe_reg_p below gain a matching extra
-                    -- pipeline stage when READ_LATENCY => 2 (see rd_vld_lat2_g/rd_pipe_lat2_g).
-                    READ_LATENCY_A     => READ_LATENCY,
+                    -- 1 = no output register, 2 = XPM output register; rd_vld_p/rd_pipe_reg_p
+                    -- below gain a matching extra pipeline stage from READ_LATENCY >= 2 (see
+                    -- rd_vld_lat2_g/rd_pipe_lat2_g).
+                    READ_LATENCY_A     => XPM_RD_LATENCY,
                     WRITE_MODE_A       => XPM_WRITE_MODE,
 
                     WRITE_DATA_WIDTH_B => MFB_LENGTH,
@@ -1000,7 +1016,7 @@ begin
                     BYTE_WRITE_WIDTH_B => 8,
                     ADDR_WIDTH_B       => BANK_ADDR_W,
                     READ_RESET_VALUE_B => "0",
-                    READ_LATENCY_B     => READ_LATENCY,
+                    READ_LATENCY_B     => XPM_RD_LATENCY,
                     WRITE_MODE_B       => XPM_WRITE_MODE
                 )
                 port map (
@@ -1073,9 +1089,10 @@ begin
             rd_data_valid_arr <= rd_data_valid_arr_stg1;
         end generate;
 
-        -- READ_LATENCY => 2: one extra register re-aligns rd_data_valid_arr with the XPM output
-        -- register's additional cycle of BRAM latency (READ_LATENCY_A/B fed from the generic above).
-        rd_vld_lat2_g : if (READ_LATENCY = 2) generate
+        -- READ_LATENCY >= 2: one extra register re-aligns rd_data_valid_arr with the XPM output
+        -- register's additional cycle of BRAM latency (READ_LATENCY_A/B fed from XPM_RD_LATENCY
+        -- above). READ_LATENCY => 3's own cycle is taken on the request side, so it lands here too.
+        rd_vld_lat2_g : if (READ_LATENCY >= 2) generate
             rd_vld_extra_reg_p : process (CLK)
             begin
                 if rising_edge(CLK) then
@@ -1085,31 +1102,63 @@ begin
         end generate;
     end generate;
 
+    -- ==== Read request register (READ_LATENCY => 3 only) ====
+    -- Everything from here to ENA/ADDRA is address decode: bank geometry, the channel demux and
+    -- the write-collision compare. Registering the REQUEST splits that decode away from whatever
+    -- built the address, at the cost of the one extra cycle READ_LATENCY => 3 announces.
+    rd_req_reg_g : if (RD_REQ_REG) generate
+        rd_req_reg_p : process (CLK) is
+        begin
+            if (rising_edge(CLK)) then
+                rd_addr_a_q <= RD_ADDR_A;
+                rd_addr_b_q <= RD_ADDR_B;
+                rd_chan_a_q <= RD_CHAN_A;
+                rd_chan_b_q <= RD_CHAN_B;
+                rd_en_a_q   <= RD_EN_A;
+                rd_en_b_q   <= RD_EN_B;
+                if (RESET = '1') then
+                    rd_en_a_q <= '0';
+                    rd_en_b_q <= '0';
+                end if;
+            end if;
+        end process;
+
+    -- Plain wires otherwise, so READ_LATENCY 1 and 2 keep the netlist they had before this stage
+    -- existed.
+    else generate
+        rd_addr_a_q <= RD_ADDR_A;
+        rd_addr_b_q <= RD_ADDR_B;
+        rd_chan_a_q <= RD_CHAN_A;
+        rd_chan_b_q <= RD_CHAN_B;
+        rd_en_a_q   <= RD_EN_A;
+        rd_en_b_q   <= RD_EN_B;
+    end generate;
+
     -- ==== Read address / channel sources ====
     -- SPLIT_READ_PORTS maps P to a port; else broadcast from port A.
     rd_eff_split_g : if (SPLIT_READ_PORTS and MFB_REGIONS = 2) generate
-        rd_addr_eff(0) <= RD_ADDR_A(POINTER_WIDTH -1 downto 0);
-        rd_addr_eff(1) <= RD_ADDR_B(POINTER_WIDTH -1 downto 0);
+        rd_addr_eff(0) <= rd_addr_a_q(POINTER_WIDTH -1 downto 0);
+        rd_addr_eff(1) <= rd_addr_b_q(POINTER_WIDTH -1 downto 0);
 
         rd_chan_split_flat_g : if (FLAT) generate
-            rd_chan_eff(0) <= RD_ADDR_A(POINTER_WIDTH + log2(CHANNELS) -1 downto POINTER_WIDTH);
-            rd_chan_eff(1) <= RD_ADDR_B(POINTER_WIDTH + log2(CHANNELS) -1 downto POINTER_WIDTH);
+            rd_chan_eff(0) <= rd_addr_a_q(POINTER_WIDTH + log2(CHANNELS) -1 downto POINTER_WIDTH);
+            rd_chan_eff(1) <= rd_addr_b_q(POINTER_WIDTH + log2(CHANNELS) -1 downto POINTER_WIDTH);
         else generate
-            rd_chan_eff(0) <= RD_CHAN_A;
-            rd_chan_eff(1) <= RD_CHAN_B;
+            rd_chan_eff(0) <= rd_chan_a_q;
+            rd_chan_eff(1) <= rd_chan_b_q;
         end generate;
     else generate
         rd_addr_bcast_g : for p in 0 to (MFB_REGIONS -1) generate
-            rd_addr_eff(p) <= RD_ADDR_A(POINTER_WIDTH -1 downto 0);
+            rd_addr_eff(p) <= rd_addr_a_q(POINTER_WIDTH -1 downto 0);
         end generate;
 
         rd_chan_bcast_flat_g : if (FLAT) generate
             rd_chan_bcast_flat_p_g : for p in 0 to (MFB_REGIONS -1) generate
-                rd_chan_eff(p) <= RD_ADDR_A(POINTER_WIDTH + log2(CHANNELS) -1 downto POINTER_WIDTH);
+                rd_chan_eff(p) <= rd_addr_a_q(POINTER_WIDTH + log2(CHANNELS) -1 downto POINTER_WIDTH);
             end generate;
         else generate
             rd_chan_bcast_part_p_g : for p in 0 to (MFB_REGIONS -1) generate
-                rd_chan_eff(p) <= RD_CHAN_A;
+                rd_chan_eff(p) <= rd_chan_a_q;
             end generate;
         end generate;
     end generate;
@@ -1180,9 +1229,9 @@ begin
         rd_row_lsb_reg <= rd_row_lsb_reg_stg1;
     end generate;
 
-    -- READ_LATENCY => 2: one extra register stage on each, re-aligning them with the XPM output
+    -- READ_LATENCY >= 2: one extra register stage on each, re-aligning them with the XPM output
     -- register's additional cycle of BRAM latency (matching rd_vld_lat2_g above).
-    rd_pipe_lat2_g : if (READ_LATENCY = 2) generate
+    rd_pipe_lat2_g : if (READ_LATENCY >= 2) generate
         rd_pipe_reg2_p : process (CLK) is
         begin
             if (rising_edge(CLK)) then
@@ -1207,8 +1256,8 @@ begin
         bram_demux_p : process (all) is
         begin
             rd_en_bram_demux                                                                                                                   <= (others => (others => '0'));
-            rd_en_bram_demux(to_integer(unsigned(rd_chan_eff(0)(log2(MEM_ARRAYS) + log2(CHANS_PER_ARRAY) -1 downto log2(CHANS_PER_ARRAY)))))(0) <= RD_EN_A;
-            rd_en_bram_demux(to_integer(unsigned(rd_chan_eff(1)(log2(MEM_ARRAYS) + log2(CHANS_PER_ARRAY) -1 downto log2(CHANS_PER_ARRAY)))))(1) <= RD_EN_B;
+            rd_en_bram_demux(to_integer(unsigned(rd_chan_eff(0)(log2(MEM_ARRAYS) + log2(CHANS_PER_ARRAY) -1 downto log2(CHANS_PER_ARRAY)))))(0) <= rd_en_a_q;
+            rd_en_bram_demux(to_integer(unsigned(rd_chan_eff(1)(log2(MEM_ARRAYS) + log2(CHANS_PER_ARRAY) -1 downto log2(CHANS_PER_ARRAY)))))(1) <= rd_en_b_q;
         end process;
 
         RD_DATA_VLD_A <= rd_data_valid_arr(0);
@@ -1258,7 +1307,7 @@ begin
         bram_demux_p : process (all) is
         begin
             rd_en_bram_demux                                                                                                                <= (others => (others => '0'));
-            rd_en_bram_demux(to_integer(unsigned(rd_chan_eff(0)(log2(MEM_ARRAYS) + log2(CHANS_PER_ARRAY) -1 downto log2(CHANS_PER_ARRAY))))) <= (others => RD_EN_A);
+            rd_en_bram_demux(to_integer(unsigned(rd_chan_eff(0)(log2(MEM_ARRAYS) + log2(CHANS_PER_ARRAY) -1 downto log2(CHANS_PER_ARRAY))))) <= (others => rd_en_a_q);
         end process;
 
         rd_data_sel_g : if (MFB_REGIONS = 1) generate
@@ -1285,7 +1334,7 @@ begin
             rd_data_vld_reg_p : process (CLK) is
             begin
                 if (rising_edge(CLK)) then
-                    RD_DATA_VLD_A <= RD_EN_A and (not (or rd_1rgn_collision));
+                    RD_DATA_VLD_A <= rd_en_a_q and (not (or rd_1rgn_collision));
                 end if;
             end process;
 
