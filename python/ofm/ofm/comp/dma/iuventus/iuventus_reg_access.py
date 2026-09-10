@@ -41,8 +41,8 @@ DRAIN_HBM_W_CNTR_L_ADDR          = 0x10C
 FENCE_CLIP_CNTR_L_ADDR           = 0x124
 FENCE_AFULL_CNTR_L_ADDR          = 0x12C
 
-# Raw WRBUFF drain accounting. FENCE_GAP packs {drained[31:16], accepted[15:0]}. See the DMA
-# core's own documentation for their semantics.
+# FENCE_GAP packs {drained[31:16], accepted[15:0]}, low 16 bits of wider counters: exact for their
+# difference (bounded fence-FIFO occupancy). FENCE_TARGET stays 32 b to show a snapshot's age.
 FENCE_GAP_ADDR                   = 0x134
 FENCE_TARGET_ADDR                = 0x138
 
@@ -680,18 +680,19 @@ class DMAIuventusRegAccess(nfb.BaseComp):
 
     @property
     def fence_accepted(self) -> int:
-        """Frames the buffer writer took (low half of FENCE_GAP)."""
+        """Frames the buffer writer took, low 16 bits (low half of FENCE_GAP)."""
         return self._comp.read32(FENCE_GAP_ADDR) & 0xFFFF
 
     @property
     def fence_drained(self) -> int:
-        """Frames whose every AXI write has BRESP'd (high half of FENCE_GAP)."""
+        """Frames whose every AXI write has BRESP'd, low 16 bits (high half of FENCE_GAP)."""
         return (self._comp.read32(FENCE_GAP_ADDR) >> 16) & 0xFFFF
 
     @property
     def fence_target(self) -> int:
-        """Snapshotted accepted-count the drain guard is waiting for drained to reach."""
-        return self._comp.read32(FENCE_TARGET_ADDR) & 0xFFFF
+        """Snapshotted accepted-count the drain guard is waiting for drained to reach, at the
+        counter's full 32 b -- mask to 16 bits before comparing it against fence_drained."""
+        return self._comp.read32(FENCE_TARGET_ADDR)
 
     def get_configuration(self) -> DMAIuventusConfig:
         """One snapshot of every configuration register, so a caller comparing against a
