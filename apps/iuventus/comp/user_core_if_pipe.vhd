@@ -17,6 +17,9 @@ use work.type_pack.all;
 entity USER_CORE_IF_PIPE is
     generic (
         NUM_QUEUES      : natural := 4;
+        -- Read-data streams carried, one per PCIe endpoint of the DMA: each endpoint drains its
+        -- own queues on its own bus, so each gets its own pipeline rather than sharing one.
+        PCIE_ENDPOINTS  : natural := 1;
         LBA_PTR_W       : natural := 64;
         MFB_REGION_SIZE : natural := 8;
         MFB_BLOCK_SIZE  : natural := 8;
@@ -54,14 +57,14 @@ entity USER_CORE_IF_PIPE is
         ENG_OP_STAT_CID  : out std_logic_vector(CID_W-1 downto 0);
         ENG_OP_STAT_VLD  : out std_logic;
 
-        ENG_RD_MFB_DATA    : out std_logic_vector(MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH-1 downto 0);
-        ENG_RD_MFB_META    : out std_logic_vector(max(1, log2(NUM_QUEUES)) + CID_W -1 downto 0);
-        ENG_RD_MFB_SOF     : out std_logic_vector(0 downto 0);
-        ENG_RD_MFB_EOF     : out std_logic_vector(0 downto 0);
-        ENG_RD_MFB_SOF_POS : out std_logic_vector(max(1, log2(MFB_REGION_SIZE))-1 downto 0);
-        ENG_RD_MFB_EOF_POS : out std_logic_vector(log2(MFB_REGION_SIZE*MFB_BLOCK_SIZE)-1 downto 0);
-        ENG_RD_MFB_SRC_RDY : out std_logic;
-        ENG_RD_MFB_DST_RDY : in  std_logic;
+        ENG_RD_MFB_DATA    : out slv_array_t(PCIE_ENDPOINTS-1 downto 0)(MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH-1 downto 0);
+        ENG_RD_MFB_META    : out slv_array_t(PCIE_ENDPOINTS-1 downto 0)(max(1, log2(NUM_QUEUES)) + CID_W -1 downto 0);
+        ENG_RD_MFB_SOF     : out slv_array_t(PCIE_ENDPOINTS-1 downto 0)(0 downto 0);
+        ENG_RD_MFB_EOF     : out slv_array_t(PCIE_ENDPOINTS-1 downto 0)(0 downto 0);
+        ENG_RD_MFB_SOF_POS : out slv_array_t(PCIE_ENDPOINTS-1 downto 0)(max(1, log2(MFB_REGION_SIZE))-1 downto 0);
+        ENG_RD_MFB_EOF_POS : out slv_array_t(PCIE_ENDPOINTS-1 downto 0)(log2(MFB_REGION_SIZE*MFB_BLOCK_SIZE)-1 downto 0);
+        ENG_RD_MFB_SRC_RDY : out std_logic_vector(PCIE_ENDPOINTS-1 downto 0);
+        ENG_RD_MFB_DST_RDY : in  std_logic_vector(PCIE_ENDPOINTS-1 downto 0);
 
         ENG_WR_MFB_DATA    : in  std_logic_vector(MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH-1 downto 0);
         ENG_WR_MFB_META    : in  std_logic_vector(max(1, log2(NUM_QUEUES)) + LBA_PTR_W -1 downto 0);
@@ -93,14 +96,14 @@ entity USER_CORE_IF_PIPE is
         DMA_OP_STAT_CID  : in std_logic_vector(CID_W-1 downto 0);
         DMA_OP_STAT_VLD  : in std_logic;
 
-        DMA_RD_MFB_DATA    : in  std_logic_vector(MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH-1 downto 0);
-        DMA_RD_MFB_META    : in  std_logic_vector(max(1, log2(NUM_QUEUES)) + CID_W -1 downto 0);
-        DMA_RD_MFB_SOF     : in  std_logic_vector(0 downto 0);
-        DMA_RD_MFB_EOF     : in  std_logic_vector(0 downto 0);
-        DMA_RD_MFB_SOF_POS : in  std_logic_vector(max(1, log2(MFB_REGION_SIZE))-1 downto 0);
-        DMA_RD_MFB_EOF_POS : in  std_logic_vector(log2(MFB_REGION_SIZE*MFB_BLOCK_SIZE)-1 downto 0);
-        DMA_RD_MFB_SRC_RDY : in  std_logic;
-        DMA_RD_MFB_DST_RDY : out std_logic;
+        DMA_RD_MFB_DATA    : in  slv_array_t(PCIE_ENDPOINTS-1 downto 0)(MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH-1 downto 0);
+        DMA_RD_MFB_META    : in  slv_array_t(PCIE_ENDPOINTS-1 downto 0)(max(1, log2(NUM_QUEUES)) + CID_W -1 downto 0);
+        DMA_RD_MFB_SOF     : in  slv_array_t(PCIE_ENDPOINTS-1 downto 0)(0 downto 0);
+        DMA_RD_MFB_EOF     : in  slv_array_t(PCIE_ENDPOINTS-1 downto 0)(0 downto 0);
+        DMA_RD_MFB_SOF_POS : in  slv_array_t(PCIE_ENDPOINTS-1 downto 0)(max(1, log2(MFB_REGION_SIZE))-1 downto 0);
+        DMA_RD_MFB_EOF_POS : in  slv_array_t(PCIE_ENDPOINTS-1 downto 0)(log2(MFB_REGION_SIZE*MFB_BLOCK_SIZE)-1 downto 0);
+        DMA_RD_MFB_SRC_RDY : in  std_logic_vector(PCIE_ENDPOINTS-1 downto 0);
+        DMA_RD_MFB_DST_RDY : out std_logic_vector(PCIE_ENDPOINTS-1 downto 0);
 
         DMA_WR_MFB_DATA    : out std_logic_vector(MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH-1 downto 0);
         DMA_WR_MFB_META    : out std_logic_vector(max(1, log2(NUM_QUEUES)) + LBA_PTR_W -1 downto 0);
@@ -171,23 +174,13 @@ architecture FULL of USER_CORE_IF_PIPE is
     type   cid_pl_t is array (0 to STAGES) of std_logic_vector(CID_W downto 0);
     signal cid_pl : cid_pl_t;
 
-    type   rd_meta_t is array (0 to STAGES) of std_logic_vector(RD_META_W-1 downto 0);
-    signal rd_meta : rd_meta_t;
-
     type mfb_data_t is array (0 to STAGES) of std_logic_vector(MFB_DATA_W-1 downto 0);
     type mfb_meta_t is array (0 to STAGES) of std_logic_vector(WR_META_W-1 downto 0);
     type mfb_pos_t is array (0 to STAGES) of std_logic_vector(SOF_POS_W-1 downto 0);
     type mfb_eos_t is array (0 to STAGES) of std_logic_vector(EOF_POS_W-1 downto 0);
     type mfb_bit_t is array (0 to STAGES) of std_logic_vector(0 downto 0);
     type mfb_rdy_t is array (0 to STAGES) of std_logic;
-
-    signal rd_data    : mfb_data_t;
-    signal rd_sof     : mfb_bit_t;
-    signal rd_eof     : mfb_bit_t;
-    signal rd_sof_pos : mfb_pos_t;
-    signal rd_eof_pos : mfb_eos_t;
-    signal rd_src_rdy : mfb_rdy_t;
-    signal rd_dst_rdy : mfb_rdy_t;
+    type rd_meta_t is array (0 to STAGES) of std_logic_vector(RD_META_W-1 downto 0);
 
     signal wr_data    : mfb_data_t;
     signal wr_meta    : mfb_meta_t;
@@ -420,61 +413,72 @@ begin
     ENG_RD_REQ_CID_VLD <= cid_pl(STAGES)(0);
 
     -- =========================================================================
-    -- Read data, DMA to engine
+    -- Read data, DMA to engine -- one independent pipeline per endpoint stream
     -- =========================================================================
 
-    rd_data(0)         <= DMA_RD_MFB_DATA;
-    rd_meta(0)         <= DMA_RD_MFB_META;
-    rd_sof(0)          <= DMA_RD_MFB_SOF;
-    rd_eof(0)          <= DMA_RD_MFB_EOF;
-    rd_sof_pos(0)      <= DMA_RD_MFB_SOF_POS;
-    rd_eof_pos(0)      <= DMA_RD_MFB_EOF_POS;
-    rd_src_rdy(0)      <= DMA_RD_MFB_SRC_RDY;
-    DMA_RD_MFB_DST_RDY <= rd_dst_rdy(0);
+    rd_ep_g : for ep in 0 to PCIE_ENDPOINTS-1 generate
+        signal rd_data    : mfb_data_t;
+        signal rd_meta    : rd_meta_t;
+        signal rd_sof     : mfb_bit_t;
+        signal rd_eof     : mfb_bit_t;
+        signal rd_sof_pos : mfb_pos_t;
+        signal rd_eof_pos : mfb_eos_t;
+        signal rd_src_rdy : mfb_rdy_t;
+        signal rd_dst_rdy : mfb_rdy_t;
+    begin
+        rd_data(0)             <= DMA_RD_MFB_DATA(ep);
+        rd_meta(0)             <= DMA_RD_MFB_META(ep);
+        rd_sof(0)              <= DMA_RD_MFB_SOF(ep);
+        rd_eof(0)              <= DMA_RD_MFB_EOF(ep);
+        rd_sof_pos(0)          <= DMA_RD_MFB_SOF_POS(ep);
+        rd_eof_pos(0)          <= DMA_RD_MFB_EOF_POS(ep);
+        rd_src_rdy(0)          <= DMA_RD_MFB_SRC_RDY(ep);
+        DMA_RD_MFB_DST_RDY(ep) <= rd_dst_rdy(0);
 
-    rd_pipe_g : for s in 1 to STAGES generate
-        rd_pipe_i : entity work.MFB_PIPE
-        generic map (
-            REGIONS     => 1,
-            REGION_SIZE => MFB_REGION_SIZE,
-            BLOCK_SIZE  => MFB_BLOCK_SIZE,
-            ITEM_WIDTH  => MFB_ITEM_WIDTH,
-            META_WIDTH  => RD_META_W,
-            FAKE_PIPE   => false,
-            USE_DST_RDY => true,
-            PIPE_TYPE   => "SHREG",
-            DEVICE      => DEVICE
-        )
-        port map (
-            CLK        => CLK,
-            RESET      => rst_pl(s-1),
-            RX_DATA    => rd_data(s-1),
-            RX_META    => rd_meta(s-1),
-            RX_SOF_POS => rd_sof_pos(s-1),
-            RX_EOF_POS => rd_eof_pos(s-1),
-            RX_SOF     => rd_sof(s-1),
-            RX_EOF     => rd_eof(s-1),
-            RX_SRC_RDY => rd_src_rdy(s-1),
-            RX_DST_RDY => rd_dst_rdy(s-1),
-            TX_DATA    => rd_data(s),
-            TX_META    => rd_meta(s),
-            TX_SOF_POS => rd_sof_pos(s),
-            TX_EOF_POS => rd_eof_pos(s),
-            TX_SOF     => rd_sof(s),
-            TX_EOF     => rd_eof(s),
-            TX_SRC_RDY => rd_src_rdy(s),
-            TX_DST_RDY => rd_dst_rdy(s)
-        );
+        rd_pipe_g : for s in 1 to STAGES generate
+            rd_pipe_i : entity work.MFB_PIPE
+            generic map (
+                REGIONS     => 1,
+                REGION_SIZE => MFB_REGION_SIZE,
+                BLOCK_SIZE  => MFB_BLOCK_SIZE,
+                ITEM_WIDTH  => MFB_ITEM_WIDTH,
+                META_WIDTH  => RD_META_W,
+                FAKE_PIPE   => false,
+                USE_DST_RDY => true,
+                PIPE_TYPE   => "SHREG",
+                DEVICE      => DEVICE
+            )
+            port map (
+                CLK        => CLK,
+                RESET      => rst_pl(s-1),
+                RX_DATA    => rd_data(s-1),
+                RX_META    => rd_meta(s-1),
+                RX_SOF_POS => rd_sof_pos(s-1),
+                RX_EOF_POS => rd_eof_pos(s-1),
+                RX_SOF     => rd_sof(s-1),
+                RX_EOF     => rd_eof(s-1),
+                RX_SRC_RDY => rd_src_rdy(s-1),
+                RX_DST_RDY => rd_dst_rdy(s-1),
+                TX_DATA    => rd_data(s),
+                TX_META    => rd_meta(s),
+                TX_SOF_POS => rd_sof_pos(s),
+                TX_EOF_POS => rd_eof_pos(s),
+                TX_SOF     => rd_sof(s),
+                TX_EOF     => rd_eof(s),
+                TX_SRC_RDY => rd_src_rdy(s),
+                TX_DST_RDY => rd_dst_rdy(s)
+            );
+        end generate;
+
+        ENG_RD_MFB_DATA(ep)    <= rd_data(STAGES);
+        ENG_RD_MFB_META(ep)    <= rd_meta(STAGES);
+        ENG_RD_MFB_SOF(ep)     <= rd_sof(STAGES);
+        ENG_RD_MFB_EOF(ep)     <= rd_eof(STAGES);
+        ENG_RD_MFB_SOF_POS(ep) <= rd_sof_pos(STAGES);
+        ENG_RD_MFB_EOF_POS(ep) <= rd_eof_pos(STAGES);
+        ENG_RD_MFB_SRC_RDY(ep) <= rd_src_rdy(STAGES);
+        rd_dst_rdy(STAGES)     <= ENG_RD_MFB_DST_RDY(ep);
     end generate;
-
-    ENG_RD_MFB_DATA    <= rd_data(STAGES);
-    ENG_RD_MFB_META    <= rd_meta(STAGES);
-    ENG_RD_MFB_SOF     <= rd_sof(STAGES);
-    ENG_RD_MFB_EOF     <= rd_eof(STAGES);
-    ENG_RD_MFB_SOF_POS <= rd_sof_pos(STAGES);
-    ENG_RD_MFB_EOF_POS <= rd_eof_pos(STAGES);
-    ENG_RD_MFB_SRC_RDY <= rd_src_rdy(STAGES);
-    rd_dst_rdy(STAGES) <= ENG_RD_MFB_DST_RDY;
 
     -- =========================================================================
     -- Write data, engine to DMA

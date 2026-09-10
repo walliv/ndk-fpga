@@ -147,6 +147,17 @@ architecture GROUPBY of USER_CORE is
     signal eng_rd_mfb_src_rdy : std_logic;
     signal eng_rd_mfb_dst_rdy : std_logic;
 
+    -- Pipe output: one read stream per DMA endpoint, merged below for the single engine; the
+    -- streaming GROUP BY is compute-bound, so one merged bus is enough.
+    signal pipe_rd_mfb_data    : slv_array_t(PCIE_ENDPOINTS-1 downto 0)(MFB_DATA_W-1 downto 0);
+    signal pipe_rd_mfb_meta    : slv_array_t(PCIE_ENDPOINTS-1 downto 0)(QID_W + CQ_ENTRY_CMD_ID_W-1 downto 0);
+    signal pipe_rd_mfb_sof     : slv_array_t(PCIE_ENDPOINTS-1 downto 0)(DMA_MFB_REGIONS-1 downto 0);
+    signal pipe_rd_mfb_eof     : slv_array_t(PCIE_ENDPOINTS-1 downto 0)(DMA_MFB_REGIONS-1 downto 0);
+    signal pipe_rd_mfb_sof_pos : slv_array_t(PCIE_ENDPOINTS-1 downto 0)(DMA_MFB_REGIONS*max(1, log2(DMA_MFB_REGION_SIZE))-1 downto 0);
+    signal pipe_rd_mfb_eof_pos : slv_array_t(PCIE_ENDPOINTS-1 downto 0)(DMA_MFB_REGIONS*log2(DMA_MFB_REGION_SIZE*DMA_MFB_BLOCK_SIZE)-1 downto 0);
+    signal pipe_rd_mfb_src_rdy : std_logic_vector(PCIE_ENDPOINTS-1 downto 0);
+    signal pipe_rd_mfb_dst_rdy : std_logic_vector(PCIE_ENDPOINTS-1 downto 0);
+
     signal eng_wr_mfb_data    : std_logic_vector(MFB_DATA_W-1 downto 0);
     signal eng_wr_mfb_meta    : std_logic_vector(DMA_MFB_REGIONS*(SQE_LBA_PTR_W + QID_W)-1 downto 0);
     signal eng_wr_mfb_sof     : std_logic_vector(DMA_MFB_REGIONS-1 downto 0);
@@ -456,12 +467,69 @@ begin
         WR_MFB_DST_RDY  => eng_wr_mfb_dst_rdy
     );
 
-    -- Interface pipeline: the engine sits in its own corner of the die, far from the DMA. Every
-    -- interface between them is registered here; the request path also expands the engine's
-    -- scalar valid into the per-queue vector the entity carries.
+    -- Single endpoint: straight through, bit-identical to the pre-split design.
+    rd_merge_bypass_g : if (PCIE_ENDPOINTS = 1) generate
+        eng_rd_mfb_data        <= pipe_rd_mfb_data(0);
+        eng_rd_mfb_sof         <= pipe_rd_mfb_sof(0);
+        eng_rd_mfb_eof         <= pipe_rd_mfb_eof(0);
+        eng_rd_mfb_sof_pos     <= pipe_rd_mfb_sof_pos(0);
+        eng_rd_mfb_eof_pos     <= pipe_rd_mfb_eof_pos(0);
+        eng_rd_mfb_src_rdy     <= pipe_rd_mfb_src_rdy(0);
+        pipe_rd_mfb_dst_rdy(0) <= eng_rd_mfb_dst_rdy;
+    end generate;
+
+    -- Two endpoints: both streams feed the one engine through a frame-granular merger, so a queue
+    -- on endpoint 1 is processed like any other. Single-stream bandwidth is accepted here.
+    rd_merge_g : if (PCIE_ENDPOINTS = 2) generate
+        rd_merger_i : entity work.MFB_MERGER_SIMPLE
+        generic map (
+            REGIONS     => DMA_MFB_REGIONS,
+            REGION_SIZE => DMA_MFB_REGION_SIZE,
+            BLOCK_SIZE  => DMA_MFB_BLOCK_SIZE,
+            ITEM_WIDTH  => DMA_MFB_ITEM_WIDTH,
+            META_WIDTH  => QID_W + CQ_ENTRY_CMD_ID_W,
+            MASKING_EN  => TRUE,
+            CNT_MAX     => 64
+        )
+        port map (
+            CLK => DMA_CLK,
+            RST => eng_rst,
+
+            RX_MFB0_DATA    => pipe_rd_mfb_data(0),
+            RX_MFB0_META    => pipe_rd_mfb_meta(0),
+            RX_MFB0_SOF     => pipe_rd_mfb_sof(0),
+            RX_MFB0_SOF_POS => pipe_rd_mfb_sof_pos(0),
+            RX_MFB0_EOF     => pipe_rd_mfb_eof(0),
+            RX_MFB0_EOF_POS => pipe_rd_mfb_eof_pos(0),
+            RX_MFB0_SRC_RDY => pipe_rd_mfb_src_rdy(0),
+            RX_MFB0_DST_RDY => pipe_rd_mfb_dst_rdy(0),
+
+            RX_MFB1_DATA    => pipe_rd_mfb_data(1),
+            RX_MFB1_META    => pipe_rd_mfb_meta(1),
+            RX_MFB1_SOF     => pipe_rd_mfb_sof(1),
+            RX_MFB1_SOF_POS => pipe_rd_mfb_sof_pos(1),
+            RX_MFB1_EOF     => pipe_rd_mfb_eof(1),
+            RX_MFB1_EOF_POS => pipe_rd_mfb_eof_pos(1),
+            RX_MFB1_SRC_RDY => pipe_rd_mfb_src_rdy(1),
+            RX_MFB1_DST_RDY => pipe_rd_mfb_dst_rdy(1),
+
+            TX_MFB_DATA     => eng_rd_mfb_data,
+            TX_MFB_META     => open,
+            TX_MFB_SOF      => eng_rd_mfb_sof,
+            TX_MFB_SOF_POS  => eng_rd_mfb_sof_pos,
+            TX_MFB_EOF      => eng_rd_mfb_eof,
+            TX_MFB_EOF_POS  => eng_rd_mfb_eof_pos,
+            TX_MFB_SRC_RDY  => eng_rd_mfb_src_rdy,
+            TX_MFB_DST_RDY  => eng_rd_mfb_dst_rdy
+        );
+    end generate;
+
+    -- Interface pipeline: the engine sits in its own corner of the die, far from the DMA, so every
+    -- interface between them is registered.
     if_pipe_i : entity work.USER_CORE_IF_PIPE
     generic map (
         NUM_QUEUES      => NUM_QUEUES,
+        PCIE_ENDPOINTS  => PCIE_ENDPOINTS,
         LBA_PTR_W       => SQE_LBA_PTR_W,
         MFB_REGION_SIZE => DMA_MFB_REGION_SIZE,
         MFB_BLOCK_SIZE  => DMA_MFB_BLOCK_SIZE,
@@ -489,14 +557,14 @@ begin
         ENG_OP_STAT_CID  => open,
         ENG_OP_STAT_VLD  => eng_op_stat_vld,
 
-        ENG_RD_MFB_DATA    => eng_rd_mfb_data,
-        ENG_RD_MFB_META    => open,
-        ENG_RD_MFB_SOF     => eng_rd_mfb_sof,
-        ENG_RD_MFB_EOF     => eng_rd_mfb_eof,
-        ENG_RD_MFB_SOF_POS => eng_rd_mfb_sof_pos,
-        ENG_RD_MFB_EOF_POS => eng_rd_mfb_eof_pos,
-        ENG_RD_MFB_SRC_RDY => eng_rd_mfb_src_rdy,
-        ENG_RD_MFB_DST_RDY => eng_rd_mfb_dst_rdy,
+        ENG_RD_MFB_DATA    => pipe_rd_mfb_data,
+        ENG_RD_MFB_META    => pipe_rd_mfb_meta,
+        ENG_RD_MFB_SOF     => pipe_rd_mfb_sof,
+        ENG_RD_MFB_EOF     => pipe_rd_mfb_eof,
+        ENG_RD_MFB_SOF_POS => pipe_rd_mfb_sof_pos,
+        ENG_RD_MFB_EOF_POS => pipe_rd_mfb_eof_pos,
+        ENG_RD_MFB_SRC_RDY => pipe_rd_mfb_src_rdy,
+        ENG_RD_MFB_DST_RDY => pipe_rd_mfb_dst_rdy,
 
         ENG_WR_MFB_DATA    => eng_wr_mfb_data,
         ENG_WR_MFB_META    => eng_wr_mfb_meta,

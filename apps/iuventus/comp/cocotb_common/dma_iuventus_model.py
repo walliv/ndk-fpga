@@ -16,6 +16,8 @@ from cocotbext.ofm.mfb.drivers import MFBDriver
 from cocotbext.ofm.mfb.monitors import MFBMonitor
 from cocotbext.ofm.mfb.transaction import MfbTransactionWithMeta
 
+from endpoint_view import EndpointView
+
 # NVME_OP_STAT_TYPE: "0 for write, 1 for read" (see user_core_ent.vhd's port comment).
 OP_STAT_TYPE_WRITE = 0
 OP_STAT_TYPE_READ = 1
@@ -145,10 +147,12 @@ class SimplifiedDmaModel:
         self._rd_task = None
         self._inflight_cid = 0
         self._inflight_qid = 0
+        # NVME_RD_MFB is per endpoint; this single-outstanding model serves endpoint 0's stream.
+        self._rd = EndpointView(dut, 0)
         self._idle_rd_mfb()
         dut.NVME_WR_MFB_DST_RDY.value = 1
 
-        self._rd_mfb_driver = MFBDriver(dut, "NVME_RD_MFB", clk, mfb_params=_RD_MFB_PARAMS, vld_gen=None)
+        self._rd_mfb_driver = MFBDriver(self._rd, "NVME_RD_MFB", clk, mfb_params=_RD_MFB_PARAMS, vld_gen=None)
         self._wr_mfb_monitor = MFBMonitor(dut, "NVME_WR_MFB", clk, mfb_params=_WR_MFB_PARAMS, trans_type=MfbTransactionWithMeta)
         self._wr_mfb_monitor.add_callback(self._on_wr_frame)
 
@@ -160,12 +164,12 @@ class SimplifiedDmaModel:
 
     def _idle_rd_mfb(self) -> None:
         """Park RD_MFB with nothing offered, the state the driver expects between frames."""
-        self._dut.NVME_RD_MFB_DATA.value = 0
-        self._dut.NVME_RD_MFB_SOF.value = 0
-        self._dut.NVME_RD_MFB_EOF.value = 0
-        self._dut.NVME_RD_MFB_SOF_POS.value = 0
-        self._dut.NVME_RD_MFB_EOF_POS.value = 0
-        self._dut.NVME_RD_MFB_SRC_RDY.value = 0
+        self._rd.NVME_RD_MFB_DATA.value = 0
+        self._rd.NVME_RD_MFB_SOF.value = 0
+        self._rd.NVME_RD_MFB_EOF.value = 0
+        self._rd.NVME_RD_MFB_SOF_POS.value = 0
+        self._rd.NVME_RD_MFB_EOF_POS.value = 0
+        self._rd.NVME_RD_MFB_SRC_RDY.value = 0
 
     def reset(self) -> None:
         """Clears this model's own in-flight/pending state. Call after pulsing a fresh DMA_RST
@@ -331,7 +335,8 @@ class SimplifiedDmaModel:
         # Same identity the accept published, so a consumer can match returned data to its request.
         await self._rd_mfb_driver.send(MfbTransactionWithMeta(
             data=pattern,
-            meta=(self._inflight_qid << CQ_ENTRY_CMD_ID_W) | self._inflight_cid,
+            # DMA_IUVENTUS drives RD_MFB_META as CID & QID (queue in the low bits).
+            meta=(self._inflight_cid << QID_W) | self._inflight_qid,
         ))
 
         # Wait for THIS completion's OP_STAT_VLD to dispatch, not just queue, before re-arming RDY:

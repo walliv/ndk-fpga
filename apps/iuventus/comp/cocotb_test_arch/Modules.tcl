@@ -24,6 +24,8 @@ set FIFOX_BASE         "$OFM_PATH/comp/base/fifo/fifox"
 lappend PACKAGES "$OFM_PATH/comp/base/pkg/math_pack.vhd"
 lappend PACKAGES "$OFM_PATH/comp/base/pkg/type_pack.vhd"
 lappend PACKAGES "$OFM_PATH/comp/base/pkg/nvme_meta_pack.vhd"
+# queue_ep_f: the queue-to-endpoint map user_core_test_arch uses to pick a read stream.
+lappend PACKAGES "$OFM_PATH/comp/dma/dma_iuventus/pkg/iuventus_sizing_pkg.vhd"
 # See combo_user_const_pkg.vhd's own header for why this stub exists.
 lappend PACKAGES "$ENTITY_BASE/combo_user_const_pkg.vhd"
 

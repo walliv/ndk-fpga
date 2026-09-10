@@ -20,6 +20,7 @@ from cocotbext.ofm.mi.drivers import MIRequestDriver  # noqa: E402
 from cocotbext.ofm.mfb.properties import attach_mfb_properties  # noqa: E402
 
 from dma_iuventus_model import SimplifiedDmaModel  # noqa: E402
+from endpoint_view import EndpointView, attach_endpoint_mfb_properties  # noqa: E402
 
 e = cocotb.external
 
@@ -82,8 +83,13 @@ class GroupByNfbDevice(cocotbext.nfb.NfbDevice):
         self._dut.FPGA_ID_VLD.value = 0
 
         self.mi = [MIRequestDriver(self._dut, "MI", self._dut.MI_CLK)]
+        # NVME_RD_MFB and PIPE_RD_MFB are per-endpoint arrays discovery cannot index: NVME_RD_MFB
+        # gets one checker per endpoint, PIPE_RD_MFB is checked anyway after the merge at ENG_RD_MFB.
         self.mfb_props = attach_mfb_properties(self._dut, self._dut.DMA_CLK,
-                                               reset=self._dut.DMA_RST)
+                                               reset=self._dut.DMA_RST,
+                                               exclude=("NVME_RD_MFB", "PIPE_RD_MFB"))
+        self.mfb_props.update(attach_endpoint_mfb_properties(self._dut, self._dut.DMA_CLK,
+                                                             reset=self._dut.DMA_RST))
 
     async def _reset(self):
         self._dut.USR_RST.value = 1
@@ -358,6 +364,7 @@ async def test_eps_periodic_windows(dut):
     prev_reached = False
     seen_any_beat = False
     internal = dut.eps_cntr_i
+    rd0 = EndpointView(dut, 0)
     cycles = 0
     while len(windows) < 5:
         await RisingEdge(dut.DMA_CLK)
@@ -372,7 +379,7 @@ async def test_eps_periodic_windows(dut):
             if seen_any_beat or windows:
                 windows.append((records_since, beats_since))
             records_since = beats_since = 0
-        elif int(dut.NVME_RD_MFB_SRC_RDY.value) == 1 and int(dut.NVME_RD_MFB_DST_RDY.value) == 1:
+        elif int(rd0.NVME_RD_MFB_SRC_RDY.value) == 1 and int(rd0.NVME_RD_MFB_DST_RDY.value) == 1:
             records_since += RECS_BEAT
             beats_since += 1
             seen_any_beat = True

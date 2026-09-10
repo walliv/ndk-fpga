@@ -13,6 +13,7 @@ set SDP_BRAM_BASE      "$OFM_PATH/comp/base/mem/sdp_bram"
 set EVENT_CNTR_BASE    "$OFM_PATH/comp/base/misc/event_counter"
 set MFB_PIPE_BASE      "$OFM_PATH/comp/mfb_tools/flow/pipe"
 set FIFOX_BASE         "$OFM_PATH/comp/base/fifo/fifox"
+set MFB_MERGER_BASE    "$OFM_PATH/comp/mfb_tools/flow/merger_simple"
 
 lappend PACKAGES "$OFM_PATH/comp/base/pkg/math_pack.vhd"
 lappend PACKAGES "$OFM_PATH/comp/base/pkg/type_pack.vhd"
@@ -26,6 +27,9 @@ lappend COMPONENTS [list "SDP_BRAM"      $SDP_BRAM_BASE   "FULL"]
 lappend COMPONENTS [list "EVENT_COUNTER" $EVENT_CNTR_BASE "FULL"]
 lappend COMPONENTS [list "MFB_PIPE"      $MFB_PIPE_BASE   "FULL"]
 lappend COMPONENTS [list "FIFOX"         $FIFOX_BASE      "FULL"]
+# Direct entity instantiation: the merger must be analysed even at PCIE_ENDPOINTS = 1,
+# where its generate block is not elaborated.
+lappend COMPONENTS [list "MFB_MERGER_SIMPLE" $MFB_MERGER_BASE "FULL"]
 
 lappend MOD "$APP_COMP_BASE/iuventus_groupby_lane.vhd"
 lappend MOD "$APP_COMP_BASE/iuventus_groupby_engine.vhd"
