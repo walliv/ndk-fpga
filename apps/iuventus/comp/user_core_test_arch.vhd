@@ -10,6 +10,7 @@ use IEEE.numeric_std.all;
 
 use work.math_pack.all;
 use work.type_pack.all;
+use work.iuventus_sizing_pkg.all;
 
 architecture TEST of USER_CORE is
 
@@ -34,14 +35,15 @@ architecture TEST of USER_CORE is
     signal core_op_stat_qid     : std_logic_vector(QID_W-1 downto 0);
     signal core_op_stat_cid     : std_logic_vector(CQ_ENTRY_CMD_ID_W-1 downto 0);
     signal core_op_stat_vld     : std_logic;
-    signal core_rd_mfb_data     : std_logic_vector(DMA_MFB_REGIONS*DMA_MFB_REGION_SIZE*DMA_MFB_BLOCK_SIZE*DMA_MFB_ITEM_WIDTH-1 downto 0);
-    signal core_rd_mfb_meta     : std_logic_vector(DMA_MFB_REGIONS*(QID_W + CQ_ENTRY_CMD_ID_W)-1 downto 0);
-    signal core_rd_mfb_sof      : std_logic_vector(DMA_MFB_REGIONS-1 downto 0);
-    signal core_rd_mfb_eof      : std_logic_vector(DMA_MFB_REGIONS-1 downto 0);
-    signal core_rd_mfb_sof_pos  : std_logic_vector(DMA_MFB_REGIONS*maximum(1, log2(DMA_MFB_REGION_SIZE))-1 downto 0);
-    signal core_rd_mfb_eof_pos  : std_logic_vector(DMA_MFB_REGIONS*log2(DMA_MFB_REGION_SIZE*DMA_MFB_BLOCK_SIZE)-1 downto 0);
-    signal core_rd_mfb_src_rdy  : std_logic;
-    signal core_rd_mfb_dst_rdy  : std_logic;
+    -- One read stream per DMA endpoint, each carrying only the queues that endpoint serves.
+    signal core_rd_mfb_data     : slv_array_t(PCIE_ENDPOINTS-1 downto 0)(DMA_MFB_REGIONS*DMA_MFB_REGION_SIZE*DMA_MFB_BLOCK_SIZE*DMA_MFB_ITEM_WIDTH-1 downto 0);
+    signal core_rd_mfb_meta     : slv_array_t(PCIE_ENDPOINTS-1 downto 0)(DMA_MFB_REGIONS*(QID_W + CQ_ENTRY_CMD_ID_W)-1 downto 0);
+    signal core_rd_mfb_sof      : slv_array_t(PCIE_ENDPOINTS-1 downto 0)(DMA_MFB_REGIONS-1 downto 0);
+    signal core_rd_mfb_eof      : slv_array_t(PCIE_ENDPOINTS-1 downto 0)(DMA_MFB_REGIONS-1 downto 0);
+    signal core_rd_mfb_sof_pos  : slv_array_t(PCIE_ENDPOINTS-1 downto 0)(DMA_MFB_REGIONS*maximum(1, log2(DMA_MFB_REGION_SIZE))-1 downto 0);
+    signal core_rd_mfb_eof_pos  : slv_array_t(PCIE_ENDPOINTS-1 downto 0)(DMA_MFB_REGIONS*log2(DMA_MFB_REGION_SIZE*DMA_MFB_BLOCK_SIZE)-1 downto 0);
+    signal core_rd_mfb_src_rdy  : std_logic_vector(PCIE_ENDPOINTS-1 downto 0);
+    signal core_rd_mfb_dst_rdy  : std_logic_vector(PCIE_ENDPOINTS-1 downto 0);
     signal core_wr_mfb_data     : std_logic_vector(DMA_MFB_REGIONS*DMA_MFB_REGION_SIZE*DMA_MFB_BLOCK_SIZE*DMA_MFB_ITEM_WIDTH-1 downto 0);
     signal core_wr_mfb_meta     : std_logic_vector(DMA_MFB_REGIONS*(SQE_LBA_PTR_W + QID_W)-1 downto 0);
     signal core_wr_mfb_sof      : std_logic_vector(DMA_MFB_REGIONS-1 downto 0);
@@ -151,6 +153,9 @@ architecture TEST of USER_CORE is
     -- QID that the integrity checker's write/read requests are tagged with (queue 0 / rd_ch_min);
     -- forced to 0 when NUM_QUEUES = 1.
     signal checker_qid       : std_logic_vector(QID_W -1 downto 0);
+    -- Endpoint serving checker_qid, hence which read stream carries the checker's data. Software
+    -- may retarget the checker at run time, so this is a live mux select, not a constant.
+    signal checker_ep_s      : natural range 0 to PCIE_ENDPOINTS -1;
 
     -- MFB Generator outputs
     signal gen_mfb_sof     : std_logic_vector(NVME_WR_MFB_SOF'range);
@@ -556,8 +561,9 @@ begin
         end if;
     end process;
 
-    -- Identity of the frame currently landing on RD_MFB. Sampled at SOF of region 0 on a real
-    -- transfer: META is only defined for a region carrying a frame start.
+    -- Identity of the frame currently landing on the ENDPOINT-0 read stream, which is the only
+    -- one this debug register observes. Sampled at SOF of region 0 on a real transfer: META is
+    -- only defined for a region carrying a frame start.
     rd_mfb_id_reg_p : process (DMA_CLK)
     begin
         if (rising_edge(DMA_CLK)) then
@@ -565,10 +571,11 @@ begin
                 rd_mfb_qid_reg    <= (others => '0');
                 rd_mfb_cid_reg    <= (others => '0');
                 rd_mfb_id_vld_reg <= '0';
-            elsif (core_rd_mfb_sof(0) = '1' and core_rd_mfb_src_rdy = '1'
+            elsif (core_rd_mfb_sof(0)(0) = '1' and core_rd_mfb_src_rdy(0) = '1'
                    and nvme_rd_mfb_dst_rdy_s = '1') then
-                rd_mfb_cid_reg    <= core_rd_mfb_meta(CQ_ENTRY_CMD_ID_W -1 downto 0);
-                rd_mfb_qid_reg    <= core_rd_mfb_meta(CQ_ENTRY_CMD_ID_W + QID_W -1 downto CQ_ENTRY_CMD_ID_W);
+                -- DMA_IUVENTUS lays RD_MFB_META out as CID & QID: the queue sits in the low bits.
+                rd_mfb_qid_reg    <= core_rd_mfb_meta(0)(QID_W -1 downto 0);
+                rd_mfb_cid_reg    <= core_rd_mfb_meta(0)(QID_W + CQ_ENTRY_CMD_ID_W -1 downto QID_W);
                 rd_mfb_id_vld_reg <= '1';
             end if;
         end if;
@@ -927,8 +934,16 @@ begin
     -- masking only SRC_RDY lets a never-presented beat advance, orphaning the EOF.
     pip_nvme_wr_dst_rdy <= (core_wr_mfb_dst_rdy and lat_wr_issue_ok) when (integ_en = '0') else '0';
 
-    nvme_rd_mfb_dst_rdy_s <= chk_rd_mfb_dst_rdy when (integ_en = '1') else '1';
-    core_rd_mfb_dst_rdy   <= nvme_rd_mfb_dst_rdy_s;
+    checker_ep_s <= queue_ep_f(to_integer(unsigned(checker_qid)), NUM_QUEUES, PCIE_ENDPOINTS);
+
+    -- The checker consumes one read at a time on the stream of ITS OWN queue; every other stream
+    -- is simply accepted and discarded, exactly as the generator does with all of them.
+    rd_dst_rdy_g : for ep in 0 to PCIE_ENDPOINTS-1 generate
+        core_rd_mfb_dst_rdy(ep) <= chk_rd_mfb_dst_rdy when (integ_en = '1' and checker_ep_s = ep) else '1';
+    end generate;
+
+    -- Endpoint 0's own ready, which is what rd_mfb_id_reg_p above qualifies its capture with.
+    nvme_rd_mfb_dst_rdy_s <= core_rd_mfb_dst_rdy(0);
 
     integrity_checker_i : entity work.IUVENTUS_INTEGRITY_CHECKER
     generic map (
@@ -975,10 +990,10 @@ begin
         OP_STAT_VLD    => core_op_stat_vld,
         OP_STAT_CODE   => core_op_stat_code,
 
-        RD_MFB_DATA    => core_rd_mfb_data,
-        RD_MFB_SOF     => core_rd_mfb_sof,
-        RD_MFB_EOF     => core_rd_mfb_eof,
-        RD_MFB_SRC_RDY => core_rd_mfb_src_rdy,
+        RD_MFB_DATA    => core_rd_mfb_data(checker_ep_s),
+        RD_MFB_SOF     => core_rd_mfb_sof(checker_ep_s),
+        RD_MFB_EOF     => core_rd_mfb_eof(checker_ep_s),
+        RD_MFB_SRC_RDY => core_rd_mfb_src_rdy(checker_ep_s),
         RD_MFB_DST_RDY => chk_rd_mfb_dst_rdy
     );
 
@@ -1494,6 +1509,7 @@ begin
     user_core_if_pipe_i : entity work.USER_CORE_IF_PIPE
     generic map (
         NUM_QUEUES      => NUM_QUEUES,
+        PCIE_ENDPOINTS  => PCIE_ENDPOINTS,
         LBA_PTR_W       => SQE_LBA_PTR_W,
         MFB_REGION_SIZE => DMA_MFB_REGION_SIZE,
         MFB_BLOCK_SIZE  => DMA_MFB_BLOCK_SIZE,
