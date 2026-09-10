@@ -82,8 +82,12 @@ class GroupByNfbDevice(cocotbext.nfb.NfbDevice):
         self._dut.FPGA_ID_VLD.value = 0
 
         self.mi = [MIRequestDriver(self._dut, "MI", self._dut.MI_CLK)]
+        # The two internal read-stream signal groups are excluded: they are arrays (one element
+        # per PCIe endpoint) that the checker cannot index, and the same wires are already checked
+        # at the entity boundary (NVME_RD_MFB/NVME_RD_EP1_MFB) and after the merge (ENG_RD_MFB).
         self.mfb_props = attach_mfb_properties(self._dut, self._dut.DMA_CLK,
-                                               reset=self._dut.DMA_RST)
+                                               reset=self._dut.DMA_RST,
+                                               exclude=("DMA_RD_MFB", "PIPE_RD_MFB"))
 
     async def _reset(self):
         self._dut.USR_RST.value = 1

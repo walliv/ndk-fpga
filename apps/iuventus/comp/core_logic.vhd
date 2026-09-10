@@ -338,6 +338,27 @@ architecture FULL of CORE_LOGIC is
     signal dma_ep1_cc_mfb_src_rdy : std_logic;
     signal dma_ep1_cc_mfb_dst_rdy : std_logic;
 
+    -- The DMA's second read-data stream (endpoint 1's own WRBUFF drain) and the user core's
+    -- matching input group. Scalar for the same reason as the CQ/CC groups above: a
+    -- nvme_rd_mfb_data(1)-style index would not elaborate at DMA_STREAMS = 1.
+    signal dma_ep1_rd_mfb_data    : std_logic_vector(DMA_MFB_REGIONS*DMA_MFB_REGION_SIZE*DMA_MFB_BLOCK_SIZE*DMA_MFB_ITEM_WIDTH-1 downto 0);
+    signal dma_ep1_rd_mfb_meta    : std_logic_vector(DMA_MFB_REGIONS*(maximum(1, log2(NUM_QUEUES)) + CQ_ENTRY_CMD_ID_W) -1 downto 0);
+    signal dma_ep1_rd_mfb_sof     : std_logic_vector(DMA_MFB_REGIONS-1 downto 0);
+    signal dma_ep1_rd_mfb_eof     : std_logic_vector(DMA_MFB_REGIONS-1 downto 0);
+    signal dma_ep1_rd_mfb_sof_pos : std_logic_vector(DMA_MFB_REGIONS*max(1, log2(DMA_MFB_REGION_SIZE))-1 downto 0);
+    signal dma_ep1_rd_mfb_eof_pos : std_logic_vector(DMA_MFB_REGIONS*max(1, log2(DMA_MFB_REGION_SIZE*DMA_MFB_BLOCK_SIZE))-1 downto 0);
+    signal dma_ep1_rd_mfb_src_rdy : std_logic;
+    signal dma_ep1_rd_mfb_dst_rdy : std_logic;
+
+    signal uc_ep1_rd_mfb_data    : std_logic_vector(DMA_MFB_REGIONS*DMA_MFB_REGION_SIZE*DMA_MFB_BLOCK_SIZE*DMA_MFB_ITEM_WIDTH-1 downto 0);
+    signal uc_ep1_rd_mfb_meta    : std_logic_vector(DMA_MFB_REGIONS*(maximum(1, log2(NUM_QUEUES)) + CQ_ENTRY_CMD_ID_W) -1 downto 0);
+    signal uc_ep1_rd_mfb_sof     : std_logic_vector(DMA_MFB_REGIONS-1 downto 0);
+    signal uc_ep1_rd_mfb_eof     : std_logic_vector(DMA_MFB_REGIONS-1 downto 0);
+    signal uc_ep1_rd_mfb_sof_pos : std_logic_vector(DMA_MFB_REGIONS*max(1, log2(DMA_MFB_REGION_SIZE))-1 downto 0);
+    signal uc_ep1_rd_mfb_eof_pos : std_logic_vector(DMA_MFB_REGIONS*max(1, log2(DMA_MFB_REGION_SIZE*DMA_MFB_BLOCK_SIZE))-1 downto 0);
+    signal uc_ep1_rd_mfb_src_rdy : std_logic;
+    signal uc_ep1_rd_mfb_dst_rdy : std_logic;
+
     signal nvme_rd_req_lba_num : slv_array_t(DMA_STREAMS-1 downto 0)(7 downto 0);
     -- Head request page count per queue, carried alongside the shared payload bus so read
     -- admission can test a queue against its own request instead of the largest one that could
@@ -2066,6 +2087,16 @@ begin
             RD_MFB_SRC_RDY => nvme_rd_mfb_src_rdy(0),
             RD_MFB_DST_RDY => nvme_rd_mfb_dst_rdy(0),
 
+            -- Endpoint 1's own read stream; ep1_g/no_ep1_g below join it to nvme_rd_mfb_*(1).
+            RD_EP1_MFB_DATA    => dma_ep1_rd_mfb_data,
+            RD_EP1_MFB_META    => dma_ep1_rd_mfb_meta,
+            RD_EP1_MFB_SOF     => dma_ep1_rd_mfb_sof,
+            RD_EP1_MFB_EOF     => dma_ep1_rd_mfb_eof,
+            RD_EP1_MFB_SOF_POS => dma_ep1_rd_mfb_sof_pos,
+            RD_EP1_MFB_EOF_POS => dma_ep1_rd_mfb_eof_pos,
+            RD_EP1_MFB_SRC_RDY => dma_ep1_rd_mfb_src_rdy,
+            RD_EP1_MFB_DST_RDY => dma_ep1_rd_mfb_dst_rdy,
+
             -- Endpoint 1 has no doorbells of its own: RQ is single, driven from endpoint 0 only.
             PCIE_RQ_MFB_DATA    => pcie_rq_mfb_data(0),
             PCIE_RQ_MFB_META    => pcie_rq_mfb_meta(0),
@@ -2417,6 +2448,26 @@ begin
         pcie_cc_mfb_src_rdy(1) <= dma_ep1_cc_mfb_src_rdy;
         dma_ep1_cc_mfb_dst_rdy <= pcie_cc_mfb_dst_rdy(1);
 
+        -- Endpoint 1's read data: the DMA's second drain thread delivers it here and the user core
+        -- consumes it in parallel with stream 0.
+        nvme_rd_mfb_data(1)    <= dma_ep1_rd_mfb_data;
+        nvme_rd_mfb_meta(1)    <= dma_ep1_rd_mfb_meta;
+        nvme_rd_mfb_sof(1)     <= dma_ep1_rd_mfb_sof;
+        nvme_rd_mfb_eof(1)     <= dma_ep1_rd_mfb_eof;
+        nvme_rd_mfb_sof_pos(1) <= dma_ep1_rd_mfb_sof_pos;
+        nvme_rd_mfb_eof_pos(1) <= dma_ep1_rd_mfb_eof_pos;
+        nvme_rd_mfb_src_rdy(1) <= dma_ep1_rd_mfb_src_rdy;
+        dma_ep1_rd_mfb_dst_rdy <= nvme_rd_mfb_dst_rdy(1);
+
+        uc_ep1_rd_mfb_data     <= nvme_rd_mfb_data(1);
+        uc_ep1_rd_mfb_meta     <= nvme_rd_mfb_meta(1);
+        uc_ep1_rd_mfb_sof      <= nvme_rd_mfb_sof(1);
+        uc_ep1_rd_mfb_eof      <= nvme_rd_mfb_eof(1);
+        uc_ep1_rd_mfb_sof_pos  <= nvme_rd_mfb_sof_pos(1);
+        uc_ep1_rd_mfb_eof_pos  <= nvme_rd_mfb_eof_pos(1);
+        uc_ep1_rd_mfb_src_rdy  <= nvme_rd_mfb_src_rdy(1);
+        nvme_rd_mfb_dst_rdy(1) <= uc_ep1_rd_mfb_dst_rdy;
+
         -- Endpoint 1 has no doorbells: nothing ever offers it a submission, so RQ idles.
         pcie_rq_mfb_src_rdy(1) <= '0';
         pcie_rq_mfb_data(1)    <= (others => '0');
@@ -2438,6 +2489,16 @@ begin
         dma_ep1_cq_mfb_eof_pos <= (others => '0');
         dma_ep1_cq_mfb_src_rdy <= '0';
         dma_ep1_cc_mfb_dst_rdy <= '0';
+        -- The DMA holds its second read stream idle here, but still samples this ready: accept,
+        -- rather than leave it undriven. The user core's own group is idled the same way.
+        dma_ep1_rd_mfb_dst_rdy <= '1';
+        uc_ep1_rd_mfb_data     <= (others => '0');
+        uc_ep1_rd_mfb_meta     <= (others => '0');
+        uc_ep1_rd_mfb_sof      <= (others => '0');
+        uc_ep1_rd_mfb_eof      <= (others => '0');
+        uc_ep1_rd_mfb_sof_pos  <= (others => '0');
+        uc_ep1_rd_mfb_eof_pos  <= (others => '0');
+        uc_ep1_rd_mfb_src_rdy  <= '0';
     end generate;
 
     -- MI interface connection: the single DMA's MI port sits behind MI_ADC_PORT_DMA, endpoint 0's
@@ -2484,6 +2545,7 @@ begin
             MI_WIDTH         => MI_WIDTH,
             DMA_STREAMS      => DMA_STREAMS,
             NUM_QUEUES       => NUM_QUEUES,
+            PCIE_ENDPOINTS   => PCIE_ENDPOINTS,
 
             DMA_MFB_REGIONS     => DMA_MFB_REGIONS,
             DMA_MFB_REGION_SIZE => DMA_MFB_REGION_SIZE,
@@ -2544,6 +2606,15 @@ begin
             NVME_RD_MFB_EOF_POS => nvme_rd_mfb_eof_pos(0),
             NVME_RD_MFB_SRC_RDY => nvme_rd_mfb_src_rdy(0),
             NVME_RD_MFB_DST_RDY => nvme_rd_mfb_dst_rdy(0),
+
+            NVME_RD_EP1_MFB_DATA    => uc_ep1_rd_mfb_data,
+            NVME_RD_EP1_MFB_META    => uc_ep1_rd_mfb_meta,
+            NVME_RD_EP1_MFB_SOF     => uc_ep1_rd_mfb_sof,
+            NVME_RD_EP1_MFB_EOF     => uc_ep1_rd_mfb_eof,
+            NVME_RD_EP1_MFB_SOF_POS => uc_ep1_rd_mfb_sof_pos,
+            NVME_RD_EP1_MFB_EOF_POS => uc_ep1_rd_mfb_eof_pos,
+            NVME_RD_EP1_MFB_SRC_RDY => uc_ep1_rd_mfb_src_rdy,
+            NVME_RD_EP1_MFB_DST_RDY => uc_ep1_rd_mfb_dst_rdy,
 
             PCIE_LINK_UP => app_pcie_link_up(0),
             FPGA_ID      => fpga_id,

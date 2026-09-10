@@ -16,12 +16,16 @@ use work.nvme_meta_pack.all;
 entity USER_CORE is
     generic (
         -- MI parameters: width of data signals
-        MI_WIDTH    : integer := 32;
+        MI_WIDTH       : integer := 32;
         -- DMA: number of DMA streams
-        DMA_STREAMS : natural := 1;
+        DMA_STREAMS    : natural := 1;
         -- DMA: number of independent SQ/CQ queues (one per SSD) that the DMA is built with.
         -- Governs the width of NVME_RD_REQ_QID and of the QID field appended to NVME_WR_MFB_META.
-        NUM_QUEUES  : natural := 1;
+        NUM_QUEUES     : natural := 1;
+        -- DMA: number of PCIe endpoints, each draining its own read data on its own stream
+        -- (NVME_RD_MFB for endpoint 0, NVME_RD_EP1_MFB for endpoint 1). Queue q is served by
+        -- endpoint queue_ep_f(q); must equal DMA_STREAMS.
+        PCIE_ENDPOINTS : natural := 1;
 
         -- DMA MFB: number of regions in word
         DMA_MFB_REGIONS     : natural := 1;
@@ -116,6 +120,18 @@ entity USER_CORE is
         NVME_RD_MFB_EOF_POS : in  std_logic_vector(DMA_MFB_REGIONS*log2(DMA_MFB_REGION_SIZE*DMA_MFB_BLOCK_SIZE)-1 downto 0);
         NVME_RD_MFB_SRC_RDY : in  std_logic;
         NVME_RD_MFB_DST_RDY : out std_logic;
+
+        -- Endpoint 1's own read stream, same layout as the group above and carrying only queues
+        -- served by endpoint 1. Always present; the inputs default idle so a PCIE_ENDPOINTS = 1
+        -- instantiation can leave the group unconnected.
+        NVME_RD_EP1_MFB_DATA    : in  std_logic_vector(DMA_MFB_REGIONS*DMA_MFB_REGION_SIZE*DMA_MFB_BLOCK_SIZE*DMA_MFB_ITEM_WIDTH-1 downto 0) := (others => '0');
+        NVME_RD_EP1_MFB_META    : in  std_logic_vector(DMA_MFB_REGIONS*(maximum(1, log2(NUM_QUEUES)) + CQ_ENTRY_CMD_ID_W) -1 downto 0) := (others => '0');
+        NVME_RD_EP1_MFB_SOF     : in  std_logic_vector(DMA_MFB_REGIONS-1 downto 0) := (others => '0');
+        NVME_RD_EP1_MFB_EOF     : in  std_logic_vector(DMA_MFB_REGIONS-1 downto 0) := (others => '0');
+        NVME_RD_EP1_MFB_SOF_POS : in  std_logic_vector(DMA_MFB_REGIONS*maximum(1, log2(DMA_MFB_REGION_SIZE))-1 downto 0) := (others => '0');
+        NVME_RD_EP1_MFB_EOF_POS : in  std_logic_vector(DMA_MFB_REGIONS*log2(DMA_MFB_REGION_SIZE*DMA_MFB_BLOCK_SIZE)-1 downto 0) := (others => '0');
+        NVME_RD_EP1_MFB_SRC_RDY : in  std_logic := '0';
+        NVME_RD_EP1_MFB_DST_RDY : out std_logic;
 
         -- ==============================
         -- Write interface: although the data size seems unlimited, the maximum is 128 KiB, or 256

@@ -30,12 +30,15 @@ set EVENT_CNTR_BASE          "$OFM_PATH/comp/base/misc/event_counter"
 set ASFIFOX_BASE             "$OFM_PATH/comp/base/fifo/asfifox"
 set PIPE_BASE                "$OFM_PATH/comp/base/misc/pipe"
 set FIFOX_BASE               "$OFM_PATH/comp/base/fifo/fifox"
+set MFB_MERGER_BASE          "$OFM_PATH/comp/mfb_tools/flow/merger_simple"
 
 # Packages
 lappend PACKAGES "$OFM_PATH/comp/base/pkg/math_pack.vhd"
 lappend PACKAGES "$OFM_PATH/comp/base/pkg/type_pack.vhd"
 lappend PACKAGES "$ARCHGRP_ARR(CORE_BASE)/config/core_const.vhd"
 lappend PACKAGES "$OFM_PATH/comp/base/pkg/nvme_meta_pack.vhd"
+# queue_ep_f: the queue-to-endpoint map the user core needs to pick a read stream.
+lappend PACKAGES "$DMA_BASE/pkg/iuventus_sizing_pkg.vhd"
 lappend PACKAGES "$ENTITY_BASE/mi_addr_space_pkg.vhd"
 
 # Components
@@ -86,6 +89,8 @@ if {$ARCHGRP_ARR(USR_CORE_ARCH) == "FULL"} {
     lappend COMPONENTS [list "EVENT_COUNTER" $EVENT_CNTR_BASE                     "FULL"]
     lappend COMPONENTS [list "MFB_PIPE"      $MFB_PIPE_BASE                       "FULL"]
     lappend COMPONENTS [list "FIFOX"         $FIFOX_BASE                          "FULL"]
+
+    lappend COMPONENTS [list "MFB_MERGER_SIMPLE" $MFB_MERGER_BASE                "FULL"]
 
     lappend MOD "$ENTITY_BASE/iuventus_groupby_lane.vhd"
     lappend MOD "$ENTITY_BASE/iuventus_groupby_engine.vhd"

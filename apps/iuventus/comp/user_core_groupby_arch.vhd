@@ -147,6 +147,28 @@ architecture GROUPBY of USER_CORE is
     signal eng_rd_mfb_src_rdy : std_logic;
     signal eng_rd_mfb_dst_rdy : std_logic;
 
+    -- Pipe output: one read stream per DMA endpoint. The engine takes a single stream, so at two
+    -- endpoints they are merged below -- one engine cannot consume two buses, and the streaming
+    -- GROUP BY is compute-bound, not bandwidth-bound, so one merged bus is enough for it.
+    signal pipe_rd_mfb_data    : slv_array_t(PCIE_ENDPOINTS-1 downto 0)(MFB_DATA_W-1 downto 0);
+    signal pipe_rd_mfb_meta    : slv_array_t(PCIE_ENDPOINTS-1 downto 0)(QID_W + CQ_ENTRY_CMD_ID_W-1 downto 0);
+    signal pipe_rd_mfb_sof     : slv_array_t(PCIE_ENDPOINTS-1 downto 0)(DMA_MFB_REGIONS-1 downto 0);
+    signal pipe_rd_mfb_eof     : slv_array_t(PCIE_ENDPOINTS-1 downto 0)(DMA_MFB_REGIONS-1 downto 0);
+    signal pipe_rd_mfb_sof_pos : slv_array_t(PCIE_ENDPOINTS-1 downto 0)(DMA_MFB_REGIONS*max(1, log2(DMA_MFB_REGION_SIZE))-1 downto 0);
+    signal pipe_rd_mfb_eof_pos : slv_array_t(PCIE_ENDPOINTS-1 downto 0)(DMA_MFB_REGIONS*log2(DMA_MFB_REGION_SIZE*DMA_MFB_BLOCK_SIZE)-1 downto 0);
+    signal pipe_rd_mfb_src_rdy : std_logic_vector(PCIE_ENDPOINTS-1 downto 0);
+    signal pipe_rd_mfb_dst_rdy : std_logic_vector(PCIE_ENDPOINTS-1 downto 0);
+
+    -- DMA-side halves of the same streams, assembled from the entity's two explicit port groups.
+    signal dma_rd_mfb_data    : slv_array_t(PCIE_ENDPOINTS-1 downto 0)(MFB_DATA_W-1 downto 0);
+    signal dma_rd_mfb_meta    : slv_array_t(PCIE_ENDPOINTS-1 downto 0)(QID_W + CQ_ENTRY_CMD_ID_W-1 downto 0);
+    signal dma_rd_mfb_sof     : slv_array_t(PCIE_ENDPOINTS-1 downto 0)(DMA_MFB_REGIONS-1 downto 0);
+    signal dma_rd_mfb_eof     : slv_array_t(PCIE_ENDPOINTS-1 downto 0)(DMA_MFB_REGIONS-1 downto 0);
+    signal dma_rd_mfb_sof_pos : slv_array_t(PCIE_ENDPOINTS-1 downto 0)(DMA_MFB_REGIONS*max(1, log2(DMA_MFB_REGION_SIZE))-1 downto 0);
+    signal dma_rd_mfb_eof_pos : slv_array_t(PCIE_ENDPOINTS-1 downto 0)(DMA_MFB_REGIONS*log2(DMA_MFB_REGION_SIZE*DMA_MFB_BLOCK_SIZE)-1 downto 0);
+    signal dma_rd_mfb_src_rdy : std_logic_vector(PCIE_ENDPOINTS-1 downto 0);
+    signal dma_rd_mfb_dst_rdy : std_logic_vector(PCIE_ENDPOINTS-1 downto 0);
+
     signal eng_wr_mfb_data    : std_logic_vector(MFB_DATA_W-1 downto 0);
     signal eng_wr_mfb_meta    : std_logic_vector(DMA_MFB_REGIONS*(SQE_LBA_PTR_W + QID_W)-1 downto 0);
     signal eng_wr_mfb_sof     : std_logic_vector(DMA_MFB_REGIONS-1 downto 0);
@@ -459,9 +481,95 @@ begin
     -- Interface pipeline: the engine sits in its own corner of the die, far from the DMA. Every
     -- interface between them is registered here; the request path also expands the engine's
     -- scalar valid into the per-queue vector the entity carries.
+    -- Entity read-stream groups gathered into the array the pipe carries: endpoint 0 on
+    -- NVME_RD_MFB_*, endpoint 1 on its own explicit group.
+    dma_rd_mfb_data(0)    <= NVME_RD_MFB_DATA;
+    dma_rd_mfb_meta(0)    <= NVME_RD_MFB_META;
+    dma_rd_mfb_sof(0)     <= NVME_RD_MFB_SOF;
+    dma_rd_mfb_eof(0)     <= NVME_RD_MFB_EOF;
+    dma_rd_mfb_sof_pos(0) <= NVME_RD_MFB_SOF_POS;
+    dma_rd_mfb_eof_pos(0) <= NVME_RD_MFB_EOF_POS;
+    dma_rd_mfb_src_rdy(0) <= NVME_RD_MFB_SRC_RDY;
+    NVME_RD_MFB_DST_RDY   <= dma_rd_mfb_dst_rdy(0);
+
+    rd_ep1_g : if (PCIE_ENDPOINTS = 2) generate
+        dma_rd_mfb_data(1)      <= NVME_RD_EP1_MFB_DATA;
+        dma_rd_mfb_meta(1)      <= NVME_RD_EP1_MFB_META;
+        dma_rd_mfb_sof(1)       <= NVME_RD_EP1_MFB_SOF;
+        dma_rd_mfb_eof(1)       <= NVME_RD_EP1_MFB_EOF;
+        dma_rd_mfb_sof_pos(1)   <= NVME_RD_EP1_MFB_SOF_POS;
+        dma_rd_mfb_eof_pos(1)   <= NVME_RD_EP1_MFB_EOF_POS;
+        dma_rd_mfb_src_rdy(1)   <= NVME_RD_EP1_MFB_SRC_RDY;
+        NVME_RD_EP1_MFB_DST_RDY <= dma_rd_mfb_dst_rdy(1);
+    end generate;
+
+    -- Nothing drains on that stream at one endpoint, but the DMA still samples its ready: leaving
+    -- it undriven would hand the DMA an 'U' rather than a harmless accept.
+    no_rd_ep1_g : if (PCIE_ENDPOINTS = 1) generate
+        NVME_RD_EP1_MFB_DST_RDY <= '1';
+    end generate;
+
+    -- Single endpoint: straight through, bit-identical to the pre-split design.
+    rd_merge_bypass_g : if (PCIE_ENDPOINTS = 1) generate
+        eng_rd_mfb_data        <= pipe_rd_mfb_data(0);
+        eng_rd_mfb_sof         <= pipe_rd_mfb_sof(0);
+        eng_rd_mfb_eof         <= pipe_rd_mfb_eof(0);
+        eng_rd_mfb_sof_pos     <= pipe_rd_mfb_sof_pos(0);
+        eng_rd_mfb_eof_pos     <= pipe_rd_mfb_eof_pos(0);
+        eng_rd_mfb_src_rdy     <= pipe_rd_mfb_src_rdy(0);
+        pipe_rd_mfb_dst_rdy(0) <= eng_rd_mfb_dst_rdy;
+    end generate;
+
+    -- Two endpoints: both streams feed the one engine through a frame-granular merger, so a queue
+    -- on endpoint 1 is processed like any other. Single-stream bandwidth is accepted here.
+    rd_merge_g : if (PCIE_ENDPOINTS = 2) generate
+        rd_merger_i : entity work.MFB_MERGER_SIMPLE
+        generic map (
+            REGIONS     => DMA_MFB_REGIONS,
+            REGION_SIZE => DMA_MFB_REGION_SIZE,
+            BLOCK_SIZE  => DMA_MFB_BLOCK_SIZE,
+            ITEM_WIDTH  => DMA_MFB_ITEM_WIDTH,
+            META_WIDTH  => QID_W + CQ_ENTRY_CMD_ID_W,
+            MASKING_EN  => TRUE,
+            CNT_MAX     => 64
+        )
+        port map (
+            CLK => DMA_CLK,
+            RST => eng_rst,
+
+            RX_MFB0_DATA    => pipe_rd_mfb_data(0),
+            RX_MFB0_META    => pipe_rd_mfb_meta(0),
+            RX_MFB0_SOF     => pipe_rd_mfb_sof(0),
+            RX_MFB0_SOF_POS => pipe_rd_mfb_sof_pos(0),
+            RX_MFB0_EOF     => pipe_rd_mfb_eof(0),
+            RX_MFB0_EOF_POS => pipe_rd_mfb_eof_pos(0),
+            RX_MFB0_SRC_RDY => pipe_rd_mfb_src_rdy(0),
+            RX_MFB0_DST_RDY => pipe_rd_mfb_dst_rdy(0),
+
+            RX_MFB1_DATA    => pipe_rd_mfb_data(1),
+            RX_MFB1_META    => pipe_rd_mfb_meta(1),
+            RX_MFB1_SOF     => pipe_rd_mfb_sof(1),
+            RX_MFB1_SOF_POS => pipe_rd_mfb_sof_pos(1),
+            RX_MFB1_EOF     => pipe_rd_mfb_eof(1),
+            RX_MFB1_EOF_POS => pipe_rd_mfb_eof_pos(1),
+            RX_MFB1_SRC_RDY => pipe_rd_mfb_src_rdy(1),
+            RX_MFB1_DST_RDY => pipe_rd_mfb_dst_rdy(1),
+
+            TX_MFB_DATA     => eng_rd_mfb_data,
+            TX_MFB_META     => open,
+            TX_MFB_SOF      => eng_rd_mfb_sof,
+            TX_MFB_SOF_POS  => eng_rd_mfb_sof_pos,
+            TX_MFB_EOF      => eng_rd_mfb_eof,
+            TX_MFB_EOF_POS  => eng_rd_mfb_eof_pos,
+            TX_MFB_SRC_RDY  => eng_rd_mfb_src_rdy,
+            TX_MFB_DST_RDY  => eng_rd_mfb_dst_rdy
+        );
+    end generate;
+
     if_pipe_i : entity work.USER_CORE_IF_PIPE
     generic map (
         NUM_QUEUES      => NUM_QUEUES,
+        PCIE_ENDPOINTS  => PCIE_ENDPOINTS,
         LBA_PTR_W       => SQE_LBA_PTR_W,
         MFB_REGION_SIZE => DMA_MFB_REGION_SIZE,
         MFB_BLOCK_SIZE  => DMA_MFB_BLOCK_SIZE,
@@ -489,14 +597,14 @@ begin
         ENG_OP_STAT_CID  => open,
         ENG_OP_STAT_VLD  => eng_op_stat_vld,
 
-        ENG_RD_MFB_DATA    => eng_rd_mfb_data,
-        ENG_RD_MFB_META    => open,
-        ENG_RD_MFB_SOF     => eng_rd_mfb_sof,
-        ENG_RD_MFB_EOF     => eng_rd_mfb_eof,
-        ENG_RD_MFB_SOF_POS => eng_rd_mfb_sof_pos,
-        ENG_RD_MFB_EOF_POS => eng_rd_mfb_eof_pos,
-        ENG_RD_MFB_SRC_RDY => eng_rd_mfb_src_rdy,
-        ENG_RD_MFB_DST_RDY => eng_rd_mfb_dst_rdy,
+        ENG_RD_MFB_DATA    => pipe_rd_mfb_data,
+        ENG_RD_MFB_META    => pipe_rd_mfb_meta,
+        ENG_RD_MFB_SOF     => pipe_rd_mfb_sof,
+        ENG_RD_MFB_EOF     => pipe_rd_mfb_eof,
+        ENG_RD_MFB_SOF_POS => pipe_rd_mfb_sof_pos,
+        ENG_RD_MFB_EOF_POS => pipe_rd_mfb_eof_pos,
+        ENG_RD_MFB_SRC_RDY => pipe_rd_mfb_src_rdy,
+        ENG_RD_MFB_DST_RDY => pipe_rd_mfb_dst_rdy,
 
         ENG_WR_MFB_DATA    => eng_wr_mfb_data,
         ENG_WR_MFB_META    => eng_wr_mfb_meta,
@@ -522,14 +630,14 @@ begin
         DMA_OP_STAT_CID  => NVME_OP_STAT_CID,
         DMA_OP_STAT_VLD  => NVME_OP_STAT_VLD,
 
-        DMA_RD_MFB_DATA    => NVME_RD_MFB_DATA,
-        DMA_RD_MFB_META    => NVME_RD_MFB_META,
-        DMA_RD_MFB_SOF     => NVME_RD_MFB_SOF,
-        DMA_RD_MFB_EOF     => NVME_RD_MFB_EOF,
-        DMA_RD_MFB_SOF_POS => NVME_RD_MFB_SOF_POS,
-        DMA_RD_MFB_EOF_POS => NVME_RD_MFB_EOF_POS,
-        DMA_RD_MFB_SRC_RDY => NVME_RD_MFB_SRC_RDY,
-        DMA_RD_MFB_DST_RDY => NVME_RD_MFB_DST_RDY,
+        DMA_RD_MFB_DATA    => dma_rd_mfb_data,
+        DMA_RD_MFB_META    => dma_rd_mfb_meta,
+        DMA_RD_MFB_SOF     => dma_rd_mfb_sof,
+        DMA_RD_MFB_EOF     => dma_rd_mfb_eof,
+        DMA_RD_MFB_SOF_POS => dma_rd_mfb_sof_pos,
+        DMA_RD_MFB_EOF_POS => dma_rd_mfb_eof_pos,
+        DMA_RD_MFB_SRC_RDY => dma_rd_mfb_src_rdy,
+        DMA_RD_MFB_DST_RDY => dma_rd_mfb_dst_rdy,
 
         DMA_WR_MFB_DATA    => NVME_WR_MFB_DATA,
         DMA_WR_MFB_META    => NVME_WR_MFB_META,

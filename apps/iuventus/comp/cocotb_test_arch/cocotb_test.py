@@ -83,9 +83,13 @@ class IuventusUserCoreNfbDevice(cocotbext.nfb.NfbDevice):
         # needs to know about MI_CLK.
         self.mi = [MIRequestDriver(self._dut, "MI", self._dut.MI_CLK)]
 
-        # Conformance watchdog on NVME_RD_MFB and NVME_WR_MFB, both of which run on DMA_CLK. It
-        # only samples, so it sits behind the SimplifiedDmaModel that drives and monitors them.
-        self.mfb_props = attach_mfb_properties(self._dut, self._dut.DMA_CLK, reset=self._dut.DMA_RST)
+        # Conformance watchdog on NVME_RD_MFB, NVME_RD_EP1_MFB and NVME_WR_MFB, all of which run on
+        # DMA_CLK. It only samples, so it sits behind the SimplifiedDmaModel that drives and
+        # monitors them. The two internal read-stream signal groups are excluded: they are arrays
+        # (one element per PCIe endpoint) that the checker cannot index, and the same wires are
+        # already checked at the entity boundary.
+        self.mfb_props = attach_mfb_properties(self._dut, self._dut.DMA_CLK, reset=self._dut.DMA_RST,
+                                               exclude=("CORE_RD_MFB", "DMA_RD_MFB"))
 
 
     async def _reset(self):
