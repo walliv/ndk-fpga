@@ -98,6 +98,7 @@ set APP_ARCHGRP(IP_GEN_FILES)     false
 set APP_ARCHGRP(IP_MODIFY_BASE)   $COMBO_BASE/cards/amd/alveo-u55c/src/ip
 set APP_ARCHGRP(USE_IP_SUBDIRS)   true
 set APP_ARCHGRP(USR_CORE_ARCH)    $USR_CORE_ARCH
+set APP_ARCHGRP(CQ_SINK)          $CQ_SINK
 
 # Convert associative array to list
 set APP_ARCHGRP_L [array get APP_ARCHGRP]
