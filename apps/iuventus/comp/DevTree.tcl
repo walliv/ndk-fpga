@@ -51,7 +51,7 @@ proc dts_iuventus_main_mi {DTS pcie_eps pcie_debug_en pcie_endpoint_mode pcie_mo
     }
 }
 
-proc dts_build_iuventus {pcie_eps pcie_debug_en pcie_endpoint_mode pcie_mod_arch usr_core_arch} {
+proc dts_build_iuventus {pcie_eps pcie_debug_en pcie_endpoint_mode pcie_mod_arch usr_core_arch cq_sink} {
     # =========================================================================
     # Top level Device tree file
     # =========================================================================
@@ -64,9 +64,18 @@ proc dts_build_iuventus {pcie_eps pcie_debug_en pcie_endpoint_mode pcie_mod_arch
             if {$pcie == 0} {
                 dts_iuventus_main_mi ret $pcie_eps $pcie_debug_en $pcie_endpoint_mode $pcie_mod_arch $usr_core_arch
 
-                # The one DMA_IUVENTUS instance sits behind endpoint 0's MI only; endpoint 1's PF0
-                # is a dummy no driver reads, so it gets no ziti,dma_iuventus node.
-                dts_dma_iuventus ret $NdkCore::ADDR_DMA_MOD
+                if {$cq_sink} {
+                    # The CQ sink variant has no DMA: the same address space holds one speed
+                    # meter per endpoint, 0x20 apart (core_logic.vhd's cq_sink_g).
+                    append ret [dts_speed_meter $NdkCore::ADDR_DMA_MOD "cq_sink_ep0"]
+                    if {$pcie_eps == 2} {
+                        append ret [dts_speed_meter [expr $NdkCore::ADDR_DMA_MOD + 0x20] "cq_sink_ep1"]
+                    }
+                } else {
+                    # The one DMA_IUVENTUS instance sits behind endpoint 0's MI only; endpoint 1's
+                    # PF0 is a dummy no driver reads, so it gets no ziti,dma_iuventus node.
+                    dts_dma_iuventus ret $NdkCore::ADDR_DMA_MOD
+                }
             }
         }
     }
@@ -74,7 +83,7 @@ proc dts_build_iuventus {pcie_eps pcie_debug_en pcie_endpoint_mode pcie_mod_arch
 }
 
 proc dts_build_project {} {
-    global PCIE_ENDPOINTS PCIE_DEBUG_ENABLE PCIE_ENDPOINT_MODE PCIE_MOD_ARCH USR_CORE_ARCH
+    global PCIE_ENDPOINTS PCIE_DEBUG_ENABLE PCIE_ENDPOINT_MODE PCIE_MOD_ARCH USR_CORE_ARCH CQ_SINK
     return [dts_build_iuventus $PCIE_ENDPOINTS $PCIE_DEBUG_ENABLE \
-        $PCIE_ENDPOINT_MODE $PCIE_MOD_ARCH $USR_CORE_ARCH]
+        $PCIE_ENDPOINT_MODE $PCIE_MOD_ARCH $USR_CORE_ARCH $CQ_SINK]
 }

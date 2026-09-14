@@ -42,6 +42,13 @@ set PROJECT_VERSION [exec cat ../../../../VERSION]
 # Enables debug probes and counters in the PCIe Module (PCIe Core arch: USP and P-Tile and PCIe Ctrl)
 set PCIE_DEBUG_ENABLE false
 
+# Build with no DMA: each endpoint's CQ stream feeds a never-backpressuring speed meter, which
+# counts the PCIe path's raw peer-to-peer write bandwidth rather than what a consumer absorbs.
+set CQ_SINK false
+if { [info exist env(CQ_SINK)] && $env(CQ_SINK) != 0 } {
+    set CQ_SINK true
+}
+
 # ------------------------------------------------------------------------------
 # Constant parameters (do not change)
 # ------------------------------------------------------------------------------
@@ -92,3 +99,4 @@ VhdlPkgInt PCIE_ENDPOINTS           $PCIE_ENDPOINTS
 VhdlPkgInt PCIE_ENDPOINT_MODE       $PCIE_ENDPOINT_MODE
 VhdlPkgBool PCIE_CORE_DEBUG_ENABLE  $PCIE_DEBUG_ENABLE
 VhdlPkgBool PCIE_CTRL_DEBUG_ENABLE  $PCIE_DEBUG_ENABLE
+VhdlPkgBool CQ_SINK                 $CQ_SINK
