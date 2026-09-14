@@ -31,6 +31,7 @@ set ASFIFOX_BASE             "$OFM_PATH/comp/base/fifo/asfifox"
 set PIPE_BASE                "$OFM_PATH/comp/base/misc/pipe"
 set FIFOX_BASE               "$OFM_PATH/comp/base/fifo/fifox"
 set MFB_MERGER_BASE          "$OFM_PATH/comp/mfb_tools/flow/merger_simple"
+set MFB_SPEED_METER_BASE     "$OFM_PATH/comp/mfb_tools/logic/speed_meter"
 
 # Packages
 lappend PACKAGES "$OFM_PATH/comp/base/pkg/math_pack.vhd"
@@ -56,6 +57,12 @@ lappend COMPONENTS [list "BOOT_CTRL"            $BOOT_CTRL_BASE             "FUL
 lappend COMPONENTS [list "AXI_QSPI_FLASH_CTRL"  $AXI_QSPI_FLASH_CTRL_BASE   "FULL"                       ]
 lappend COMPONENTS [list "ASFIFOX"              $ASFIFOX_BASE               "FULL"                       ]
 lappend COMPONENTS [list "PIPE"                 $PIPE_BASE                  "FULL"                       ]
+# CQ_SINK's meters and their MI crossing, and DMA_IUVENTUS, are all listed unconditionally on
+# purpose: only one of the two is instantiated, but an analyser resolves `entity work.X` even in a
+# generate branch it will discard, so a conditional list breaks the variant that is not built. An
+# entity the top level never reaches costs parse time and no logic.
+lappend COMPONENTS [list "MFB_SPEED_METER_MI"   $MFB_SPEED_METER_BASE       "FULL"                       ]
+lappend COMPONENTS [list "MI_ASYNC"             $MI_ASYNC_BASE              "FULL"                       ]
 
 lappend IP_COMPONENTS [list "pcie" "pcie4_uscale_plus" "pcie4_uscale_plus" 0 1]
 if {$ARCHGRP_ARR(PCIE_ENDPOINTS) == 2 && $ARCHGRP_ARR(PCIE_ENDPOINT_MODE) == 1} {
