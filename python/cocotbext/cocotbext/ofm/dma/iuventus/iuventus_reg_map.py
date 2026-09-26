@@ -111,6 +111,10 @@ class IuventusMiRegMap(IntEnum):
     # which only carries SSD completion codes -- a wedged queue never completes anything, so it
     # could never appear there.
     DESIGN_ERR                  = 0x13C
+    # Accumulates OP_CTRL's in-flight command count every cycle (dispatched minus completed, summed
+    # over every queue); ACC / CQE_PROC_CNTR is Little's law's mean device latency.
+    DEV_INFLIGHT_ACC_L          = 0x150
+    DEV_INFLIGHT_ACC_H          = 0x154
     # Free-running elapsed-cycle counter: the denominator for every counter above. Without it a
     # class share says nothing about how busy the DMA was, only how its busy cycles split.
     TOTAL_CYCLES_CNTR_L         = 0x158
@@ -133,6 +137,18 @@ class IuventusMiRegMap(IntEnum):
     EP1_WRBUFF_PRP_LIST_PTR_H       = 0x19C
     EP1_RD_PAGES_FREE               = 0x1A0
     EP1_WR_PAGES_FREE               = 0x1A4
+    # Latency-split profiling (PROFILE_EN only), READ occupancy per stage summed over queues.
+    # W_stage (us) = ACC / CQE_PROC_CNTR / 250e6 * 1e6 at 250 MHz. S1: dispatched, doorbell
+    # unwritten.
+    LAT_S1_ACC_L                    = 0x1A8
+    LAT_S1_ACC_H                    = 0x1AC
+    # S2: doorbell written, drive has not read the SQE.
+    LAT_S2_ACC_L                    = 0x1B0
+    LAT_S2_ACC_H                    = 0x1B4
+    # S3: drive read the SQE, no CQE yet. S1+S2+S3 sums to the "commands in flight" quantity
+    # DEV_INFLIGHT_ACC integrates (0x150/0x154).
+    LAT_S3_ACC_L                    = 0x1B8
+    LAT_S3_ACC_H                    = 0x1BC
 
 
 # Base offset and per-queue slot stride of the PER-QUEUE 2D register block. Queue 0 is q=0 of it
