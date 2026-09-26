@@ -2230,19 +2230,7 @@ begin
                 HBM_AXI_RRESP   => dma_hbm_axi_rresp,
                 HBM_AXI_RLAST   => dma_hbm_axi_rlast,
                 HBM_AXI_RVALID  => dma_hbm_axi_rvalid,
-                HBM_AXI_RREADY  => dma_hbm_axi_rready,
-
-
-                STAT_WRBUFF_UNALIGNED_BURST => open,
-                STAT_WRBUFF_WR_BRESP_ERR    => open,
-                STAT_WRBUFF_RD_RRESP_ERR    => open,
-                STAT_WRBUFF_SPARSE_BE       => open,
-                STAT_WRBUFF_DROPPED_FRAME   => open,
-
-                -- RDBUFF HBM datapath statistics: not yet wired to an MI counter, same as
-                -- STAT_WRBUFF_* above (see DMA_IUVENTUS's own STAT_RDBUFF_* port comment).
-                STAT_RDBUFF_RD_RRESP_ERR => open,
-                STAT_RDBUFF_RD_UNALIGNED => open
+                HBM_AXI_RREADY  => dma_hbm_axi_rready
             );
 
         -- Endpoint 1's doorbells: nothing ever offers it a submission (the DMA's single RQ stays
