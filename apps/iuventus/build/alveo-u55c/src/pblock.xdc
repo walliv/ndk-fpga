@@ -43,8 +43,10 @@ set_property IS_SOFT 0 [get_pblocks pblock_ep1_wrbuff_drain]
 
 # Endpoint 1's four clock-domain bridges belong beside the ports they drive (25/26 and 28/29, all
 # in column X6): unconstrained, one of them routed 4.36 ns between two of its own registers.
+# Renamed by the DMA_IUVENTUS array-port refactor: hbm_cdc_g is now one for-generate over endpoint
+# holding all 4 bridges per iteration (was ep1_iface_g.hbm_cdc_ep1_*, EP0's own copy unparented).
 create_pblock pblock_ep1_hbm_cdc
-add_cells_to_pblock [get_pblocks pblock_ep1_hbm_cdc] [get_cells -quiet [list {core_logic_i/dma_i/ep1_iface_g.hbm_cdc_ep1_wrbuff0_i} {core_logic_i/dma_i/ep1_iface_g.hbm_cdc_ep1_wrbuff1_i} {core_logic_i/dma_i/ep1_iface_g.hbm_cdc_ep1_rdbuff0_i} {core_logic_i/dma_i/ep1_iface_g.hbm_cdc_ep1_rdbuff1_i}]]
+add_cells_to_pblock [get_pblocks pblock_ep1_hbm_cdc] [get_cells -quiet [list {core_logic_i/dma_i/hbm_cdc_g[1].hbm_cdc_wrbuff0_i} {core_logic_i/dma_i/hbm_cdc_g[1].hbm_cdc_wrbuff1_i} {core_logic_i/dma_i/hbm_cdc_g[1].hbm_cdc_rdbuff0_i} {core_logic_i/dma_i/hbm_cdc_g[1].hbm_cdc_rdbuff1_i}]]
 resize_pblock [get_pblocks pblock_ep1_hbm_cdc] -add {CLOCKREGION_X6Y0:CLOCKREGION_X6Y3}
 set_property IS_SOFT 1 [get_pblocks pblock_ep1_hbm_cdc]
 
