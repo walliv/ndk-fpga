@@ -9,55 +9,8 @@ add_cells_to_pblock [get_pblocks pblock_pcie_i] [get_cells -quiet [list core_log
 resize_pblock [get_pblocks pblock_pcie_i] -add {CLOCKREGION_X7Y0:CLOCKREGION_X7Y3}
 set_property IS_SOFT 0 [get_pblocks pblock_pcie_i]
 
-create_pblock pblock_dma
-# NVME_SW_MANAGER joins the controllers: its data-logger enables reach the completion buffer's
-# BRAMs through eleven LUT levels, which a placement next to the MI bridge in X7 cannot afford.
-add_cells_to_pblock [get_pblocks pblock_dma] [get_cells -quiet [list {core_logic_i/dma_i/card2nvme_ctrl_i} {core_logic_i/dma_i/nvme2card_ctrl_i} {core_logic_i/dma_i/nvme_sw_manager_i}]]
-# Four columns: both endpoints' datapaths and responders put 160 block-RAM tiles in the DMA, and
-# X4-X6 alone holds 164, which pushed the completion buffer's BRAMs out of reach of CQE_PROCESSOR.
-resize_pblock [get_pblocks pblock_dma] -add {CLOCKREGION_X3Y0:CLOCKREGION_X6Y3}
-set_property IS_SOFT 0 [get_pblocks pblock_dma]
-
-create_pblock pblock_cq
-# The completion buffer and its processor stay together: the qid-indexed doorbell-mask lookup
-# reaches the buffer's block RAM through eleven LUT levels and cannot afford a column of routing.
-add_cells_to_pblock [get_pblocks pblock_cq] [get_cells -quiet [list {core_logic_i/dma_i/nvme2card_ctrl_i/cqe_processor_i} {core_logic_i/dma_i/nvme2card_ctrl_i/cq_wr_buffer_i}]]
-resize_pblock [get_pblocks pblock_cq] -add {CLOCKREGION_X5Y2:CLOCKREGION_X6Y3}
-set_property IS_SOFT 0 [get_pblocks pblock_cq]
-
-create_pblock pblock_wrbuff_drain
-add_cells_to_pblock [get_pblocks pblock_wrbuff_drain] [get_cells -quiet [list {core_logic_i/dma_i/nvme2card_ctrl_i/ep_g[0].ep_datapath_i/hbm_stream_writer_i}]]
-# X4Y0:X5Y1 follows the WRBUFF HBM ports, which now sit under X4Y0. The previous X5Y0:X6Y1 box ran
-# at 90-98% SLICE occupancy in every one of its four regions, and being IS_SOFT 0 it left the
-# placer no way out; X4Y0/X4Y1 are the least occupied regions inside the enclosing DMA pblock.
-resize_pblock [get_pblocks pblock_wrbuff_drain] -add {CLOCKREGION_X4Y0:CLOCKREGION_X5Y1}
-#set_property CONTAIN_ROUTING 1 [get_pblocks pblock_wrbuff_drain]
-set_property IS_SOFT 0 [get_pblocks pblock_wrbuff_drain]
-
-create_pblock pblock_ep1_wrbuff_drain
-add_cells_to_pblock [get_pblocks pblock_ep1_wrbuff_drain] [get_cells -quiet [list {core_logic_i/dma_i/nvme2card_ctrl_i/ep_g[1].ep_datapath_i/hbm_stream_writer_i}]]
-# Endpoint 1 fills WRBUFF through HBM ports 25 and 26, which sit under X6Y0. Three regions, not
-# two: at two the block RAM was 94 % occupied, which scatters whatever else needs a tile there.
-resize_pblock [get_pblocks pblock_ep1_wrbuff_drain] -add {CLOCKREGION_X6Y0:CLOCKREGION_X6Y2}
-set_property IS_SOFT 0 [get_pblocks pblock_ep1_wrbuff_drain]
-
-# Endpoint 1's four clock-domain bridges belong beside the ports they drive (25/26 and 28/29, all
-# in column X6): unconstrained, one of them routed 4.36 ns between two of its own registers.
-# Renamed by the DMA_IUVENTUS array-port refactor: hbm_cdc_g is now one for-generate over endpoint
-# holding all 4 bridges per iteration (was ep1_iface_g.hbm_cdc_ep1_*, EP0's own copy unparented).
-create_pblock pblock_ep1_hbm_cdc
-add_cells_to_pblock [get_pblocks pblock_ep1_hbm_cdc] [get_cells -quiet [list {core_logic_i/dma_i/hbm_cdc_g[1].hbm_cdc_wrbuff0_i} {core_logic_i/dma_i/hbm_cdc_g[1].hbm_cdc_wrbuff1_i} {core_logic_i/dma_i/hbm_cdc_g[1].hbm_cdc_rdbuff0_i} {core_logic_i/dma_i/hbm_cdc_g[1].hbm_cdc_rdbuff1_i}]]
-resize_pblock [get_pblocks pblock_ep1_hbm_cdc] -add {CLOCKREGION_X6Y0:CLOCKREGION_X6Y3}
-set_property IS_SOFT 1 [get_pblocks pblock_ep1_hbm_cdc]
-
-create_pblock pblock_opctrl
-add_cells_to_pblock [get_pblocks pblock_opctrl] [get_cells -quiet [list {core_logic_i/dma_i/operation_control_i}]]
-# OP_CTRL and its four page allocators (33k LUTs) are steered, not fenced, into the columns between
-# the user core and the controllers: hard boxes for them, tall or per allocator, spread the first-fit
-# comparator arrays or starved their neighbours of routing.
-resize_pblock [get_pblocks pblock_opctrl] -add {CLOCKREGION_X1Y0:CLOCKREGION_X3Y3}
-set_property IS_SOFT 1 [get_pblocks pblock_opctrl]
-
+# The DMA is left to the placer: none of its old pblocks matched a cell since it moved under
+# core_logic's dma_g generate, and the builds that closed timing ran with it unconstrained.
 
 create_pblock pblock_user_core
 # Everything the selected USER_CORE architecture builds, except its interface pipeline. Naming the
