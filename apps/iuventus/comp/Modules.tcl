@@ -28,6 +28,7 @@ set LATENCY_METER_BASE       "$OFM_PATH/comp/debug/latency_meter"
 set LFSR_GEN_BASE            "$OFM_PATH/comp/base/logic/lfsr_simple_random_gen"
 set EVENT_CNTR_BASE          "$OFM_PATH/comp/base/misc/event_counter"
 set ASFIFOX_BASE             "$OFM_PATH/comp/base/fifo/asfifox"
+set MFB_ASFIFOX_BASE         "$OFM_PATH/comp/mfb_tools/storage/asfifox"
 set PIPE_BASE                "$OFM_PATH/comp/base/misc/pipe"
 set FIFOX_BASE               "$OFM_PATH/comp/base/fifo/fifox"
 set MFB_MERGER_BASE          "$OFM_PATH/comp/mfb_tools/flow/merger_simple"
@@ -56,6 +57,8 @@ lappend COMPONENTS [list "DMA_IUVENTUS"         $DMA_BASE                   "FUL
 lappend COMPONENTS [list "BOOT_CTRL"            $BOOT_CTRL_BASE             "FULL"                       ]
 lappend COMPONENTS [list "AXI_QSPI_FLASH_CTRL"  $AXI_QSPI_FLASH_CTRL_BASE   "FULL"                       ]
 lappend COMPONENTS [list "ASFIFOX"              $ASFIFOX_BASE               "FULL"                       ]
+# Endpoint 1's read and write streams between its own pcie_clks(1) and the user core's pcie_clks(0).
+lappend COMPONENTS [list "MFB_ASFIFOX"          $MFB_ASFIFOX_BASE           "FULL"                       ]
 lappend COMPONENTS [list "PIPE"                 $PIPE_BASE                  "FULL"                       ]
 # CQ_SINK's meters and their MI crossing, and DMA_IUVENTUS, are all listed unconditionally on
 # purpose: only one of the two is instantiated, but an analyser resolves `entity work.X` even in a

@@ -281,6 +281,12 @@ architecture FULL of CORE_LOGIC is
     -- X7, and the DMA spread over X0-X6: a synchronous reset tolerates the delay, a 4.6 ns route on
     -- a 4 ns clock does not.
     signal dma_rst_pipe_r : std_logic_vector(1 downto 0) := (others => '1');
+
+    -- The same two stages for endpoint 1's own reset in pcie_clks(1), and the DMA's per-endpoint
+    -- reset vector built from both (element 0 is a don't-care inside the DMA).
+    signal dma_ep1_rst_pipe_r : std_logic_vector(1 downto 0) := (others => '1');
+    signal dma_pcie_ep_rst    : std_logic_vector(PCIE_ENDPOINTS-1 downto 0);
+
     signal rst_mi     : std_logic_vector(RESET_WIDTH-1 downto 0);
     signal rst_dma    : std_logic_vector(RESET_WIDTH-1 downto 0);
     signal rst_dma_x2 : std_logic_vector(RESET_WIDTH-1 downto 0);
@@ -349,10 +355,9 @@ architecture FULL of CORE_LOGIC is
     signal pcie_cc_mfb_src_rdy : std_logic_vector(DMA_STREAMS-1 downto 0);
     signal pcie_cc_mfb_dst_rdy : std_logic_vector(DMA_STREAMS-1 downto 0);
 
-    -- The user core's EP1 read-data input group (NVME_RD_EP1_MFB): USER_CORE's ports are untouched
-    -- by the DMA's array-port refactor, so this scalar bridge from nvme_rd_mfb_data(1) still exists,
-    -- guarded by ep1_g/no_ep1_g below (a direct nvme_rd_mfb_data(1) index would not elaborate at
-    -- DMA_STREAMS = 1, since that array only has one element).
+    -- The user core's EP1 read-data input group (NVME_RD_EP1_MFB), in pcie_clks(0): the DMA's own
+    -- nvme_rd_mfb_*(1) leaves in pcie_clks(1), so ep1_g crosses it here (rd_ep1_asfifox_i);
+    -- no_ep1_g ties it off at DMA_STREAMS = 1, where that array has one element only.
     signal uc_ep1_rd_mfb_data    : std_logic_vector(DMA_MFB_REGIONS*DMA_MFB_REGION_SIZE*DMA_MFB_BLOCK_SIZE*DMA_MFB_ITEM_WIDTH-1 downto 0);
     signal uc_ep1_rd_mfb_meta    : std_logic_vector(DMA_MFB_REGIONS*(maximum(1, log2(NUM_QUEUES)) + CQ_ENTRY_CMD_ID_W) -1 downto 0);
     signal uc_ep1_rd_mfb_sof     : std_logic_vector(DMA_MFB_REGIONS-1 downto 0);
@@ -404,8 +409,17 @@ architecture FULL of CORE_LOGIC is
     signal nvme_wr_mfb_dst_rdy : std_logic_vector(DMA_STREAMS -1 downto 0);
 
     -- The DMA's own per-endpoint write streams, fed frame by frame from USER_CORE's single one
-    -- (dma_wr_demux_g): endpoint e only ever sees frames of its own queues.
+    -- (uc_wr_demux_g): endpoint e only ever sees frames of its own queues, in its own clock.
     constant UC_WR_QID_W : natural := maximum(1, log2(NUM_QUEUES));
+
+    -- Depth of the two endpoint-1 stream crossings: 512 words fill the BRAM columns their width
+    -- takes anyway, far over the pointer round trip a full-rate stream needs, i.e. several frames.
+    constant EP1_XING_ITEMS : natural := 512;
+
+    -- USER_CORE's write stream demultiplexed per endpoint, still in pcie_clks(0): its DATA, META,
+    -- SOF/EOF and positions go to every endpoint alike, only the handshake is per endpoint.
+    signal uc_wr_mfb_src_rdy : std_logic_vector(DMA_STREAMS -1 downto 0);
+    signal uc_wr_mfb_dst_rdy : std_logic_vector(DMA_STREAMS -1 downto 0);
 
     signal dma_wr_mfb_data    : slv_array_t(DMA_STREAMS -1 downto 0)(DMA_MFB_REGIONS*DMA_MFB_REGION_SIZE*DMA_MFB_BLOCK_SIZE*DMA_MFB_ITEM_WIDTH-1 downto 0);
     signal dma_wr_mfb_meta    : slv_array_t(DMA_STREAMS -1 downto 0)(DMA_MFB_REGIONS*(SQE_LBA_PTR_W + UC_WR_QID_W)-1 downto 0);
@@ -2050,6 +2064,8 @@ begin
             end if;
         end process;
 
+        dma_pcie_ep_rst(0) <= dma_rst_pipe_r(1);
+
         -- Straight index-to-index copy between DMA_IUVENTUS's own flat HBM_AXI_* arrays (i = ep*4 +
         -- buf*2 + port) and the shared cdc_axi_* signals at HBM_DMA_PORT(i) -- see hbm_dma_driven_port_f.
         hbm_axi_map_g : for i in 0 to 4*DMA_STREAMS-1 generate
@@ -2132,11 +2148,10 @@ begin
                 RST      => dma_rst_pipe_r(1),
 
                 -- Index 0 is unused inside DMA_IUVENTUS (endpoint 0 always runs on CLK/RST); index
-                -- e >= 1 is that endpoint's own raw (unpiped) clock/reset, exactly as
-                -- dma_ep1_pcie_clk/rst were before this array-port refactor. Whole-signal (not
-                -- aggregate) association, so this stays a direct, delta-free connection.
+                -- e >= 1 is that endpoint's own clock, whole-signal associated so it stays a direct,
+                -- delta-free connection, and its reset through its own two-stage pipe (ep1_g).
                 PCIE_EP_CLK => pcie_clks,
-                PCIE_EP_RST => pcie_rsts,
+                PCIE_EP_RST => dma_pcie_ep_rst,
 
                 NVME_RD_REQ_LBA_NUM => nvme_rd_req_lba_num(0),
                 NVME_RD_REQ_NPAGES_ALL => nvme_rd_req_npages_all(0),
@@ -2255,7 +2270,9 @@ begin
 
         -- USER_CORE's NVME_WR_MFB split per frame to queue_ep_f(queue id); META per region: LBA
         -- pointer in bits [SQE_LBA_PTR_W-1:0], queue id in the UC_WR_QID_W bits above, taken at SOF
-        -- and held to EOF. Only the selected endpoint's DST_RDY paces the stream.
+        -- and held to EOF. Only the selected endpoint's DST_RDY paces the stream: endpoint 0's is
+        -- the DMA's own, endpoint 1's the room in its crossing (wr_ep1_asfifox_i). Each endpoint
+        -- drains its own frames whatever waits upstream for the other, so the hold cannot deadlock.
         assert (2**UC_WR_QID_W = NUM_QUEUES and DMA_MFB_REGIONS = 1)
             report "CORE_LOGIC: the write META's queue field must name exactly NUM_QUEUES queues (a " &
                    "frame could otherwise name an endpoint that does not exist), in one MFB region"
@@ -2265,17 +2282,21 @@ begin
         uc_wr_ep_sof <= work.iuventus_sizing_pkg.queue_ep_f(to_integer(unsigned(uc_wr_qid)), NUM_QUEUES, DMA_STREAMS);
         uc_wr_ep     <= uc_wr_ep_r when (uc_wr_frame_r = '1') else uc_wr_ep_sof;
 
-        dma_wr_demux_g : for ep in 0 to DMA_STREAMS-1 generate
-            dma_wr_mfb_data(ep)    <= nvme_wr_mfb_data(0);
-            dma_wr_mfb_meta(ep)    <= nvme_wr_mfb_meta(0);
-            dma_wr_mfb_sof(ep)     <= nvme_wr_mfb_sof(0);
-            dma_wr_mfb_eof(ep)     <= nvme_wr_mfb_eof(0);
-            dma_wr_mfb_sof_pos(ep) <= nvme_wr_mfb_sof_pos(0);
-            dma_wr_mfb_eof_pos(ep) <= nvme_wr_mfb_eof_pos(0);
-            dma_wr_mfb_src_rdy(ep) <= nvme_wr_mfb_src_rdy(0) when (uc_wr_ep = ep) else '0';
+        uc_wr_demux_g : for ep in 0 to DMA_STREAMS-1 generate
+            uc_wr_mfb_src_rdy(ep) <= nvme_wr_mfb_src_rdy(0) when (uc_wr_ep = ep) else '0';
         end generate;
 
-        nvme_wr_mfb_dst_rdy(0) <= dma_wr_mfb_dst_rdy(uc_wr_ep);
+        nvme_wr_mfb_dst_rdy(0) <= uc_wr_mfb_dst_rdy(uc_wr_ep);
+
+        -- Endpoint 0 runs on pcie_clks(0), the user core's own clock: its stream goes straight in.
+        dma_wr_mfb_data(0)    <= nvme_wr_mfb_data(0);
+        dma_wr_mfb_meta(0)    <= nvme_wr_mfb_meta(0);
+        dma_wr_mfb_sof(0)     <= nvme_wr_mfb_sof(0);
+        dma_wr_mfb_eof(0)     <= nvme_wr_mfb_eof(0);
+        dma_wr_mfb_sof_pos(0) <= nvme_wr_mfb_sof_pos(0);
+        dma_wr_mfb_eof_pos(0) <= nvme_wr_mfb_eof_pos(0);
+        dma_wr_mfb_src_rdy(0) <= uc_wr_mfb_src_rdy(0);
+        uc_wr_mfb_dst_rdy(0)  <= dma_wr_mfb_dst_rdy(0);
 
         uc_wr_frame_p : process (pcie_clks(0)) is
         begin
@@ -2306,18 +2327,105 @@ begin
             pcie_rq_mfb_eof_pos(1) <= (others => '0');
         end generate;
 
-        -- USER_CORE keeps its own NVME_RD_EP1_MFB group (untouched by the DMA's array-port
-        -- refactor); this still needs an endpoint-count guard because a bare nvme_rd_mfb_data(1)
-        -- index would fail to elaborate at DMA_STREAMS = 1.
+        -- Endpoint 1 runs on pcie_clks(1): its reset gets endpoint 0's two pipe stages, and its read
+        -- and write streams cross to and from the user core's pcie_clks(0). Guarded by the endpoint
+        -- count, since a bare index (1) of these arrays fails to elaborate at DMA_STREAMS = 1.
         ep1_g : if (DMA_STREAMS = 2) generate
-            uc_ep1_rd_mfb_data     <= nvme_rd_mfb_data(1);
-            uc_ep1_rd_mfb_meta     <= nvme_rd_mfb_meta(1);
-            uc_ep1_rd_mfb_sof      <= nvme_rd_mfb_sof(1);
-            uc_ep1_rd_mfb_eof      <= nvme_rd_mfb_eof(1);
-            uc_ep1_rd_mfb_sof_pos  <= nvme_rd_mfb_sof_pos(1);
-            uc_ep1_rd_mfb_eof_pos  <= nvme_rd_mfb_eof_pos(1);
-            uc_ep1_rd_mfb_src_rdy  <= nvme_rd_mfb_src_rdy(1);
-            nvme_rd_mfb_dst_rdy(1) <= uc_ep1_rd_mfb_dst_rdy;
+            dma_ep1_rst_pipe_p : process (pcie_clks(1)) is
+            begin
+                if (rising_edge(pcie_clks(1))) then
+                    dma_ep1_rst_pipe_r <= dma_ep1_rst_pipe_r(0) & pcie_rsts(1);
+                end if;
+            end process;
+
+            dma_pcie_ep_rst(1) <= dma_ep1_rst_pipe_r(1);
+
+            -- The DMA takes FNS at its own output, so a frame is finished once it is in here.
+            rd_ep1_asfifox_i : entity work.MFB_ASFIFOX
+            generic map (
+                MFB_REGIONS         => DMA_MFB_REGIONS,
+                MFB_REG_SIZE        => DMA_MFB_REGION_SIZE,
+                MFB_BLOCK_SIZE      => DMA_MFB_BLOCK_SIZE,
+                MFB_ITEM_WIDTH      => DMA_MFB_ITEM_WIDTH,
+                FIFO_ITEMS          => EP1_XING_ITEMS,
+                RAM_TYPE            => "BRAM",
+                FWFT_MODE           => TRUE,
+                OUTPUT_REG          => TRUE,
+                METADATA_WIDTH      => maximum(1, log2(NUM_QUEUES)) + CQ_ENTRY_CMD_ID_W,
+                DEVICE              => DEVICE,
+                ALMOST_FULL_OFFSET  => EP1_XING_ITEMS/2,
+                ALMOST_EMPTY_OFFSET => EP1_XING_ITEMS/2
+            )
+            port map (
+                RX_CLK     => pcie_clks(1),
+                RX_RESET   => dma_ep1_rst_pipe_r(1),
+                RX_DATA    => nvme_rd_mfb_data(1),
+                RX_META    => nvme_rd_mfb_meta(1),
+                RX_SOF     => nvme_rd_mfb_sof(1),
+                RX_EOF     => nvme_rd_mfb_eof(1),
+                RX_SOF_POS => nvme_rd_mfb_sof_pos(1),
+                RX_EOF_POS => nvme_rd_mfb_eof_pos(1),
+                RX_SRC_RDY => nvme_rd_mfb_src_rdy(1),
+                RX_DST_RDY => nvme_rd_mfb_dst_rdy(1),
+                RX_AFULL   => open,
+                RX_STATUS  => open,
+
+                TX_CLK     => pcie_clks(0),
+                TX_RESET   => dma_rst_pipe_r(1),
+                TX_DATA    => uc_ep1_rd_mfb_data,
+                TX_META    => uc_ep1_rd_mfb_meta,
+                TX_SOF     => uc_ep1_rd_mfb_sof,
+                TX_EOF     => uc_ep1_rd_mfb_eof,
+                TX_SOF_POS => uc_ep1_rd_mfb_sof_pos,
+                TX_EOF_POS => uc_ep1_rd_mfb_eof_pos,
+                TX_SRC_RDY => uc_ep1_rd_mfb_src_rdy,
+                TX_DST_RDY => uc_ep1_rd_mfb_dst_rdy,
+                TX_AEMPTY  => open,
+                TX_STATUS  => open
+            );
+
+            wr_ep1_asfifox_i : entity work.MFB_ASFIFOX
+            generic map (
+                MFB_REGIONS         => DMA_MFB_REGIONS,
+                MFB_REG_SIZE        => DMA_MFB_REGION_SIZE,
+                MFB_BLOCK_SIZE      => DMA_MFB_BLOCK_SIZE,
+                MFB_ITEM_WIDTH      => DMA_MFB_ITEM_WIDTH,
+                FIFO_ITEMS          => EP1_XING_ITEMS,
+                RAM_TYPE            => "BRAM",
+                FWFT_MODE           => TRUE,
+                OUTPUT_REG          => TRUE,
+                METADATA_WIDTH      => SQE_LBA_PTR_W + UC_WR_QID_W,
+                DEVICE              => DEVICE,
+                ALMOST_FULL_OFFSET  => EP1_XING_ITEMS/2,
+                ALMOST_EMPTY_OFFSET => EP1_XING_ITEMS/2
+            )
+            port map (
+                RX_CLK     => pcie_clks(0),
+                RX_RESET   => dma_rst_pipe_r(1),
+                RX_DATA    => nvme_wr_mfb_data(0),
+                RX_META    => nvme_wr_mfb_meta(0),
+                RX_SOF     => nvme_wr_mfb_sof(0),
+                RX_EOF     => nvme_wr_mfb_eof(0),
+                RX_SOF_POS => nvme_wr_mfb_sof_pos(0),
+                RX_EOF_POS => nvme_wr_mfb_eof_pos(0),
+                RX_SRC_RDY => uc_wr_mfb_src_rdy(1),
+                RX_DST_RDY => uc_wr_mfb_dst_rdy(1),
+                RX_AFULL   => open,
+                RX_STATUS  => open,
+
+                TX_CLK     => pcie_clks(1),
+                TX_RESET   => dma_ep1_rst_pipe_r(1),
+                TX_DATA    => dma_wr_mfb_data(1),
+                TX_META    => dma_wr_mfb_meta(1),
+                TX_SOF     => dma_wr_mfb_sof(1),
+                TX_EOF     => dma_wr_mfb_eof(1),
+                TX_SOF_POS => dma_wr_mfb_sof_pos(1),
+                TX_EOF_POS => dma_wr_mfb_eof_pos(1),
+                TX_SRC_RDY => dma_wr_mfb_src_rdy(1),
+                TX_DST_RDY => dma_wr_mfb_dst_rdy(1),
+                TX_AEMPTY  => open,
+                TX_STATUS  => open
+            );
         end generate;
 
         no_ep1_g : if (DMA_STREAMS = 1) generate
