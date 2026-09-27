@@ -403,6 +403,26 @@ architecture FULL of CORE_LOGIC is
     signal nvme_wr_mfb_src_rdy : std_logic_vector(DMA_STREAMS -1 downto 0);
     signal nvme_wr_mfb_dst_rdy : std_logic_vector(DMA_STREAMS -1 downto 0);
 
+    -- The DMA's own per-endpoint write streams, fed frame by frame from USER_CORE's single one
+    -- (dma_wr_demux_g): endpoint e only ever sees frames of its own queues.
+    constant UC_WR_QID_W : natural := maximum(1, log2(NUM_QUEUES));
+
+    signal dma_wr_mfb_data    : slv_array_t(DMA_STREAMS -1 downto 0)(DMA_MFB_REGIONS*DMA_MFB_REGION_SIZE*DMA_MFB_BLOCK_SIZE*DMA_MFB_ITEM_WIDTH-1 downto 0);
+    signal dma_wr_mfb_meta    : slv_array_t(DMA_STREAMS -1 downto 0)(DMA_MFB_REGIONS*(SQE_LBA_PTR_W + UC_WR_QID_W)-1 downto 0);
+    signal dma_wr_mfb_sof     : slv_array_t(DMA_STREAMS -1 downto 0)(DMA_MFB_REGIONS-1 downto 0);
+    signal dma_wr_mfb_eof     : slv_array_t(DMA_STREAMS -1 downto 0)(DMA_MFB_REGIONS-1 downto 0);
+    signal dma_wr_mfb_sof_pos : slv_array_t(DMA_STREAMS -1 downto 0)(DMA_MFB_REGIONS*max(1, log2(DMA_MFB_REGION_SIZE))-1 downto 0);
+    signal dma_wr_mfb_eof_pos : slv_array_t(DMA_STREAMS -1 downto 0)(DMA_MFB_REGIONS*max(1, log2(DMA_MFB_REGION_SIZE*DMA_MFB_BLOCK_SIZE))-1 downto 0);
+    signal dma_wr_mfb_src_rdy : std_logic_vector(DMA_STREAMS -1 downto 0);
+    signal dma_wr_mfb_dst_rdy : std_logic_vector(DMA_STREAMS -1 downto 0);
+    -- Endpoint of the frame at the head of USER_CORE's write stream: from the queue in its SOF
+    -- beat's META, held from that SOF to its EOF.
+    signal uc_wr_qid          : std_logic_vector(UC_WR_QID_W -1 downto 0);
+    signal uc_wr_ep_sof       : natural range 0 to DMA_STREAMS -1;
+    signal uc_wr_ep           : natural range 0 to DMA_STREAMS -1;
+    signal uc_wr_ep_r         : natural range 0 to DMA_STREAMS -1;
+    signal uc_wr_frame_r      : std_logic;
+
     -- HBM AXI3 per-port clock/reset + IP-ready/init-done
     signal hbm_axi_aclk     : std_logic_vector(HBM_PORTS -1 downto 0);
     signal hbm_axi_areset_n : std_logic_vector(HBM_PORTS -1 downto 0);
@@ -2133,14 +2153,14 @@ begin
                 OP_STAT_CODE => nvme_op_stat_code(0),
                 OP_STAT_VLD  => nvme_op_stat_vld(0),
 
-                WR_MFB_DATA    => nvme_wr_mfb_data(0),
-                WR_MFB_META    => nvme_wr_mfb_meta(0),
-                WR_MFB_SOF     => nvme_wr_mfb_sof(0),
-                WR_MFB_EOF     => nvme_wr_mfb_eof(0),
-                WR_MFB_SOF_POS => nvme_wr_mfb_sof_pos(0),
-                WR_MFB_EOF_POS => nvme_wr_mfb_eof_pos(0),
-                WR_MFB_SRC_RDY => nvme_wr_mfb_src_rdy(0),
-                WR_MFB_DST_RDY => nvme_wr_mfb_dst_rdy(0),
+                WR_MFB_DATA    => dma_wr_mfb_data,
+                WR_MFB_META    => dma_wr_mfb_meta,
+                WR_MFB_SOF     => dma_wr_mfb_sof,
+                WR_MFB_EOF     => dma_wr_mfb_eof,
+                WR_MFB_SOF_POS => dma_wr_mfb_sof_pos,
+                WR_MFB_EOF_POS => dma_wr_mfb_eof_pos,
+                WR_MFB_SRC_RDY => dma_wr_mfb_src_rdy,
+                WR_MFB_DST_RDY => dma_wr_mfb_dst_rdy,
 
                 -- One read stream per endpoint, straight through -- nvme_rd_mfb_*(1) (fed by
                 -- ep1_g/no_ep1_g below into USER_CORE's own EP1 group) is now real endpoint-1 DMA
@@ -2232,6 +2252,47 @@ begin
                 HBM_AXI_RVALID  => dma_hbm_axi_rvalid,
                 HBM_AXI_RREADY  => dma_hbm_axi_rready
             );
+
+        -- USER_CORE's NVME_WR_MFB split per frame to queue_ep_f(queue id); META per region: LBA
+        -- pointer in bits [SQE_LBA_PTR_W-1:0], queue id in the UC_WR_QID_W bits above, taken at SOF
+        -- and held to EOF. Only the selected endpoint's DST_RDY paces the stream.
+        assert (2**UC_WR_QID_W = NUM_QUEUES and DMA_MFB_REGIONS = 1)
+            report "CORE_LOGIC: the write META's queue field must name exactly NUM_QUEUES queues (a " &
+                   "frame could otherwise name an endpoint that does not exist), in one MFB region"
+            severity failure;
+
+        uc_wr_qid    <= nvme_wr_mfb_meta(0)(SQE_LBA_PTR_W + UC_WR_QID_W -1 downto SQE_LBA_PTR_W);
+        uc_wr_ep_sof <= work.iuventus_sizing_pkg.queue_ep_f(to_integer(unsigned(uc_wr_qid)), NUM_QUEUES, DMA_STREAMS);
+        uc_wr_ep     <= uc_wr_ep_r when (uc_wr_frame_r = '1') else uc_wr_ep_sof;
+
+        dma_wr_demux_g : for ep in 0 to DMA_STREAMS-1 generate
+            dma_wr_mfb_data(ep)    <= nvme_wr_mfb_data(0);
+            dma_wr_mfb_meta(ep)    <= nvme_wr_mfb_meta(0);
+            dma_wr_mfb_sof(ep)     <= nvme_wr_mfb_sof(0);
+            dma_wr_mfb_eof(ep)     <= nvme_wr_mfb_eof(0);
+            dma_wr_mfb_sof_pos(ep) <= nvme_wr_mfb_sof_pos(0);
+            dma_wr_mfb_eof_pos(ep) <= nvme_wr_mfb_eof_pos(0);
+            dma_wr_mfb_src_rdy(ep) <= nvme_wr_mfb_src_rdy(0) when (uc_wr_ep = ep) else '0';
+        end generate;
+
+        nvme_wr_mfb_dst_rdy(0) <= dma_wr_mfb_dst_rdy(uc_wr_ep);
+
+        uc_wr_frame_p : process (pcie_clks(0)) is
+        begin
+            if (rising_edge(pcie_clks(0))) then
+                if (nvme_wr_mfb_src_rdy(0) = '1' and nvme_wr_mfb_dst_rdy(0) = '1') then
+                    if ((or nvme_wr_mfb_eof(0)) = '1') then
+                        uc_wr_frame_r <= '0';
+                    elsif ((or nvme_wr_mfb_sof(0)) = '1') then
+                        uc_wr_frame_r <= '1';
+                        uc_wr_ep_r    <= uc_wr_ep_sof;
+                    end if;
+                end if;
+                if (dma_rst_pipe_r(1) = '1') then
+                    uc_wr_frame_r <= '0';
+                end if;
+            end if;
+        end process;
 
         -- Endpoint 1's doorbells: nothing ever offers it a submission (the DMA's single RQ stays
         -- endpoint 0's, see DMA_IUVENTUS's own PCIE_RQ_MFB port comment), so RQ idles.
