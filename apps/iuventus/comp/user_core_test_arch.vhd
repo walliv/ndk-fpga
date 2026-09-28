@@ -257,6 +257,21 @@ architecture TEST of USER_CORE is
         end if;
         return to_integer(q);
     end function;
+
+    -- One step of a sequential counter, folded at the namespace end. One accepted read plus one
+    -- accepted write advance by at most a few hundred LBAs, so a single conditional subtract
+    -- always suffices; its own borrow out of bit ADDR_CNTR_WIDTH is the >= compare.
+    function seq_advance_f (cntr : unsigned; delta : unsigned) return unsigned is
+        variable sum_v  : unsigned(ADDR_CNTR_WIDTH -1 downto 0);
+        variable fold_v : unsigned(ADDR_CNTR_WIDTH downto 0);
+    begin
+        sum_v  := cntr + resize(delta, ADDR_CNTR_WIDTH);
+        fold_v := resize(sum_v, ADDR_CNTR_WIDTH + 1) - resize(TST_LBA_COUNT, ADDR_CNTR_WIDTH + 1);
+        if (fold_v(ADDR_CNTR_WIDTH) = '0') then
+            return fold_v(ADDR_CNTR_WIDTH -1 downto 0);
+        end if;
+        return sum_v;
+    end function;
     constant TIMESTAMP_WIDTH          : natural := 28; -- allows little over 1 s
     constant LOG_TIMESTAMP_WIDTH      : natural := 22; -- allows little over 16 ms, which should be more than enough for an NVMe read/write operation latency
     constant LAT_PARAL_EVENTS         : natural := 2;
@@ -312,6 +327,13 @@ architecture TEST of USER_CORE is
     type   tst_addr_arr_t is array (0 to NUM_QUEUES -1) of std_logic_vector(ADDR_CNTR_WIDTH -1 downto 0);
     type   seq_delta_arr_t is array (0 to NUM_QUEUES -1) of unsigned(SEQ_DELTA_W -1 downto 0);
     signal seq_addr_cntr        : seq_addr_cntr_arr_t;
+    -- Each queue's next counter value without and with this cycle's read accept, built from
+    -- registers and the write accepts. The read accept arrives late through the queue scan and the
+    -- request credits, so it only selects one: separate signals keep synthesis from sharing the adder.
+    signal seq_wr_delta         : seq_delta_arr_t;
+    signal seq_rd_delta         : unsigned(SEQ_DELTA_W -1 downto 0);
+    signal seq_next_wr          : seq_addr_cntr_arr_t;
+    signal seq_next_rw          : seq_addr_cntr_arr_t;
     signal seq_addr_sel_reg     : std_logic_vector(7 downto 0);
     signal seq_addr_sel_vld     : std_logic;
     signal seq_addr_idx         : natural range 0 to NUM_QUEUES -1;
@@ -1410,53 +1432,47 @@ begin
     wr_frame_lba_cnt <= resize(shift_right(resize(unsigned(gen_mfb_meta(GEN_LENGTH_WIDTH -1 downto 0)), GEN_LENGTH_WIDTH + 1)
                                            + (SECT_SIZE_B -1), log2(SECT_SIZE_B)), WR_LBA_CNT_W);
 
-    seq_addr_cntr_p : process (DMA_CLK)
+    -- Writes read the same per-queue address and must advance it too: otherwise every frame
+    -- between two read accepts carries one LBA, and an SSD can't reorder write-after-write to the
+    -- same blocks -- it serialises them one round trip at a time.
+    seq_wr_delta_p : process (all)
         variable delta_v  : seq_delta_arr_t;
-        variable sum_v    : unsigned(ADDR_CNTR_WIDTH -1 downto 0);
-        variable fold_v   : unsigned(ADDR_CNTR_WIDTH downto 0);
         variable wr_idx_v : natural;
+    begin
+        delta_v := (others => (others => '0'));
+        for r in 0 to DMA_MFB_REGIONS -1 loop
+            wr_idx_v := seq_idx_f(unsigned(gen_nvme_wr_qid_mskd((r+1)*QID_W -1 downto r*QID_W)));
+
+            if (gen_nvme_wr_accept(r) = '1') then
+                delta_v(wr_idx_v) := delta_v(wr_idx_v) + resize(wr_frame_lba_cnt, SEQ_DELTA_W);
+            end if;
+        end loop;
+        seq_wr_delta <= delta_v;
+    end process;
+
+    -- Advance when accepted, not when it completes: waiting leaves the address undefined for the
+    -- round trip, so requests issued meanwhile repeat the previous LBA, capping in-flight commands
+    -- to one per queue. lba_num is 0-based: advance by lba_num+1.
+    seq_rd_delta <= resize(unsigned(core_rd_req_lba_num), SEQ_DELTA_W) + 1;
+
+    -- A read and a write can be accepted in the same cycle, on the same queue, so both increments
+    -- add up; SEQ_DELTA_W bounds their sum exactly, so one wide carry chain per candidate suffices.
+    seq_next_g : for q in 0 to NUM_QUEUES -1 generate
+        seq_next_wr(q) <= seq_advance_f(seq_addr_cntr(q), seq_wr_delta(q));
+        seq_next_rw(q) <= seq_advance_f(seq_addr_cntr(q), seq_wr_delta(q) + seq_rd_delta);
+    end generate;
+
+    seq_addr_cntr_p : process (DMA_CLK)
     begin
         if (rising_edge(DMA_CLK)) then
             if (core_rst = '1' or data_logger_rst = '1' or tst_trigg = '1') then
                 seq_addr_cntr <= (others => resize(unsigned(nvme_rd_req_lba_ptr_reg), ADDR_CNTR_WIDTH));
             elsif (tst_finished = '0' or contig_test = '1') then
-                -- A read and a write can be accepted in the same cycle, on the same queue, so both
-                -- increments accumulate in one variable; an if/elsif chain would drop one of them
-                -- and let the two streams overlap. SEQ_DELTA_W bounds their sum exactly, so summing
-                -- here rather than into the counter costs no value and saves a wide carry chain.
-                delta_v := (others => (others => '0'));
-
-                -- Advance when accepted, not when it completes: waiting leaves the address
-                -- undefined for the round trip, so requests issued meanwhile repeat the previous
-                -- LBA, capping in-flight commands to one per queue. lba_num is 0-based: advance by
-                -- lba_num+1.
-                if (rd_req_accepted_s = '1') then
-                    delta_v(seq_idx_f(unsigned(nvme_rd_req_qid_s))) := resize(unsigned(core_rd_req_lba_num), SEQ_DELTA_W) + 1;
-                end if;
-
-                -- Writes read the same per-queue address and must advance it too: otherwise every
-                -- frame between two read accepts carries one LBA, and an SSD can't reorder
-                -- write-after-write to the same blocks -- it serialises them one round trip at a
-                -- time.
-                for r in 0 to DMA_MFB_REGIONS -1 loop
-                    wr_idx_v := seq_idx_f(unsigned(gen_nvme_wr_qid_mskd((r+1)*QID_W -1 downto r*QID_W)));
-
-                    if (gen_nvme_wr_accept(r) = '1') then
-                        delta_v(wr_idx_v) := delta_v(wr_idx_v) + resize(wr_frame_lba_cnt, SEQ_DELTA_W);
-                    end if;
-                end loop;
-
-                -- Fold at the namespace end. One accepted read plus one accepted write advance by
-                -- at most a few hundred LBAs, so a single conditional subtract always suffices; its
-                -- own borrow out of bit ADDR_CNTR_WIDTH is the >= compare, so the two share a chain.
                 for q in 0 to NUM_QUEUES -1 loop
-                    sum_v  := seq_addr_cntr(q) + resize(delta_v(q), ADDR_CNTR_WIDTH);
-                    fold_v := resize(sum_v, ADDR_CNTR_WIDTH + 1) - resize(TST_LBA_COUNT, ADDR_CNTR_WIDTH + 1);
-
-                    if (fold_v(ADDR_CNTR_WIDTH) = '0') then
-                        seq_addr_cntr(q) <= fold_v(ADDR_CNTR_WIDTH -1 downto 0);
+                    if (rd_req_accepted_s = '1' and seq_idx_f(unsigned(nvme_rd_req_qid_s)) = q) then
+                        seq_addr_cntr(q) <= seq_next_rw(q);
                     else
-                        seq_addr_cntr(q) <= sum_v;
+                        seq_addr_cntr(q) <= seq_next_wr(q);
                     end if;
                 end loop;
             end if;

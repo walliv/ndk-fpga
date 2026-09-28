@@ -162,6 +162,9 @@ architecture FULL of USER_CORE_IF_PIPE is
 
     attribute shreg_extract : string;
     attribute shreg_extract of rst_pl : signal is "NO";
+    -- Flops, not an SRL: the first stage takes the engine's queue scan, which an SRL's setup and
+    -- fixed site cannot absorb in one cycle.
+    attribute shreg_extract of req_pl : signal is "NO";
 
     signal mv_ptr  : unsigned(QID_W-1 downto 0);
     signal mv_sel  : natural range 0 to NUM_QUEUES-1;
@@ -190,6 +193,16 @@ architecture FULL of USER_CORE_IF_PIPE is
     signal wr_eof_pos : mfb_eos_t;
     signal wr_src_rdy : mfb_rdy_t;
     signal wr_dst_rdy : mfb_rdy_t;
+
+    -- The first write stage takes the engine's SRC_RDY, gated by its latency interlock. A shift
+    -- register stage turns that into the clock enable of every data bit; a register stage does not.
+    function wr_pipe_type_f (stage : natural) return string is
+    begin
+        if (stage = 1) then
+            return "REG";
+        end if;
+        return "SHREG";
+    end function;
 
 begin
 
@@ -503,7 +516,7 @@ begin
             META_WIDTH  => WR_META_W,
             FAKE_PIPE   => false,
             USE_DST_RDY => true,
-            PIPE_TYPE   => "SHREG",
+            PIPE_TYPE   => wr_pipe_type_f(s),
             DEVICE      => DEVICE
         )
         port map (
