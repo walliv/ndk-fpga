@@ -171,14 +171,19 @@ class MFBProperty:
             if self._settle is not None:
                 await self._settle
             await ReadOnly()
-            self.cycles += 1
-            if self._in_reset():
-                self.frame_open = False
-                self._prev_src_rdy = False
-                self._prev_accepted = True
-                self._stalled = None
-                continue
-            self._sample()
+            self.check_cycle()
+
+    def check_cycle(self):
+        """One cycle's checks, for a bench that samples many interfaces from one task of its own
+        (construct with start=False) instead of one task per checker."""
+        self.cycles += 1
+        if self._in_reset():
+            self.frame_open = False
+            self._prev_src_rdy = False
+            self._prev_accepted = True
+            self._stalled = None
+            return
+        self._sample()
 
     def _sample(self):
         src_rdy_v = self.bus.src_rdy.value

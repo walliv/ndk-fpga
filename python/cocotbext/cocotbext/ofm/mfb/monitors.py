@@ -62,6 +62,7 @@ class MFBMonitor(BusMonitor):
 
         self.frame_cnt = 0
         self.item_cnt  = 0
+        self._in_frame = False
 
     def _is_valid_word(self, signal_src_rdy, signal_dst_rdy):
         if signal_dst_rdy is None:
@@ -103,82 +104,86 @@ class MFBMonitor(BusMonitor):
 
     async def _monitor_recv(self):
         clk_re = RisingEdge(self.clock)
-        in_frame = False
+        self._in_frame = False
 
         while True:
             await clk_re
             await ReadOnly()          # settle clocked processes; sample the stable bus
                                       # (matches MFBDriver._wait_ready, drivers.py:100)
+            self.monitor_cycle()
 
-            if self.in_reset:
-                continue
+    def monitor_cycle(self):
+        """One cycle's sampling, for a bench that drives many monitors from one task of its own
+        (kill() this monitor's own task first)."""
+        if self.in_reset:
+            return
 
-            if self._is_valid_word(self.bus.src_rdy, self.bus.dst_rdy):
-                self._read_control_signals()
+        if self._is_valid_word(self.bus.src_rdy, self.bus.dst_rdy):
+            self._read_control_signals()
 
-                for r in range(self._regions):
-                    sof = int(self._sof[r])
-                    eof = int(self._eof[r])
+            for r in range(self._regions):
+                sof = int(self._sof[r])
+                eof = int(self._eof[r])
 
-                    sof_pos = self._field(self._sof_pos, r, self._sof_pos_w) if sof else 0
-                    eof_pos = self._field(self._eof_pos, r, self._eof_pos_w) if eof else 0
+                sof_pos = self._field(self._sof_pos, r, self._sof_pos_w) if sof else 0
+                eof_pos = self._field(self._eof_pos, r, self._eof_pos_w) if eof else 0
 
-                    pkt_start = sof_pos * self._block_size * self._item_width
-                    pkt_end   = (eof_pos + 1) * self._item_width
+                pkt_start = sof_pos * self._block_size * self._item_width
+                pkt_end   = (eof_pos + 1) * self._item_width
 
-                    if in_frame:
-                        if sof and eof:
-                            # if sof appears before eof
-                            if self._region_size > 1:
-                                if pkt_end > pkt_start:
-                                    raise MFBProtocolError(f"MFB error: a start-of-frame received without an end-of-frame! ({sof_pos=}, {eof_pos=})")
+                if self._in_frame:
+                    if sof and eof:
+                        # if sof appears before eof
+                        if self._region_size > 1:
+                            if pkt_end > pkt_start:
+                                raise MFBProtocolError(f"MFB error: a start-of-frame received without an end-of-frame! ({sof_pos=}, {eof_pos=})")
 
-                            # end of one packet
-                            self._transaction.data += self._data_bytes(r, 0, pkt_end)
-                            self._recv_trans()
-                            self.frame_cnt += 1
-                            self.item_cnt += len(self._transaction.data) * 8 // self._item_width
+                        # end of one packet
+                        self._transaction.data += self._data_bytes(r, 0, pkt_end)
+                        self._recv_trans()
+                        self.frame_cnt += 1
+                        self.item_cnt += len(self._transaction.data) * 8 // self._item_width
 
-                            # start of another packet, in_frame stays True
-                            self._transaction.data = self._data_bytes(r, pkt_start, self._region_data_w)
-                            if self._meta_width > 0 and hasattr(self._transaction, "meta") and self._meta_vld_with == "sof":
-                                self._transaction.meta = self._field(self._meta, r, self._meta_width)
+                        # start of another packet, in_frame stays True
+                        self._transaction.data = self._data_bytes(r, pkt_start, self._region_data_w)
+                        if self._meta_width > 0 and hasattr(self._transaction, "meta") and self._meta_vld_with == "sof":
+                            self._transaction.meta = self._field(self._meta, r, self._meta_width)
 
-                        elif sof:
-                            # sof when the previous packet hasn't ended
-                            raise MFBProtocolError(f"MFB error: a start-of-frame received without an end-of-frame! ({sof_pos=})")
+                    elif sof:
+                        # sof when the previous packet hasn't ended
+                        raise MFBProtocolError(f"MFB error: a start-of-frame received without an end-of-frame! ({sof_pos=})")
 
-                        elif eof:
-                            # packet ends in this region and new one doesn't start
-                            self._transaction.data += self._data_bytes(r, 0, pkt_end)
-                            if self._meta_width > 0 and hasattr(self._transaction, "meta") and self._meta_vld_with == "eof":
-                                self._transaction.meta = self._field(self._meta, r, self._meta_width)
-                            self._recv_trans()
-                            in_frame = False
-                            self.frame_cnt += 1
-                            self.item_cnt += len(self._transaction.data) * 8 // self._item_width
-
-                        else:
-                            # packet starts and ends in another region, in_frame stays True
-                            self._transaction.data += self._data_bytes(r, 0, self._region_data_w)
+                    elif eof:
+                        # packet ends in this region and new one doesn't start
+                        self._transaction.data += self._data_bytes(r, 0, pkt_end)
+                        if self._meta_width > 0 and hasattr(self._transaction, "meta") and self._meta_vld_with == "eof":
+                            self._transaction.meta = self._field(self._meta, r, self._meta_width)
+                        self._recv_trans()
+                        self._in_frame = False
+                        self.frame_cnt += 1
+                        self.item_cnt += len(self._transaction.data) * 8 // self._item_width
 
                     else:
-                        if sof and eof:
-                            # packet starts and ends in this region, in_frame stays False
-                            self._transaction.data = self._data_bytes(r, pkt_start, pkt_end)
-                            if self._meta_width > 0 and hasattr(self._transaction, "meta"):
-                                self._transaction.meta = self._field(self._meta, r, self._meta_width)
-                            self._recv_trans()
-                            self.frame_cnt += 1
-                            self.item_cnt += len(self._transaction.data) * 8 // self._item_width
+                        # packet starts and ends in another region, in_frame stays True
+                        self._transaction.data += self._data_bytes(r, 0, self._region_data_w)
 
-                        elif sof:
-                            # packet starts in this regions and ends in another one
-                            self._transaction.data = self._data_bytes(r, pkt_start, self._region_data_w)
-                            if self._meta_width > 0 and hasattr(self._transaction, "meta") and self._meta_vld_with == "sof":
-                                self._transaction.meta = self._field(self._meta, r, self._meta_width)
-                            in_frame = True
+                else:
+                    if sof and eof:
+                        # packet starts and ends in this region, in_frame stays False
+                        self._transaction.data = self._data_bytes(r, pkt_start, pkt_end)
+                        if self._meta_width > 0 and hasattr(self._transaction, "meta"):
+                            self._transaction.meta = self._field(self._meta, r, self._meta_width)
+                        self._recv_trans()
+                        self.frame_cnt += 1
+                        self.item_cnt += len(self._transaction.data) * 8 // self._item_width
 
-                        elif eof:
-                            # eof when not in frame
-                            raise MFBProtocolError("MFB error: an end-of-frame received before a start-of-frame!")
+                    elif sof:
+                        # packet starts in this regions and ends in another one
+                        self._transaction.data = self._data_bytes(r, pkt_start, self._region_data_w)
+                        if self._meta_width > 0 and hasattr(self._transaction, "meta") and self._meta_vld_with == "sof":
+                            self._transaction.meta = self._field(self._meta, r, self._meta_width)
+                        self._in_frame = True
+
+                    elif eof:
+                        # eof when not in frame
+                        raise MFBProtocolError("MFB error: an end-of-frame received before a start-of-frame!")
