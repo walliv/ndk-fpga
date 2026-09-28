@@ -12,6 +12,10 @@
     design, precise task specs, root-cause triage, review of agent output, and premise-questioning
     (e.g. "is this fix's area cost acceptable?", "is the testbench traffic model realistic?").
     Judgment calls bounce back to this layer; don't expect implementation agents to resolve them.
+  - background code-writing agents run primarily on Opus with high effort, especially when the
+    task includes verification (suites, A/B runs, timing or CDC reports). A Sonnet agent
+    backgrounded on RTL timing work stalled for hours and corrupted the repo with a stray
+    `git stash pop`; code-writing agents never use `git stash`.
   - Sonnet for code writing, testbench iteration and debugging — excellent when the spec is
     precise and self-contained (implementations land near-clean; verification discipline is
     strong: cycle-level tracing, A/B controls, honest gate reporting). Its known limits: deep
