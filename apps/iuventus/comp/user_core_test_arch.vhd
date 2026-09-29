@@ -63,6 +63,10 @@ architecture TEST of USER_CORE is
     -- Register stages on each interface, and the per-queue request buffer backing the credits.
     constant IF_PIPE_STAGES     : natural := 4;
     constant IF_PIPE_REQ_ITEMS  : natural := 16;
+    -- Its own hierarchy: flattened, synthesis folds engine logic into cells named under the pipeline,
+    -- which the user core's pblock leaves out, and the placer drags them to the pipeline's far stages.
+    attribute keep_hierarchy : string;
+    attribute keep_hierarchy of user_core_if_pipe_i : label is "soft";
     -- LENGTH_WIDTH used by the write-side throughput generator (mirrors the value passed to
     -- MFB_GENERATOR_MI32 below); needed only to size/slice the raw generator TX_MFB_META.
     constant GEN_LENGTH_WIDTH   : natural := 18;
@@ -247,6 +251,9 @@ architecture TEST of USER_CORE is
     constant WR_LBA_CNT_W             : natural := GEN_LENGTH_WIDTH - log2(SECT_SIZE_B) + 1;
     constant SEQ_DELTA_W              : natural := log2(2**core_rd_req_lba_num'length
                                                         + DMA_MFB_REGIONS*2**(WR_LBA_CNT_W -1) + 1);
+    -- Every advance one cycle can apply to a queue: k accepted write frames (0..DMA_MFB_REGIONS,
+    -- all of one length) and j accepted reads (0..1), candidate k*2+j.
+    constant SEQ_CANDS                : natural := (DMA_MFB_REGIONS + 1)*2;
 
     -- QID_W is log2 rounded up, so at NUM_QUEUES = 1 or 3 a QID value can name a queue that does
     -- not exist. Indexing a per-queue array with it directly would be an out-of-range fatal.
@@ -256,21 +263,6 @@ architecture TEST of USER_CORE is
             return 0;
         end if;
         return to_integer(q);
-    end function;
-
-    -- One step of a sequential counter, folded at the namespace end. One accepted read plus one
-    -- accepted write advance by at most a few hundred LBAs, so a single conditional subtract
-    -- always suffices; its own borrow out of bit ADDR_CNTR_WIDTH is the >= compare.
-    function seq_advance_f (cntr : unsigned; delta : unsigned) return unsigned is
-        variable sum_v  : unsigned(ADDR_CNTR_WIDTH -1 downto 0);
-        variable fold_v : unsigned(ADDR_CNTR_WIDTH downto 0);
-    begin
-        sum_v  := cntr + resize(delta, ADDR_CNTR_WIDTH);
-        fold_v := resize(sum_v, ADDR_CNTR_WIDTH + 1) - resize(TST_LBA_COUNT, ADDR_CNTR_WIDTH + 1);
-        if (fold_v(ADDR_CNTR_WIDTH) = '0') then
-            return fold_v(ADDR_CNTR_WIDTH -1 downto 0);
-        end if;
-        return sum_v;
     end function;
     constant TIMESTAMP_WIDTH          : natural := 28; -- allows little over 1 s
     constant LOG_TIMESTAMP_WIDTH      : natural := 22; -- allows little over 16 ms, which should be more than enough for an NVMe read/write operation latency
@@ -325,15 +317,22 @@ architecture TEST of USER_CORE is
     -- collapsing sequential throughput.
     type   seq_addr_cntr_arr_t is array (0 to NUM_QUEUES -1) of unsigned(ADDR_CNTR_WIDTH -1 downto 0);
     type   tst_addr_arr_t is array (0 to NUM_QUEUES -1) of std_logic_vector(ADDR_CNTR_WIDTH -1 downto 0);
-    type   seq_delta_arr_t is array (0 to NUM_QUEUES -1) of unsigned(SEQ_DELTA_W -1 downto 0);
     signal seq_addr_cntr        : seq_addr_cntr_arr_t;
-    -- Each queue's next counter value without and with this cycle's read accept, built from
-    -- registers and the write accepts. The read accept arrives late through the queue scan and the
-    -- request credits, so it only selects one: separate signals keep synthesis from sharing the adder.
-    signal seq_wr_delta         : seq_delta_arr_t;
-    signal seq_rd_delta         : unsigned(SEQ_DELTA_W -1 downto 0);
-    signal seq_next_wr          : seq_addr_cntr_arr_t;
-    signal seq_next_rw          : seq_addr_cntr_arr_t;
+    -- The accepts arrive late through the queue scan, the credits and the write pipe, so they only
+    -- select among next values built from registers: each candidate's advance, and it minus
+    -- TST_LBA_COUNT.
+    type   seq_ofs_arr_t is array (0 to SEQ_CANDS -1) of unsigned(SEQ_DELTA_W -1 downto 0);
+    type   seq_ofs_fold_arr_t is array (0 to SEQ_CANDS -1) of unsigned(ADDR_CNTR_WIDTH downto 0);
+    type   seq_cand_q_t is array (0 to SEQ_CANDS -1) of unsigned(ADDR_CNTR_WIDTH -1 downto 0);
+    type   seq_cand_arr_t is array (0 to NUM_QUEUES -1) of seq_cand_q_t;
+    type   seq_sel_arr_t is array (0 to NUM_QUEUES -1) of natural range 0 to SEQ_CANDS -1;
+    signal rd_lba_inc_nxt       : unsigned(core_rd_req_lba_num'length downto 0);
+    signal seq_ofs_r            : seq_ofs_arr_t;
+    signal seq_ofs_fold_r       : seq_ofs_fold_arr_t;
+    signal seq_cand             : seq_cand_arr_t;
+    signal seq_sel              : seq_sel_arr_t;
+    signal seq_load             : std_logic;
+    signal seq_en               : std_logic;
     signal seq_addr_sel_reg     : std_logic_vector(7 downto 0);
     signal seq_addr_sel_vld     : std_logic;
     signal seq_addr_idx         : natural range 0 to NUM_QUEUES -1;
@@ -1432,48 +1431,101 @@ begin
     wr_frame_lba_cnt <= resize(shift_right(resize(unsigned(gen_mfb_meta(GEN_LENGTH_WIDTH -1 downto 0)), GEN_LENGTH_WIDTH + 1)
                                            + (SECT_SIZE_B -1), log2(SECT_SIZE_B)), WR_LBA_CNT_W);
 
-    -- Writes read the same per-queue address and must advance it too: otherwise every frame
-    -- between two read accepts carries one LBA, and an SSD can't reorder write-after-write to the
-    -- same blocks -- it serialises them one round trip at a time.
-    seq_wr_delta_p : process (all)
-        variable delta_v  : seq_delta_arr_t;
-        variable wr_idx_v : natural;
+    -- Next cycle's 0-based lba_num plus one, built from the MI writes that update both of its
+    -- sources, so seq_ofs_r holds the advance of exactly the read it is offered with.
+    rd_lba_inc_nxt_p : process (all)
+        variable integ_en_v : std_logic;
+        variable lba_num_v  : std_logic_vector(core_rd_req_lba_num'range);
     begin
-        delta_v := (others => (others => '0'));
-        for r in 0 to DMA_MFB_REGIONS -1 loop
-            wr_idx_v := seq_idx_f(unsigned(gen_nvme_wr_qid_mskd((r+1)*QID_W -1 downto r*QID_W)));
+        integ_en_v := integ_en;
+        lba_num_v  := nvme_rd_req_lba_num_reg;
+        if (mi_split_wr(0) = '1' and integ_ctrl_reg_sel = '1') then
+            integ_en_v := mi_split_dwr(0)(1);
+        end if;
+        if (mi_split_wr(0) = '1' and nvme_rd_req_lba_num_reg_sel = '1') then
+            lba_num_v := mi_split_dwr(0)(core_rd_req_lba_num'range);
+        end if;
+        if (core_rst = '1') then
+            integ_en_v := '0';
+            lba_num_v  := (others => '0');
+        end if;
+        -- The checker's request size is a constant, so its next value is its current one.
+        if (integ_en_v = '1') then
+            lba_num_v := chk_rd_req_lba_num;
+        end if;
+        rd_lba_inc_nxt <= resize(unsigned(lba_num_v), rd_lba_inc_nxt'length) + 1;
+    end process;
 
-            if (gen_nvme_wr_accept(r) = '1') then
-                delta_v(wr_idx_v) := delta_v(wr_idx_v) + resize(wr_frame_lba_cnt, SEQ_DELTA_W);
+    -- A write's length is the generator's length register, sampled while the accepted frame itself
+    -- still sits in the reconfigurator's FIFO, so taking it a cycle later changes nothing.
+    seq_ofs_p : process (DMA_CLK)
+        variable ofs_v : unsigned(SEQ_DELTA_W -1 downto 0);
+    begin
+        if (rising_edge(DMA_CLK)) then
+            for c in 0 to SEQ_CANDS -1 loop
+                ofs_v := (others => '0');
+                for k in 1 to c/2 loop
+                    ofs_v := ofs_v + resize(wr_frame_lba_cnt, SEQ_DELTA_W);
+                end loop;
+                if (c mod 2 = 1) then
+                    ofs_v := ofs_v + resize(rd_lba_inc_nxt, SEQ_DELTA_W);
+                end if;
+                seq_ofs_r(c)      <= ofs_v;
+                seq_ofs_fold_r(c) <= resize(ofs_v, ADDR_CNTR_WIDTH + 1) - resize(TST_LBA_COUNT, ADDR_CNTR_WIDTH + 1);
+            end loop;
+        end if;
+    end process;
+
+    seq_load <= core_rst or data_logger_rst or tst_trigg;
+    seq_en   <= (not tst_finished) or contig_test;
+
+    -- Fold at the namespace end: a sum wrapping ADDR_CNTR_WIDTH is below TST_LBA_COUNT, otherwise
+    -- the sign of the parallel sum with -TST_LBA_COUNT is the >= compare, so each is one carry chain.
+    seq_cand_g : for q in 0 to NUM_QUEUES -1 generate
+        seq_cand_c_g : for c in 0 to SEQ_CANDS -1 generate
+            signal sum_s  : unsigned(ADDR_CNTR_WIDTH downto 0);
+            signal fold_s : unsigned(ADDR_CNTR_WIDTH downto 0);
+        begin
+            sum_s  <= resize(seq_addr_cntr(q), ADDR_CNTR_WIDTH + 1) + resize(seq_ofs_r(c), ADDR_CNTR_WIDTH + 1);
+            fold_s <= resize(seq_addr_cntr(q), ADDR_CNTR_WIDTH + 1) + seq_ofs_fold_r(c);
+
+            seq_cand(q)(c) <= resize(unsigned(nvme_rd_req_lba_ptr_reg), ADDR_CNTR_WIDTH) when (seq_load = '1') else
+                              fold_s(ADDR_CNTR_WIDTH -1 downto 0) when (sum_s(ADDR_CNTR_WIDTH) = '0' and fold_s(ADDR_CNTR_WIDTH) = '0') else
+                              sum_s(ADDR_CNTR_WIDTH -1 downto 0);
+        end generate;
+    end generate;
+
+    -- A read and a write accepted in the same cycle on one queue both advance it. Writes must: else
+    -- every frame between two reads carries one LBA, and an SSD serialises write-after-write.
+    seq_sel_p : process (all)
+        variable wr_cnt_v : natural range 0 to DMA_MFB_REGIONS;
+    begin
+        for q in 0 to NUM_QUEUES -1 loop
+            wr_cnt_v := 0;
+            for r in 0 to DMA_MFB_REGIONS -1 loop
+                if (gen_nvme_wr_accept(r) = '1'
+                    and seq_idx_f(unsigned(gen_nvme_wr_qid_mskd((r+1)*QID_W -1 downto r*QID_W))) = q) then
+                    wr_cnt_v := wr_cnt_v + 1;
+                end if;
+            end loop;
+
+            if (rd_req_accepted_s = '1' and seq_idx_f(unsigned(nvme_rd_req_qid_s)) = q) then
+                seq_sel(q) <= wr_cnt_v*2 + 1;
+            else
+                seq_sel(q) <= wr_cnt_v*2;
             end if;
         end loop;
-        seq_wr_delta <= delta_v;
     end process;
 
     -- Advance when accepted, not when it completes: waiting leaves the address undefined for the
     -- round trip, so requests issued meanwhile repeat the previous LBA, capping in-flight commands
-    -- to one per queue. lba_num is 0-based: advance by lba_num+1.
-    seq_rd_delta <= resize(unsigned(core_rd_req_lba_num), SEQ_DELTA_W) + 1;
-
-    -- A read and a write can be accepted in the same cycle, on the same queue, so both increments
-    -- add up; SEQ_DELTA_W bounds their sum exactly, so one wide carry chain per candidate suffices.
-    seq_next_g : for q in 0 to NUM_QUEUES -1 generate
-        seq_next_wr(q) <= seq_advance_f(seq_addr_cntr(q), seq_wr_delta(q));
-        seq_next_rw(q) <= seq_advance_f(seq_addr_cntr(q), seq_wr_delta(q) + seq_rd_delta);
-    end generate;
-
+    -- to one per queue.
     seq_addr_cntr_p : process (DMA_CLK)
     begin
         if (rising_edge(DMA_CLK)) then
-            if (core_rst = '1' or data_logger_rst = '1' or tst_trigg = '1') then
-                seq_addr_cntr <= (others => resize(unsigned(nvme_rd_req_lba_ptr_reg), ADDR_CNTR_WIDTH));
-            elsif (tst_finished = '0' or contig_test = '1') then
+            if (seq_load = '1' or seq_en = '1') then
                 for q in 0 to NUM_QUEUES -1 loop
-                    if (rd_req_accepted_s = '1' and seq_idx_f(unsigned(nvme_rd_req_qid_s)) = q) then
-                        seq_addr_cntr(q) <= seq_next_rw(q);
-                    else
-                        seq_addr_cntr(q) <= seq_next_wr(q);
-                    end if;
+                    seq_addr_cntr(q) <= seq_cand(q)(seq_sel(q));
                 end loop;
             end if;
         end if;

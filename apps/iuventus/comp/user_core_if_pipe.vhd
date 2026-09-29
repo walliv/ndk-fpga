@@ -166,9 +166,14 @@ architecture FULL of USER_CORE_IF_PIPE is
     -- fixed site cannot absorb in one cycle.
     attribute shreg_extract of req_pl : signal is "NO";
 
-    signal mv_ptr  : unsigned(QID_W-1 downto 0);
-    signal mv_sel  : natural range 0 to NUM_QUEUES-1;
-    signal mv_fire : std_logic;
+    signal mv_ptr     : unsigned(QID_W-1 downto 0);
+    signal mv_sel     : natural range 0 to NUM_QUEUES-1;
+    signal mv_fire    : std_logic;
+    -- The request offered to the DMA is picked a cycle ahead and registered, so the DMA's accept
+    -- decision never waits on its own RDY travelling through this pick and back.
+    signal mv_nxt_sel : natural range 0 to NUM_QUEUES-1;
+    signal mv_nxt_vld : std_logic;
+    signal mv_vld_r   : std_logic;
 
     -- Operation-status chain; the interface has no backpressure, so plain registers suffice.
     type   stat_pl_t is array (0 to STAGES) of std_logic_vector(STAT_W-1 downto 0);
@@ -283,24 +288,39 @@ begin
         );
     end generate;
 
-    -- Round-robin over queues that hold a request and whose DMA accept window is open. The engine
-    -- issues at most one request per command, so the pointer only prevents long-term starvation.
+    -- Round-robin pick for the NEXT cycle over queues that will still hold a request (not popped
+    -- now) and whose DMA accept window is open now. The DMA accepts exactly VLD and RDY, so an
+    -- offer the window closed on in between is simply withdrawn and picked again.
     mv_pick_p : process (all) is
         variable idx   : natural range 0 to NUM_QUEUES-1;
         variable taken : boolean;
     begin
-        mv_sel  <= 0;
-        mv_fire <= '0';
-        taken   := false;
+        mv_nxt_sel <= mv_sel;
+        mv_nxt_vld <= '0';
+        taken      := false;
         for k in 0 to NUM_QUEUES-1 loop
             idx := (to_integer(mv_ptr) + k) mod NUM_QUEUES;
-            if (not taken and fifo_empty(idx) = '0' and DMA_RD_REQ_RDY(idx) = '1') then
-                mv_sel  <= idx;
-                mv_fire <= '1';
-                taken   := true;
+            if (not taken and fifo_empty(idx) = '0' and fifo_rd(idx) = '0' and DMA_RD_REQ_RDY(idx) = '1') then
+                mv_nxt_sel <= idx;
+                mv_nxt_vld <= '1';
+                taken      := true;
             end if;
         end loop;
     end process;
+
+    mv_pick_reg_p : process (CLK) is
+    begin
+        if (rising_edge(CLK)) then
+            mv_sel <= mv_nxt_sel;
+            if (rst_pl(0) = '1') then
+                mv_vld_r <= '0';
+            else
+                mv_vld_r <= mv_nxt_vld;
+            end if;
+        end if;
+    end process;
+
+    mv_fire <= mv_vld_r and DMA_RD_REQ_RDY(mv_sel);
 
     mv_ptr_p : process (CLK) is
     begin
@@ -338,7 +358,7 @@ begin
     dma_vld_p : process (all) is
     begin
         DMA_RD_REQ_VLD         <= (others => '0');
-        DMA_RD_REQ_VLD(mv_sel) <= mv_fire;
+        DMA_RD_REQ_VLD(mv_sel) <= mv_vld_r;
     end process;
 
     ret_pl(0) <= fifo_rd;

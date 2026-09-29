@@ -19,6 +19,9 @@ create_pblock pblock_user_core
 # The filter covers both architectures: GROUPBY names its pipeline if_pipe_i and TEST names it
 # user_core_if_pipe_i, so matching the shared substring excludes whichever one is built.
 add_cells_to_pblock [get_pblocks pblock_user_core] [get_cells -filter {NAME !~ "*if_pipe_i*"} core_logic_i/user_core_i/*]
+# Except the pipeline's engine end: the read credits, the first request stage and the first write
+# stage handshake with the engine in the same cycle, so they sit beside it, not out in the gap.
+add_cells_to_pblock [get_pblocks pblock_user_core] [get_cells -quiet -hier -filter {NAME =~ "core_logic_i/user_core_i/user_core_if_pipe_i/credit_reg*" || NAME =~ "core_logic_i/user_core_i/user_core_if_pipe_i/req_chain_g?1?.req_*_reg*" || (NAME =~ "core_logic_i/user_core_i/user_core_if_pipe_i/wr_pipe_g?1?.wr_pipe_i/*" && IS_PRIMITIVE)}]
 # The user core keeps three columns to itself: its integrity checker's CARRY8 chains routed at 7 ns
 # when boxed into one clock region beside the allocators.
 # The pipeline stays out so the placer can spread its register stages, data and reset alike, across
