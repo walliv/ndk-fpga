@@ -61,7 +61,9 @@ the preferred entry point -- prefer it over ad-hoc scripts:
        --throughput-results-file ~/temp/throughput_q1.json
 
 Every point is measured on a **contiguous** stream (``contig_test`` is set on both the read and
-write paths). Plots are written to the current directory with a per-run timestamp, so repeated
+write paths). Setting it rounds every queue's sequential address up to a 4 KiB boundary, and random
+addresses are always 4 KiB aligned, so a point whose request size is a multiple of 4 KiB never
+straddles one of the SSD's 4 KiB mapping units. Plots are written to the current directory with a per-run timestamp, so repeated
 sweeps accumulate instead of overwriting each other. Run into a scratch directory and promote only
 the results worth keeping into ``doc/measurements/`` under the dated convention used there.
 
