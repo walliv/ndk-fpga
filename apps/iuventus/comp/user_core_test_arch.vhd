@@ -245,6 +245,16 @@ architecture TEST of USER_CORE is
     -- Sector size the namespace is formatted with. The write generator is configured in bytes,
     -- so its frame length converts to a count of LBAs by this.
     constant SECT_SIZE_B              : natural := 512;
+    -- The SSD maps 4 KiB units, so a request straddling two of them is split and serialised by it.
+    -- Test addresses keep these low bits clear; TST_LBA_COUNT is a multiple of the unit, so folds keep them too.
+    constant LBA_ALIGN_W              : natural := log2(4096/SECT_SIZE_B);
+    -- The sequential counter in whole drive units, one bit wider for the carry of rounding up.
+    constant SEQ_UP_W                 : natural := ADDR_CNTR_WIDTH - LBA_ALIGN_W;
+    constant SEQ_UP_FOLD0             : unsigned(SEQ_UP_W downto 0) := to_unsigned(0, SEQ_UP_W + 1)
+                                                                       - resize(TST_LBA_COUNT(ADDR_CNTR_WIDTH -1 downto LBA_ALIGN_W), SEQ_UP_W + 1);
+    constant SEQ_UP_FOLD1             : unsigned(SEQ_UP_W downto 0) := SEQ_UP_FOLD0 + 1;
+    -- Random starts fold short of the namespace end by the largest request, so none of them runs past it.
+    constant RAND_LBA_SPAN            : unsigned(ADDR_CNTR_WIDTH -1 downto 0) := TST_LBA_COUNT - 2**core_rd_req_lba_num'length;
     -- Widths of the per-cycle LBA advance: one generated write frame (length/SECT_SIZE_B), and the
     -- whole advance -- one accepted read (lba_num+1) plus one accepted write per region. Summed at
     -- these widths so a single ADDR_CNTR_WIDTH carry chain separates seq_addr_cntr from its D input.
@@ -333,6 +343,11 @@ architecture TEST of USER_CORE is
     signal seq_sel              : seq_sel_arr_t;
     signal seq_load             : std_logic;
     signal seq_en               : std_logic;
+    -- A point starts where the previous one stopped, so each queue's counter is rounded up to a drive
+    -- unit: registered, and taken as the no-accept candidate so an accept still only selects.
+    signal seq_align_set        : std_logic;
+    signal seq_align_pend       : std_logic_vector(NUM_QUEUES -1 downto 0);
+    signal seq_up               : seq_addr_cntr_arr_t;
     signal seq_addr_sel_reg     : std_logic_vector(7 downto 0);
     signal seq_addr_sel_vld     : std_logic;
     signal seq_addr_idx         : natural range 0 to NUM_QUEUES -1;
@@ -1490,9 +1505,48 @@ begin
             fold_s <= resize(seq_addr_cntr(q), ADDR_CNTR_WIDTH + 1) + seq_ofs_fold_r(c);
 
             seq_cand(q)(c) <= resize(unsigned(nvme_rd_req_lba_ptr_reg), ADDR_CNTR_WIDTH) when (seq_load = '1') else
+                              seq_up(q) when (c = 0 and seq_align_pend(q) = '1') else
                               fold_s(ADDR_CNTR_WIDTH -1 downto 0) when (sum_s(ADDR_CNTR_WIDTH) = '0' and fold_s(ADDR_CNTR_WIDTH) = '0') else
                               sum_s(ADDR_CNTR_WIDTH -1 downto 0);
         end generate;
+    end generate;
+
+    -- The MI write raising contig_test; the read generator is only enabled a cycle later, so the flag
+    -- lands on an idle queue. On a busy one it waits for an idle cycle rather than drop an advance.
+    seq_align_set <= mi_split_wr(0) and tst_sel_reg_sel and mi_split_dwr(0)(3) and not contig_test;
+
+    -- Rounding up adds one unit when a bit below it is set, which is a carry-in, so each of the two
+    -- sums stays one carry chain and folds exactly like the candidates above.
+    seq_up_g : for q in 0 to NUM_QUEUES -1 generate
+        signal hi_s       : unsigned(SEQ_UP_W downto 0);
+        signal inc_s      : unsigned(SEQ_UP_W downto 0);
+        signal fold_ofs_s : unsigned(SEQ_UP_W downto 0);
+        signal up_s       : unsigned(SEQ_UP_W downto 0);
+        signal fold_s     : unsigned(SEQ_UP_W downto 0);
+    begin
+        hi_s       <= resize(seq_addr_cntr(q)(ADDR_CNTR_WIDTH -1 downto LBA_ALIGN_W), SEQ_UP_W + 1);
+        inc_s      <= to_unsigned(1, SEQ_UP_W + 1) when ((or std_logic_vector(seq_addr_cntr(q)(LBA_ALIGN_W -1 downto 0))) = '1') else
+                      to_unsigned(0, SEQ_UP_W + 1);
+        fold_ofs_s <= SEQ_UP_FOLD1 when (inc_s(0) = '1') else SEQ_UP_FOLD0;
+        up_s       <= hi_s + inc_s;
+        fold_s     <= hi_s + fold_ofs_s;
+
+        seq_up(q) <= shift_left(resize(fold_s, ADDR_CNTR_WIDTH), LBA_ALIGN_W) when (up_s(SEQ_UP_W) = '0' and fold_s(SEQ_UP_W) = '0') else
+                     shift_left(resize(up_s, ADDR_CNTR_WIDTH), LBA_ALIGN_W);
+
+        -- A load places the counter explicitly, so it cancels a rounding still waiting for its idle cycle.
+        seq_align_pend_p : process (DMA_CLK)
+        begin
+            if (rising_edge(DMA_CLK)) then
+                if (core_rst = '1') then
+                    seq_align_pend(q) <= '0';
+                elsif (seq_align_set = '1') then
+                    seq_align_pend(q) <= '1';
+                elsif (seq_load = '1' or (seq_en = '1' and seq_sel(q) = 0)) then
+                    seq_align_pend(q) <= '0';
+                end if;
+            end if;
+        end process;
     end generate;
 
     -- A read and a write accepted in the same cycle on one queue both advance it. Writes must: else
@@ -1531,12 +1585,16 @@ begin
         end if;
     end process;
 
-    -- The random stream stays shared: repeats spread over the device, not concentrating. The
-    -- LFSR spans the full counter width, overrunning the namespace, so fold it the same way --
-    -- the folded span draws twice as often (a generator, not uniformity).
-    rand_addr_in_range <= std_logic_vector(unsigned(lfsr_rand_addr_out) - TST_LBA_COUNT)
-                          when unsigned(lfsr_rand_addr_out) >= TST_LBA_COUNT else
-                          lfsr_rand_addr_out;
+    -- The random stream stays shared: repeats spread over the device. The LFSR overruns the
+    -- namespace, so it folds like the counter -- the folded span draws twice as often -- and the
+    -- bits below a drive unit are dropped.
+    rand_addr_in_range(ADDR_CNTR_WIDTH -1 downto LBA_ALIGN_W) <=
+        std_logic_vector(unsigned(lfsr_rand_addr_out(ADDR_CNTR_WIDTH -1 downto LBA_ALIGN_W))
+                         - RAND_LBA_SPAN(ADDR_CNTR_WIDTH -1 downto LBA_ALIGN_W))
+        when unsigned(lfsr_rand_addr_out(ADDR_CNTR_WIDTH -1 downto LBA_ALIGN_W)) >= RAND_LBA_SPAN(ADDR_CNTR_WIDTH -1 downto LBA_ALIGN_W) else
+        lfsr_rand_addr_out(ADDR_CNTR_WIDTH -1 downto LBA_ALIGN_W);
+
+    rand_addr_in_range(LBA_ALIGN_W -1 downto 0) <= (others => '0');
 
     tst_addr_q_g : for q in 0 to NUM_QUEUES -1 generate
         tst_addr_q(q) <= std_logic_vector(seq_addr_cntr(q)) when tst_sel_reg(0) = '0' else

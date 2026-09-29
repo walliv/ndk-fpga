@@ -279,3 +279,61 @@ class EvcrModel:
 
     def on_write_frame_accept(self) -> None:
         self.total_events += 1
+
+
+# Namespace size and address-counter width, as user_core_test_arch.vhd declares them
+# (TST_LBA_COUNT, ADDR_CNTR_WIDTH).
+TST_LBA_COUNT = 488377323 << 4
+ADDR_CNTR_WIDTH = 33
+# LBAs per 4 KiB drive unit (512 B sectors). A request straddling two units is split and serialised
+# by the SSD, so every generated test address starts on one.
+LBA_ALIGN = 4096 // SECT_SIZE
+# Largest request: NVME_RD_REQ_LBA_NUM is 8 bits, 0-based. Random starts must leave room for it.
+MAX_REQ_LBAS = 256
+
+
+def seq_fold(lba: int) -> int:
+    """The counter's fold at the namespace end. An advance wrapping ADDR_CNTR_WIDTH is taken as
+    wrapped, exactly as the RTL's candidate select does."""
+    if lba >= 1 << ADDR_CNTR_WIDTH:
+        return lba - (1 << ADDR_CNTR_WIDTH)
+    if lba >= TST_LBA_COUNT:
+        return lba - TST_LBA_COUNT
+    return lba
+
+
+def lba_align_up(lba: int) -> int:
+    """Next drive-unit boundary at or above lba, folded like any other advance."""
+    return seq_fold(-(-lba // LBA_ALIGN) * LBA_ALIGN)
+
+
+class SeqAddrModel:
+    """Specification of seq_addr_cntr: an accept takes a queue's value and advances it by its LBAs, a
+    load sets every queue, and a point start rounds each up to a drive unit in its first idle cycle."""
+
+    def __init__(self, num_queues: int):
+        self.cntr = [0] * num_queues
+        self.pend = [False] * num_queues
+        # Cycles a point start waited behind an accept, and point starts that moved a counter.
+        self.deferred = 0
+        self.rounded = 0
+
+    def load(self, lba: int) -> None:
+        self.cntr = [lba] * len(self.cntr)
+        self.pend = [False] * len(self.cntr)
+
+    def point_start(self) -> None:
+        self.pend = [True] * len(self.cntr)
+
+    def step(self, advance: dict) -> None:
+        """One cycle in which the counters run: `advance` maps a queue to the LBAs accepted on it."""
+        for q in range(len(self.cntr)):
+            if advance.get(q, 0):
+                self.cntr[q] = seq_fold(self.cntr[q] + advance[q])
+                if self.pend[q]:
+                    self.deferred += 1
+            elif self.pend[q]:
+                if self.cntr[q] % LBA_ALIGN:
+                    self.rounded += 1
+                self.cntr[q] = lba_align_up(self.cntr[q])
+                self.pend[q] = False

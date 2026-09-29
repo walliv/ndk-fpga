@@ -9,7 +9,9 @@ import functools
 import inspect
 import math
 import os
+import random
 import sys
+from unittest import mock
 
 import cocotb
 from cocotb.clock import Clock
@@ -22,6 +24,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "sw"))
 # SimplifiedDmaModel and the scoreboard are shared with the GROUPBY architecture's bench, so they
 # live one level up rather than being forked per architecture.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "cocotb_common"))
+import iuventus_rw_test  # noqa: E402
 from iuventus_rw_test import (  # noqa: E402
     IuventusTest, run_read_dispatch, run_write_dispatch, _throughput_point_start, _throughput_point_stop,
 )
@@ -32,8 +35,11 @@ import cocotbext.nfb  # noqa: E402 (must follow the compat shim above)
 from cocotbext.ofm.mi.drivers import MIRequestDriver  # noqa: E402
 from cocotbext.ofm.mfb.properties import attach_mfb_properties  # noqa: E402
 
-from dma_iuventus_model import QID_W, SimplifiedDmaModel  # noqa: E402
+from dma_iuventus_model import QID_W, SQE_LBA_PTR_W, SimplifiedDmaModel  # noqa: E402
 from user_core_model import ReadReqModel, WriteFrameModel, ExpectedReadReq, ExpectedWrFrame  # noqa: E402
+from user_core_model import (  # noqa: E402
+    ADDR_CNTR_WIDTH, LBA_ALIGN, MAX_REQ_LBAS, TST_LBA_COUNT, SeqAddrModel,
+)
 from scoreboard import Scoreboard  # noqa: E402
 
 # OP_STAT_CODE encoding on the DMA interface: 00 SUCCESS, 01 FAILURE, 10 LBA out of range.
@@ -803,6 +809,178 @@ async def _case_rd_burst_and_rand(dut, dev, test):
     await aset(test, "rd_burst", 1)  # restore the default for subsequent cases
 
 
+# The card campaign's sweep order: every random size, then sequential. The 1-, 2- and 4-LBA random
+# points leave each queue's counter off a drive unit, and the next sequential point inherited that.
+ALIGN_SWEEP_CAMPAIGN = ([("rd", "rand", s) for s in (0, 1, 3, 7, 15, 31, 63, 127, 255)]
+                        + [("rd", "seq", 7), ("rd", "seq", 255)])
+# A sequential stride that is not a whole unit, direct random-to-sequential transitions, and writes
+# starting on a residue the reads left.
+ALIGN_SWEEP_MIXED = [("rd", "seq", 2), ("rd", "seq", 7), ("rd", "rand", 0), ("rd", "seq", 7),
+                     ("rd", "rand", 1), ("wr", "seq", 7), ("wr", "rand", 7), ("rd", "rand", 0),
+                     ("wr", "seq", 15)]
+# Counters placed near the namespace end: rounding TST_LBA_COUNT-3 up lands on the end itself and
+# folds to 0, and the later sequential points run through the fold.
+ALIGN_SWEEP_FOLD = [(TST_LBA_COUNT - 3, [("rd", "seq", 7)]),
+                    (TST_LBA_COUNT - 44, [("rd", "rand", 0), ("rd", "seq", 7)]),
+                    (TST_LBA_COUNT - 40, [("rd", "seq", 7)])]
+
+
+async def _case_lba_alignment_sweep(dut, dev, test, n_queues):
+    """Test addresses start on a 4 KiB drive unit whenever the request size is whole units, sequential
+    streams stay contiguous per queue across points, and random ones leave room for the largest request."""
+    await e(test.set_queue_range)(n_queues)
+    model = SeqAddrModel(NUM_QUEUES)
+    lba_mask = (1 << ADDR_CNTR_WIDTH) - 1
+    errors = []
+    stats = {"loads": 0, "starts": 0, "points": 0}
+    point = {"name": "-", "size": 0, "scored": {}}
+    running = True
+
+    def _lvl(sig):
+        """int() of a signal, treating an X/U bit as 0 (reset leaves some briefly undefined)."""
+        try:
+            return int(sig.value)
+        except ValueError:
+            return 0
+
+    def _seq_idx(qid):
+        return qid if qid < NUM_QUEUES else 0
+
+    def _score(kind, q, lba, n_lbas, rand):
+        where = f"{kind} q{q} lba={lba:#x} lbas={n_lbas} in point {point['name']}"
+        if rand:
+            if lba % LBA_ALIGN or lba + MAX_REQ_LBAS > TST_LBA_COUNT:
+                errors.append(("random", f"{where}: off a drive unit or too close to the namespace end"))
+        else:
+            if lba != model.cntr[q]:
+                errors.append(("not contiguous", f"{where}: expected {model.cntr[q]:#x}"))
+            if n_lbas % LBA_ALIGN == 0 and lba % LBA_ALIGN:
+                errors.append(("straddles", f"{where}: straddles a drive unit"))
+        point["scored"][q] = point["scored"].get(q, 0) + 1
+
+    async def _monitor():
+        prev_contig = 0
+        while running:
+            await RisingEdge(dut.DMA_CLK)
+            await ReadOnly()
+            # A load has priority over every advance, so this cycle's accepts do not move a counter.
+            if _lvl(dut.seq_load):
+                model.load(_lvl(dut.nvme_rd_req_lba_ptr_reg) & lba_mask)
+                stats["loads"] += 1
+                prev_contig = _lvl(dut.contig_test)
+                continue
+            contig = _lvl(dut.contig_test)
+            if contig and not prev_contig:
+                model.point_start()
+                stats["starts"] += 1
+            prev_contig = contig
+            if not _lvl(dut.seq_en):
+                continue
+            rand = _lvl(dut.tst_sel_reg) & 1
+            advance = {}
+            if _lvl(dut.rd_req_accepted_s):
+                q = _seq_idx(_lvl(dut.nvme_rd_req_qid_s))
+                n_lbas = _lvl(dut.core_rd_req_lba_num) + 1
+                _score("rd", q, _lvl(dut.core_rd_req_lba_ptr), n_lbas, rand)
+                advance[q] = advance.get(q, 0) + n_lbas
+            if _lvl(dut.gen_nvme_wr_accept) & 1:
+                meta = _lvl(dut.gen_wr_meta_full)
+                q = _seq_idx(meta >> SQE_LBA_PTR_W)
+                n_lbas = point["size"] + 1
+                _score("wr", q, meta & ((1 << SQE_LBA_PTR_W) - 1), n_lbas, rand)
+                advance[q] = advance.get(q, 0) + n_lbas
+            model.step(advance)
+
+    async def _readback_counters():
+        c = test._comp
+        for q in range(n_queues):
+            await e(c.write32)(0x70, q)
+            lo = await e(c.read32)(0x74)
+            hi = await e(c.read32)(0x78)
+            got = ((hi & 1) << 32) | lo
+            if got != model.cntr[q]:
+                errors.append(("readback", f"after point {point['name']}: queue {q} counter reads "
+                                           f"{got:#x} over MI, expected {model.cntr[q]:#x}"))
+
+    async def _run_point(mode, addressing, size):
+        point.update(name=f"{mode}:{addressing}:{size}", size=size, scored={})
+        await e(_throughput_point_start)(test, mode, addressing, size)
+        await ClockCycles(dut.DMA_CLK, random.randint(800, 1600))
+        await e(_throughput_point_stop)(test, mode, sleep_fn=lambda _s: None)
+        stats["points"] += 1
+        # Requests still queued in the interface pipe drain with the point stopped; they carry the
+        # manual pointer and move no counter. Quiet must outlast a backpressure window, which hides them.
+        quiet_run = 0
+
+        def _drained():
+            nonlocal quiet_run
+            idle = _lvl(dut.NVME_RD_REQ_VLD) == 0 and not dev.dma_model._rd_busy
+            quiet_run = quiet_run + 1 if idle else 0
+            return quiet_run >= 32
+
+        assert await _wait_until(_drained, dut, max_cycles=20000), (
+            f"point {point['name']} left read requests pending")
+        await ClockCycles(dut.DMA_CLK, 20)
+        scored = dict(point["scored"])
+        need = n_queues if (mode == "rd" and addressing == "seq") else 1
+        assert sum(1 for v in scored.values() if v >= 2) >= need, (
+            f"point {point['name']} scored too few requests to check a stream: {scored}")
+        await _readback_counters()
+        cocotb.log.info(f"point {point['name']}: scored per queue {dict(sorted(scored.items()))}, "
+                        f"counters {[hex(v) for v in model.cntr]}")
+
+    async def _load(lba):
+        # Write mode keeps the read generator off across the trigger, and zero iterations end the
+        # counted run the cycle after it starts: only the load remains.
+        await aset(test, "tst_mode", "wr")
+        await aset(test, "rd_req_lba_ptr", lba)
+        loads_before = stats["loads"]
+        await e(test._comp.write32)(0x1C, 0)  # IuventusTestRegMap.TST_ITERATIONS
+        assert await _wait_until(lambda: stats["loads"] > loads_before, dut, max_cycles=2000), (
+            "TST_ITERATIONS did not load the sequential counters")
+        await ClockCycles(dut.DMA_CLK, 10)
+        point["name"] = f"load {lba:#x}"
+        await _readback_counters()
+
+    mon = cocotb.start_soon(_monitor())
+    # Out-of-range completions skip the data phase: the one-outstanding model would otherwise drain a
+    # credit pool of 128 KiB reads after every stop. Only addresses are under test.
+    dev.dma_model.lba_space_size = 0
+    dev.dma_model.enable_backpressure(bp_period=random.randint(5, 16), bp_low_cycles=random.randint(1, 4))
+    try:
+        # This DevTree has no DMA Iuventus node, so the host-side "fzc is running" guard cannot pass;
+        # it checks the card's setup, not the core.
+        with mock.patch.object(iuventus_rw_test, "assert_fzc_running", lambda _test: None):
+            for mode, addressing, size in ALIGN_SWEEP_CAMPAIGN + ALIGN_SWEEP_MIXED:
+                await _run_point(mode, addressing, size)
+            for lba, points in ALIGN_SWEEP_FOLD:
+                await _load(lba)
+                for mode, addressing, size in points:
+                    await _run_point(mode, addressing, size)
+        await _load(0)
+    finally:
+        running = False
+        await mon
+        # The monitor ends in ReadOnly; the next case's reset writes signals, so leave that phase.
+        await RisingEdge(dut.DMA_CLK)
+        dev.dma_model.lba_space_size = None
+        dev.dma_model.disable_backpressure()
+
+    by_kind = {k: sum(1 for kind, _ in errors if kind == k) for k, _ in errors}
+    firsts = [f"{k}: " + next(m for kind, m in errors if kind == k) for k in by_kind]
+    assert not errors, f"address errors {by_kind}, first of each:\n  " + "\n  ".join(firsts)
+    assert stats["starts"] == stats["points"], (
+        f"{stats['points']} points ran but contig_test rose {stats['starts']} times")
+    assert model.deferred == 0, (
+        f"a point start waited {model.deferred} cycles for an idle queue: the generator was already "
+        f"issuing when contig_test rose, so its first requests went out before the rounding")
+    # The loads at TST_LBA_COUNT-3 and -44 guarantee this even when the random points happen to
+    # leave every counter on a unit.
+    assert model.rounded > 0, "no point start rounded a counter up, so the alignment went unchecked"
+    cocotb.log.info(f"LBA alignment sweep: {stats['points']} points, {model.rounded} counters rounded "
+                    f"up at a point start, {stats['loads']} loads")
+
+
 async def _case_write_enable_disable_midstream(dut, dev, test):
     """Stage 3.5: enable the write generator, let a handful of frames pass, DISABLE it mid-stream
     (before it would have stopped on its own), confirm generation actually halts (gen.generating
@@ -1299,6 +1477,10 @@ async def test_user_core_reference_model(dut):
     await _case_latency_qd1(dut, dev, test, mode="wr")
 
     # --- Stage 3: real iuventus_rw_test.py CLI-path functions + directed corner cases ---------
+    await dev._reset()
+    dev.dma_model.reset()
+    await _case_lba_alignment_sweep(dut, dev, test, n_queues=NUM_QUEUES)
+
     await dev._reset()
     dev.dma_model.reset()
     await _case_cli_read_dispatch_sizes(dut, dev, test)
