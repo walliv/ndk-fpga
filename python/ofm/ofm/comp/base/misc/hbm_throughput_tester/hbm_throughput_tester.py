@@ -24,6 +24,10 @@ class TesterReg(IntEnum):
     BURST_LEN = 0x08
     PORT_EN   = 0x0C
     ADDR_MASK = 0x10
+    W_BURST   = 0x14
+    AR_GAP    = 0x18
+    AW_GAP    = 0x1C
+    W_BASE    = 0x20
 
 
 class CtrlBit(IntEnum):
@@ -33,16 +37,20 @@ class CtrlBit(IntEnum):
     WR_EN = 3
 
 
-# Per-port counter block. Each counter is 48 b, read as a low and a high word except the two
-# stall counters, which are read low-word only.
+# Per-port counter block. The cycle and beat counters are 48 b, read as a low and a high word;
+# the rest are read low-word only.
 CNT_BASE   = 0x40
-CNT_STRIDE = 0x20
+CNT_STRIDE = 0x40
 
 CNT_CYCLES   = 0x00
 CNT_R_BEATS  = 0x08
 CNT_W_BEATS  = 0x10
 CNT_AR_STALL = 0x18
 CNT_AW_STALL = 0x1C
+CNT_W_STALL  = 0x20
+CNT_R_IDLE   = 0x24
+CNT_R_RUNS   = 0x28
+CNT_W_RUNS   = 0x2C
 
 # One HBM port is 256 b wide; the clock it runs at sets what a beat is worth.
 BEAT_BYTES  = 32
@@ -58,6 +66,10 @@ class PortResult:
     w_beats: int
     ar_stall: int
     aw_stall: int
+    w_stall: int = 0
+    r_idle: int = 0
+    r_runs: int = 0
+    w_runs: int = 0
 
     @property
     def read_gbps(self) -> float:
@@ -70,6 +82,16 @@ class PortResult:
     @property
     def total_gbps(self) -> float:
         return self.read_gbps + self.write_gbps
+
+    @property
+    def r_run_beats(self) -> float:
+        """Mean length of a run of back-to-back R beats: the read grant granularity."""
+        return self.r_beats / self.r_runs if self.r_runs else 0.0
+
+    @property
+    def w_run_beats(self) -> float:
+        """Mean length of a run of back-to-back accepted W beats."""
+        return self.w_beats / self.w_runs if self.w_runs else 0.0
 
     @property
     def utilisation(self) -> float:
@@ -107,6 +129,41 @@ class HbmThroughputTester(nfb.BaseComp):
         self._comp.write32(TesterReg.BURST_LEN.value, val & 0xF)
 
     @property
+    def w_burst_len(self) -> int:
+        """Write AxLEN only; `burst_len` sets both directions, this overrides the write one."""
+        return self._comp.read32(TesterReg.W_BURST.value) & 0xF
+
+    @w_burst_len.setter
+    def w_burst_len(self, val: int) -> None:
+        self._comp.write32(TesterReg.W_BURST.value, val & 0xF)
+
+    @property
+    def ar_gap(self) -> int:
+        """Idle cycles forced after each AR, so an AR offer of (len+1)/(gap+1) beats per cycle."""
+        return self._comp.read32(TesterReg.AR_GAP.value) & 0xFFFF
+
+    @ar_gap.setter
+    def ar_gap(self, val: int) -> None:
+        self._comp.write32(TesterReg.AR_GAP.value, val & 0xFFFF)
+
+    @property
+    def aw_gap(self) -> int:
+        return self._comp.read32(TesterReg.AW_GAP.value) & 0xFFFF
+
+    @aw_gap.setter
+    def aw_gap(self, val: int) -> None:
+        self._comp.write32(TesterReg.AW_GAP.value, val & 0xFFFF)
+
+    @property
+    def w_base(self) -> int:
+        return self._comp.read32(TesterReg.W_BASE.value)
+
+    @w_base.setter
+    def w_base(self, val: int) -> None:
+        """ORed onto every write address; above addr_mask it keeps writes off the rows reads walk."""
+        self._comp.write32(TesterReg.W_BASE.value, val)
+
+    @property
     def port_en(self) -> int:
         return self._comp.read32(TesterReg.PORT_EN.value)
 
@@ -141,20 +198,29 @@ class HbmThroughputTester(nfb.BaseComp):
                           r_beats=self._cnt48(port, CNT_R_BEATS),
                           w_beats=self._cnt48(port, CNT_W_BEATS),
                           ar_stall=self._cnt32(port, CNT_AR_STALL),
-                          aw_stall=self._cnt32(port, CNT_AW_STALL))
+                          aw_stall=self._cnt32(port, CNT_AW_STALL),
+                          w_stall=self._cnt32(port, CNT_W_STALL),
+                          r_idle=self._cnt32(port, CNT_R_IDLE),
+                          r_runs=self._cnt32(port, CNT_R_RUNS),
+                          w_runs=self._cnt32(port, CNT_W_RUNS))
 
     # ---- one measurement -------------------------------------------------------------------
     def run(self, seconds: float = 0.5, read: bool = True, write: bool = False,
-            port_mask: int = None, burst_len: int = 15):
+            port_mask: int = None, burst_len: int = 15, w_burst_len: int = None,
+            ar_gap: int = 0, aw_gap: int = 0):
         """Run one traffic pattern and return a PortResult per enabled port.
 
         `seconds` only decides how long the generator is left armed; the rate comes from the
-        counters it kept while running.
+        counters it kept while running. `w_burst_len` defaults to `burst_len`; the gaps rate-limit
+        the address issue of each direction.
         """
         if port_mask is None:
             port_mask = (1 << self.ports) - 1
         self.stop()
         self.burst_len = burst_len
+        self.w_burst_len = burst_len if w_burst_len is None else w_burst_len
+        self.ar_gap = ar_gap
+        self.aw_gap = aw_gap
         self.port_en = port_mask
         self.clear()
         self._ctrl(run=True, rd=read, wr=write)

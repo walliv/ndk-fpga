@@ -13,7 +13,9 @@ use work.type_pack.all;
 
 -- Measures what an HBM pseudo-channel delivers: back-to-back INCR bursts, beats vs cycles, in the
 -- HBM port clock domain. Per-channel accepted/stalled counters name the refusing channel;
--- read+write together exposes the turnaround mixed traffic pays.
+-- read+write together exposes the turnaround mixed traffic pays. Separate R/W burst lengths and
+-- address-issue gaps offer asymmetric or rate-limited mixes, so the controller's R/W arbitration
+-- shows as the split it grants.
 entity HBM_THROUGHPUT_TESTER is
     generic (
         -- MI bus width
@@ -101,9 +103,14 @@ architecture FULL of HBM_THROUGHPUT_TESTER is
     constant A_BURST_LEN  : natural := 16#08#;
     constant A_PORT_EN    : natural := 16#0C#;
     constant A_ADDR_MASK  : natural := 16#10#;
+    constant A_W_BURST    : natural := 16#14#;
+    constant A_AR_GAP     : natural := 16#18#;
+    constant A_AW_GAP     : natural := 16#1C#;
+    constant A_W_BASE     : natural := 16#20#;
     -- Per-port counter block: A_CNT_BASE + port*A_CNT_STRIDE + field.
     constant A_CNT_BASE   : natural := 16#40#;
-    constant A_CNT_STRIDE : natural := 16#20#;
+    constant A_CNT_STRIDE : natural := 16#40#;
+    constant GAP_W        : natural := 16;
 
     -- CTRL bits
     constant C_RUN   : natural := 0;
@@ -115,8 +122,12 @@ architecture FULL of HBM_THROUGHPUT_TESTER is
     signal rd_en_r     : std_logic;
     signal wr_en_r     : std_logic;
     signal burst_len_r : unsigned(HBM_LEN_WIDTH-1 downto 0);
+    signal w_burst_r   : unsigned(HBM_LEN_WIDTH-1 downto 0);
+    signal ar_gap_r    : unsigned(GAP_W-1 downto 0);
+    signal aw_gap_r    : unsigned(GAP_W-1 downto 0);
     signal port_en_r   : std_logic_vector(PORTS-1 downto 0);
     signal addr_mask_r : unsigned(HBM_ADDR_WIDTH-1 downto 0);
+    signal w_base_r    : unsigned(HBM_ADDR_WIDTH-1 downto 0);
     signal clr_s       : std_logic;
 
     -- Per-port generator state
@@ -125,7 +136,9 @@ architecture FULL of HBM_THROUGHPUT_TESTER is
     signal ar_outst_r : u_array_t(PORTS-1 downto 0)(OUTST_W-1 downto 0);
     signal aw_outst_r : u_array_t(PORTS-1 downto 0)(OUTST_W-1 downto 0);
     signal w_left_r   : u_array_t(PORTS-1 downto 0)(HBM_LEN_WIDTH downto 0);
-    signal w_active_r : std_logic_vector(PORTS-1 downto 0);
+    signal w_pend_r   : u_array_t(PORTS-1 downto 0)(OUTST_W-1 downto 0);
+    signal ar_wait_r  : u_array_t(PORTS-1 downto 0)(GAP_W-1 downto 0);
+    signal aw_wait_r  : u_array_t(PORTS-1 downto 0)(GAP_W-1 downto 0);
     signal wdata_r    : u_array_t(PORTS-1 downto 0)(HBM_DATA_WIDTH-1 downto 0);
 
     -- Counters: cycles the run was armed, beats accepted, and handshakes the port refused.
@@ -136,6 +149,11 @@ architecture FULL of HBM_THROUGHPUT_TESTER is
     signal aws_cnt_r  : u_array_t(PORTS-1 downto 0)(CNT_W-1 downto 0);
     signal ws_cnt_r   : u_array_t(PORTS-1 downto 0)(CNT_W-1 downto 0);
     signal rdry_cnt_r : u_array_t(PORTS-1 downto 0)(CNT_W-1 downto 0);
+    -- Runs of consecutive data beats: beats/runs is the grant granularity the controller uses.
+    signal rrun_cnt_r : u_array_t(PORTS-1 downto 0)(CNT_W-1 downto 0);
+    signal wrun_cnt_r : u_array_t(PORTS-1 downto 0)(CNT_W-1 downto 0);
+    signal r_fire_q_r : std_logic_vector(PORTS-1 downto 0);
+    signal w_fire_q_r : std_logic_vector(PORTS-1 downto 0);
     signal err_r      : std_logic_vector(PORTS-1 downto 0);
 
     signal ar_fire_s : std_logic_vector(PORTS-1 downto 0);
@@ -176,8 +194,12 @@ begin
                 rd_en_r     <= '1';
                 wr_en_r     <= '0';
                 burst_len_r <= (others => '1');
+                w_burst_r   <= (others => '1');
+                ar_gap_r    <= (others => '0');
+                aw_gap_r    <= (others => '0');
                 port_en_r   <= (others => '1');
                 addr_mask_r <= (others => '1');
+                w_base_r    <= (others => '0');
             elsif (MI_WR = '1') then
                 case to_integer(mi_addr_u(11 downto 0)) is
                     when A_CTRL =>
@@ -185,7 +207,15 @@ begin
                         rd_en_r <= MI_DWR(C_RD_EN);
                         wr_en_r <= MI_DWR(C_WR_EN);
                     when A_BURST_LEN =>
+                        -- Sets both directions, so the symmetric sweeps stay a single write.
                         burst_len_r <= unsigned(MI_DWR(HBM_LEN_WIDTH-1 downto 0));
+                        w_burst_r   <= unsigned(MI_DWR(HBM_LEN_WIDTH-1 downto 0));
+                    when A_W_BURST =>
+                        w_burst_r <= unsigned(MI_DWR(HBM_LEN_WIDTH-1 downto 0));
+                    when A_AR_GAP =>
+                        ar_gap_r <= unsigned(MI_DWR(GAP_W-1 downto 0));
+                    when A_AW_GAP =>
+                        aw_gap_r <= unsigned(MI_DWR(GAP_W-1 downto 0));
                     when A_PORT_EN =>
                         port_en_r <= MI_DWR(PORTS-1 downto 0);
                     when A_ADDR_MASK =>
@@ -193,6 +223,11 @@ begin
                         -- default covers the whole pseudo-channel; a small mask keeps the traffic
                         -- inside one DRAM page and separates page-hit rate from raw bandwidth.
                         addr_mask_r <= resize(unsigned(MI_DWR), HBM_ADDR_WIDTH);
+                    when A_W_BASE =>
+                        -- ORed onto the write address: with bits above ADDR_MASK the write stream
+                        -- walks rows the read stream never touches, so no same-address ordering
+                        -- couples the two and the split shows the arbitration alone.
+                        w_base_r <= resize(unsigned(MI_DWR), HBM_ADDR_WIDTH);
                     when others =>
                         null;
                 end case;
@@ -224,6 +259,14 @@ begin
                         mi_drd_r(HBM_LEN_WIDTH-1 downto 0) <= std_logic_vector(burst_len_r);
                     when A_PORT_EN =>
                         mi_drd_r(PORTS-1 downto 0) <= port_en_r;
+                    when A_W_BURST =>
+                        mi_drd_r(HBM_LEN_WIDTH-1 downto 0) <= std_logic_vector(w_burst_r);
+                    when A_AR_GAP =>
+                        mi_drd_r(GAP_W-1 downto 0) <= std_logic_vector(ar_gap_r);
+                    when A_AW_GAP =>
+                        mi_drd_r(GAP_W-1 downto 0) <= std_logic_vector(aw_gap_r);
+                    when A_W_BASE =>
+                        mi_drd_r <= std_logic_vector(resize(w_base_r, MI_WIDTH));
                     when others =>
                         null;
                 end case;
@@ -232,11 +275,15 @@ begin
                 field_v := (to_integer(mi_addr_u(11 downto 0)) - A_CNT_BASE) mod A_CNT_STRIDE;
                 if (idx_v < PORTS) then
                     case field_v / 4 is
-                        when 0 | 1 => cnt_v := cyc_cnt_r(idx_v);
-                        when 2 | 3 => cnt_v := rb_cnt_r(idx_v);
-                        when 4 | 5 => cnt_v := wb_cnt_r(idx_v);
-                        when 6     => cnt_v := ars_cnt_r(idx_v);
-                        when 7     => cnt_v := aws_cnt_r(idx_v);
+                        when 0 | 1  => cnt_v := cyc_cnt_r(idx_v);
+                        when 2 | 3  => cnt_v := rb_cnt_r(idx_v);
+                        when 4 | 5  => cnt_v := wb_cnt_r(idx_v);
+                        when 6      => cnt_v := ars_cnt_r(idx_v);
+                        when 7      => cnt_v := aws_cnt_r(idx_v);
+                        when 8      => cnt_v := ws_cnt_r(idx_v);
+                        when 9      => cnt_v := rdry_cnt_r(idx_v);
+                        when 10     => cnt_v := rrun_cnt_r(idx_v);
+                        when 11     => cnt_v := wrun_cnt_r(idx_v);
                         when others => cnt_v := (others => '0');
                     end case;
                     -- Even word = low 32 b, odd word = the rest. A 48 b counter at 450 MHz wraps
@@ -260,13 +307,15 @@ begin
 
         -- Hold AR/AW asserted whenever the run is armed and the port has credit; the port's own
         -- READY is what paces the burst rate, which is the quantity being measured.
+        -- AW runs ahead of W (up to the outstanding credit) so a short write burst is not paced by an
+        -- AW bubble between bursts; a non-zero gap register throttles the offered rate instead.
         arvalid_s(p) <= '1' when (RST = '0' and run_r = '1' and rd_en_r = '1' and port_en_r(p) = '1'
-                                   and ar_outst_r(p) < MAX_OUTSTANDING) else
+                                   and ar_outst_r(p) < MAX_OUTSTANDING and ar_wait_r(p) = 0) else
                         '0';
         awvalid_s(p) <= '1' when (RST = '0' and run_r = '1' and wr_en_r = '1' and port_en_r(p) = '1'
-                                   and aw_outst_r(p) < MAX_OUTSTANDING and w_active_r(p) = '0') else
+                                   and aw_outst_r(p) < MAX_OUTSTANDING and aw_wait_r(p) = 0) else
                         '0';
-        wvalid_s(p)  <= '1' when (RST = '0' and w_active_r(p) = '1') else
+        wvalid_s(p)  <= '1' when (RST = '0' and w_left_r(p) /= 0) else
                         '0';
 
         ar_fire_s(p) <= arvalid_s(p) and AXI_ARREADY(p);
@@ -281,11 +330,11 @@ begin
         AXI_BREADY(p)  <= '1';
 
         AXI_ARADDR(p)  <= ar_addr_r(p);
-        AXI_AWADDR(p)  <= aw_addr_r(p);
+        AXI_AWADDR(p)  <= aw_addr_r(p) or std_logic_vector(w_base_r);
         AXI_ARID(p)    <= (others => '0');
         AXI_AWID(p)    <= (others => '0');
         AXI_ARLEN(p)   <= std_logic_vector(burst_len_r);
-        AXI_AWLEN(p)   <= std_logic_vector(burst_len_r);
+        AXI_AWLEN(p)   <= std_logic_vector(w_burst_r);
         AXI_ARSIZE(p)  <= "101";
         AXI_AWSIZE(p)  <= "101";
         AXI_ARBURST(p) <= "01";
@@ -296,12 +345,15 @@ begin
                           '0';
 
         gen_p : process (CLK) is
-            variable step_v : unsigned(HBM_ADDR_WIDTH-1 downto 0);
+            variable r_step_v : unsigned(HBM_ADDR_WIDTH-1 downto 0);
+            variable w_step_v : unsigned(HBM_ADDR_WIDTH-1 downto 0);
+            variable pend_v   : unsigned(OUTST_W-1 downto 0);
         begin
             if (rising_edge(CLK)) then
                 -- Bytes one burst covers. Address advances by exactly this, so a burst is always
                 -- aligned to its own length and can never cross the AXI 4 KB boundary.
-                step_v := to_unsigned((to_integer(burst_len_r) + 1) * BEAT_BYTES, HBM_ADDR_WIDTH);
+                r_step_v := to_unsigned((to_integer(burst_len_r) + 1) * BEAT_BYTES, HBM_ADDR_WIDTH);
+                w_step_v := to_unsigned((to_integer(w_burst_r) + 1) * BEAT_BYTES, HBM_ADDR_WIDTH);
 
                 if (RST = '1') then
                     ar_addr_r(p)  <= (others => '0');
@@ -309,17 +361,41 @@ begin
                     ar_outst_r(p) <= (others => '0');
                     aw_outst_r(p) <= (others => '0');
                     w_left_r(p)   <= (others => '0');
-                    w_active_r(p) <= '0';
+                    w_pend_r(p)   <= (others => '0');
+                    ar_wait_r(p)  <= (others => '0');
+                    aw_wait_r(p)  <= (others => '0');
                     wdata_r(p)    <= (others => '0');
                 else
                     if (ar_fire_s(p) = '1') then
-                        ar_addr_r(p) <= std_logic_vector((unsigned(ar_addr_r(p)) + step_v) and addr_mask_r);
+                        ar_addr_r(p) <= std_logic_vector((unsigned(ar_addr_r(p)) + r_step_v) and addr_mask_r);
+                        ar_wait_r(p) <= ar_gap_r;
+                    elsif (ar_wait_r(p) /= 0) then
+                        ar_wait_r(p) <= ar_wait_r(p) - 1;
                     end if;
                     if (aw_fire_s(p) = '1') then
-                        aw_addr_r(p)  <= std_logic_vector((unsigned(aw_addr_r(p)) + step_v) and addr_mask_r);
-                        w_active_r(p) <= '1';
-                        w_left_r(p)   <= resize(burst_len_r, HBM_LEN_WIDTH+1) + 1;
+                        aw_addr_r(p) <= std_logic_vector((unsigned(aw_addr_r(p)) + w_step_v) and addr_mask_r);
+                        aw_wait_r(p) <= aw_gap_r;
+                    elsif (aw_wait_r(p) /= 0) then
+                        aw_wait_r(p) <= aw_wait_r(p) - 1;
                     end if;
+
+                    -- W bursts owed by accepted AWs; the next one loads on the last beat of the
+                    -- current one, so W streams without a bubble.
+                    pend_v := w_pend_r(p);
+                    if (aw_fire_s(p) = '1') then
+                        pend_v := pend_v + 1;
+                    end if;
+                    if (w_left_r(p) = 0 or (w_fire_s(p) = '1' and w_left_r(p) = 1)) then
+                        if (pend_v /= 0) then
+                            pend_v      := pend_v - 1;
+                            w_left_r(p) <= resize(w_burst_r, HBM_LEN_WIDTH+1) + 1;
+                        else
+                            w_left_r(p) <= (others => '0');
+                        end if;
+                    elsif (w_fire_s(p) = '1') then
+                        w_left_r(p) <= w_left_r(p) - 1;
+                    end if;
+                    w_pend_r(p) <= pend_v;
 
                     -- Outstanding credit: one per issued burst, returned on RLAST / BVALID.
                     if (ar_fire_s(p) = '1' and not (AXI_RVALID(p) = '1' and AXI_RLAST(p) = '1')) then
@@ -335,12 +411,6 @@ begin
 
                     if (w_fire_s(p) = '1') then
                         wdata_r(p) <= wdata_r(p) + 1;
-                        if (w_left_r(p) = 1) then
-                            w_active_r(p) <= '0';
-                            w_left_r(p)   <= (others => '0');
-                        else
-                            w_left_r(p) <= w_left_r(p) - 1;
-                        end if;
                     end if;
                 end if;
             end if;
@@ -357,8 +427,20 @@ begin
                     aws_cnt_r(p)  <= (others => '0');
                     ws_cnt_r(p)   <= (others => '0');
                     rdry_cnt_r(p) <= (others => '0');
+                    rrun_cnt_r(p) <= (others => '0');
+                    wrun_cnt_r(p) <= (others => '0');
+                    r_fire_q_r(p) <= '0';
+                    w_fire_q_r(p) <= '0';
                     err_r(p)      <= '0';
                 else
+                    r_fire_q_r(p) <= r_fire_s(p);
+                    w_fire_q_r(p) <= w_fire_s(p);
+                    if (r_fire_s(p) = '1' and r_fire_q_r(p) = '0') then
+                        rrun_cnt_r(p) <= rrun_cnt_r(p) + 1;
+                    end if;
+                    if (w_fire_s(p) = '1' and w_fire_q_r(p) = '0') then
+                        wrun_cnt_r(p) <= wrun_cnt_r(p) + 1;
+                    end if;
                     if (run_r = '1') then
                         cyc_cnt_r(p) <= cyc_cnt_r(p) + 1;
                     end if;
