@@ -154,11 +154,10 @@ architecture FULL of CORE_LOGIC is
     constant HBM_SIZE_WIDTH  : natural := 3;
     constant HBM_RESP_WIDTH  : natural := 2;
 
-    -- One port per bank, BOTH directions: fill on AW/W/B, drain on AR/R. Index = ep*4 + buf*2 +
-    -- port (buf 0 = WRBUFF, 1 = RDBUFF). Stack-1 ports land in clock regions X4Y0 (16-19), X5Y0
-    -- (20-24), X6Y0 (25-29), X7Y0 (30-31): endpoint 0 takes X4/X5, endpoint 1 sits in X6 beside its
-    -- PCIe block at X7Y0, and no pool straddles two regions.
-    constant HBM_DMA_PORT : n_array_t(0 to 7) := (19, 18, 20, 21, 25, 26, 28, 29);
+    -- One port per bank, BOTH directions: fill on AW/W/B, drain on AR/R. Index = ep*6 + slot (slots
+    -- 0-3 WRBUFF, one pseudo-channel each; 4-5 RDBUFF). Stack-1 ports land in clock regions X4Y0
+    -- (16-19), X5Y0 (20-24), X6Y0 (25-29), X7Y0 (30-31); 30/31 stay free.
+    constant HBM_DMA_PORT : n_array_t(0 to 11) := (16, 17, 18, 19, 20, 21, 24, 25, 26, 27, 28, 29);
 
     -- Every port addresses only its own pseudo-channel, so every base is 0. The former
     -- hbm_port_base_f(idx) = idx * 0x2000_0000 global map is gone with the switch that needed it.
@@ -172,7 +171,7 @@ architecture FULL of CORE_LOGIC is
     constant HBM_RDBUFF_RD_PORT0_BASE : std_logic_vector(34-1 downto 0) := HBM_ZERO_BASE;
     constant HBM_RDBUFF_RD_PORT1_BASE : std_logic_vector(34-1 downto 0) := HBM_ZERO_BASE;
 
-    -- Ports the DMA drives directly: any HBM_DMA_PORT entry within the first 4*DMA_STREAMS slots
+    -- Ports the DMA drives directly: any HBM_DMA_PORT entry within the first 6*DMA_STREAMS slots
     -- (the endpoints actually in use). A port missing here is tied off and never returns BRESP.
     -- With CQ_SINK there is no DMA, so no port is driven.
     function hbm_dma_driven_port_f (idx : natural) return boolean is
@@ -182,7 +181,7 @@ architecture FULL of CORE_LOGIC is
             return false;
         end if;
 
-        for p in 0 to 4*DMA_STREAMS-1 loop
+        for p in 0 to 6*DMA_STREAMS-1 loop
             if (idx = HBM_DMA_PORT(p)) then
                 driven := true;
             end if;
@@ -530,39 +529,39 @@ architecture FULL of CORE_LOGIC is
     signal cdc_axi_bvalid : std_logic_vector(HBM_PORTS-1 downto 0);
     signal cdc_axi_bready : std_logic_vector(HBM_PORTS-1 downto 0);
 
-    -- DMA_IUVENTUS's own flat HBM_AXI_* ports, indexed i = ep*4 + buf*2 + port (0 to 4*DMA_STREAMS-1,
+    -- DMA_IUVENTUS's own flat HBM_AXI_* ports, indexed i = ep*6 + slot (0 to 6*DMA_STREAMS-1,
     -- same scheme as HBM_DMA_PORT); hbm_axi_map_g below is the only place these connect to
     -- cdc_axi_*(HBM_DMA_PORT(i)). Multi-bit fields ascend "0 to", matching DMA_IUVENTUS's own
     -- slv_array_t ports; the plain std_logic_vector fields descend "downto 0", matching those ports.
-    signal dma_hbm_axi_awaddr  : slv_array_t(0 to 4*DMA_STREAMS-1)(HBM_ADDR_WIDTH-1 downto 0);
-    signal dma_hbm_axi_awid    : slv_array_t(0 to 4*DMA_STREAMS-1)(HBM_ID_WIDTH-1 downto 0);
-    signal dma_hbm_axi_awlen   : slv_array_t(0 to 4*DMA_STREAMS-1)(HBM_LEN_WIDTH-1 downto 0);
-    signal dma_hbm_axi_awsize  : slv_array_t(0 to 4*DMA_STREAMS-1)(HBM_SIZE_WIDTH-1 downto 0);
-    signal dma_hbm_axi_awburst : slv_array_t(0 to 4*DMA_STREAMS-1)(HBM_BURST_WIDTH-1 downto 0);
-    signal dma_hbm_axi_awvalid : std_logic_vector(4*DMA_STREAMS-1 downto 0);
-    signal dma_hbm_axi_awready : std_logic_vector(4*DMA_STREAMS-1 downto 0);
-    signal dma_hbm_axi_wdata   : slv_array_t(0 to 4*DMA_STREAMS-1)(HBM_DATA_WIDTH-1 downto 0);
-    signal dma_hbm_axi_wstrb   : slv_array_t(0 to 4*DMA_STREAMS-1)((HBM_DATA_WIDTH/8)-1 downto 0);
-    signal dma_hbm_axi_wlast   : std_logic_vector(4*DMA_STREAMS-1 downto 0);
-    signal dma_hbm_axi_wvalid  : std_logic_vector(4*DMA_STREAMS-1 downto 0);
-    signal dma_hbm_axi_wready  : std_logic_vector(4*DMA_STREAMS-1 downto 0);
-    signal dma_hbm_axi_bid     : slv_array_t(0 to 4*DMA_STREAMS-1)(HBM_ID_WIDTH-1 downto 0);
-    signal dma_hbm_axi_bresp   : slv_array_t(0 to 4*DMA_STREAMS-1)(HBM_RESP_WIDTH-1 downto 0);
-    signal dma_hbm_axi_bvalid  : std_logic_vector(4*DMA_STREAMS-1 downto 0);
-    signal dma_hbm_axi_bready  : std_logic_vector(4*DMA_STREAMS-1 downto 0);
-    signal dma_hbm_axi_araddr  : slv_array_t(0 to 4*DMA_STREAMS-1)(HBM_ADDR_WIDTH-1 downto 0);
-    signal dma_hbm_axi_arid    : slv_array_t(0 to 4*DMA_STREAMS-1)(HBM_ID_WIDTH-1 downto 0);
-    signal dma_hbm_axi_arlen   : slv_array_t(0 to 4*DMA_STREAMS-1)(HBM_LEN_WIDTH-1 downto 0);
-    signal dma_hbm_axi_arsize  : slv_array_t(0 to 4*DMA_STREAMS-1)(HBM_SIZE_WIDTH-1 downto 0);
-    signal dma_hbm_axi_arburst : slv_array_t(0 to 4*DMA_STREAMS-1)(HBM_BURST_WIDTH-1 downto 0);
-    signal dma_hbm_axi_arvalid : std_logic_vector(4*DMA_STREAMS-1 downto 0);
-    signal dma_hbm_axi_arready : std_logic_vector(4*DMA_STREAMS-1 downto 0);
-    signal dma_hbm_axi_rdata   : slv_array_t(0 to 4*DMA_STREAMS-1)(HBM_DATA_WIDTH-1 downto 0);
-    signal dma_hbm_axi_rid     : slv_array_t(0 to 4*DMA_STREAMS-1)(HBM_ID_WIDTH-1 downto 0);
-    signal dma_hbm_axi_rresp   : slv_array_t(0 to 4*DMA_STREAMS-1)(HBM_RESP_WIDTH-1 downto 0);
-    signal dma_hbm_axi_rlast   : std_logic_vector(4*DMA_STREAMS-1 downto 0);
-    signal dma_hbm_axi_rvalid  : std_logic_vector(4*DMA_STREAMS-1 downto 0);
-    signal dma_hbm_axi_rready  : std_logic_vector(4*DMA_STREAMS-1 downto 0);
+    signal dma_hbm_axi_awaddr  : slv_array_t(0 to 6*DMA_STREAMS-1)(HBM_ADDR_WIDTH-1 downto 0);
+    signal dma_hbm_axi_awid    : slv_array_t(0 to 6*DMA_STREAMS-1)(HBM_ID_WIDTH-1 downto 0);
+    signal dma_hbm_axi_awlen   : slv_array_t(0 to 6*DMA_STREAMS-1)(HBM_LEN_WIDTH-1 downto 0);
+    signal dma_hbm_axi_awsize  : slv_array_t(0 to 6*DMA_STREAMS-1)(HBM_SIZE_WIDTH-1 downto 0);
+    signal dma_hbm_axi_awburst : slv_array_t(0 to 6*DMA_STREAMS-1)(HBM_BURST_WIDTH-1 downto 0);
+    signal dma_hbm_axi_awvalid : std_logic_vector(6*DMA_STREAMS-1 downto 0);
+    signal dma_hbm_axi_awready : std_logic_vector(6*DMA_STREAMS-1 downto 0);
+    signal dma_hbm_axi_wdata   : slv_array_t(0 to 6*DMA_STREAMS-1)(HBM_DATA_WIDTH-1 downto 0);
+    signal dma_hbm_axi_wstrb   : slv_array_t(0 to 6*DMA_STREAMS-1)((HBM_DATA_WIDTH/8)-1 downto 0);
+    signal dma_hbm_axi_wlast   : std_logic_vector(6*DMA_STREAMS-1 downto 0);
+    signal dma_hbm_axi_wvalid  : std_logic_vector(6*DMA_STREAMS-1 downto 0);
+    signal dma_hbm_axi_wready  : std_logic_vector(6*DMA_STREAMS-1 downto 0);
+    signal dma_hbm_axi_bid     : slv_array_t(0 to 6*DMA_STREAMS-1)(HBM_ID_WIDTH-1 downto 0);
+    signal dma_hbm_axi_bresp   : slv_array_t(0 to 6*DMA_STREAMS-1)(HBM_RESP_WIDTH-1 downto 0);
+    signal dma_hbm_axi_bvalid  : std_logic_vector(6*DMA_STREAMS-1 downto 0);
+    signal dma_hbm_axi_bready  : std_logic_vector(6*DMA_STREAMS-1 downto 0);
+    signal dma_hbm_axi_araddr  : slv_array_t(0 to 6*DMA_STREAMS-1)(HBM_ADDR_WIDTH-1 downto 0);
+    signal dma_hbm_axi_arid    : slv_array_t(0 to 6*DMA_STREAMS-1)(HBM_ID_WIDTH-1 downto 0);
+    signal dma_hbm_axi_arlen   : slv_array_t(0 to 6*DMA_STREAMS-1)(HBM_LEN_WIDTH-1 downto 0);
+    signal dma_hbm_axi_arsize  : slv_array_t(0 to 6*DMA_STREAMS-1)(HBM_SIZE_WIDTH-1 downto 0);
+    signal dma_hbm_axi_arburst : slv_array_t(0 to 6*DMA_STREAMS-1)(HBM_BURST_WIDTH-1 downto 0);
+    signal dma_hbm_axi_arvalid : std_logic_vector(6*DMA_STREAMS-1 downto 0);
+    signal dma_hbm_axi_arready : std_logic_vector(6*DMA_STREAMS-1 downto 0);
+    signal dma_hbm_axi_rdata   : slv_array_t(0 to 6*DMA_STREAMS-1)(HBM_DATA_WIDTH-1 downto 0);
+    signal dma_hbm_axi_rid     : slv_array_t(0 to 6*DMA_STREAMS-1)(HBM_ID_WIDTH-1 downto 0);
+    signal dma_hbm_axi_rresp   : slv_array_t(0 to 6*DMA_STREAMS-1)(HBM_RESP_WIDTH-1 downto 0);
+    signal dma_hbm_axi_rlast   : std_logic_vector(6*DMA_STREAMS-1 downto 0);
+    signal dma_hbm_axi_rvalid  : std_logic_vector(6*DMA_STREAMS-1 downto 0);
+    signal dma_hbm_axi_rready  : std_logic_vector(6*DMA_STREAMS-1 downto 0);
 
     component hbm_ip
         port (
@@ -2066,9 +2065,9 @@ begin
 
         dma_pcie_ep_rst(0) <= dma_rst_pipe_r(1);
 
-        -- Straight index-to-index copy between DMA_IUVENTUS's own flat HBM_AXI_* arrays (i = ep*4 +
-        -- buf*2 + port) and the shared cdc_axi_* signals at HBM_DMA_PORT(i) -- see hbm_dma_driven_port_f.
-        hbm_axi_map_g : for i in 0 to 4*DMA_STREAMS-1 generate
+        -- Straight index-to-index copy between DMA_IUVENTUS's own flat HBM_AXI_* arrays (i = ep*6 +
+        -- slot) and the shared cdc_axi_* signals at HBM_DMA_PORT(i) -- see hbm_dma_driven_port_f.
+        hbm_axi_map_g : for i in 0 to 6*DMA_STREAMS-1 generate
             cdc_axi_awaddr(HBM_DMA_PORT(i))  <= dma_hbm_axi_awaddr(i);
             cdc_axi_awid(HBM_DMA_PORT(i))    <= dma_hbm_axi_awid(i);
             cdc_axi_awlen(HBM_DMA_PORT(i))   <= dma_hbm_axi_awlen(i);
@@ -2131,19 +2130,22 @@ begin
                 -- Hold each endpoint's WRBUFF drain AR issue while its ingest FIFO fills.
                 DRAIN_HOLD_EN => true,
 
+                -- WRBUFF over four pseudo-channels per endpoint, so the fill never shares a bus with
+                -- a catch-up drain beyond the HBM's mixed-traffic budget.
+                WRBUFF_SUBSTRIPE => true,
+
                 -- Streams feeding this one DMA instance: queue/endpoint plumbing only (see
                 -- DMA_IUVENTUS's own PCIE_ENDPOINTS generic comment).
                 PCIE_ENDPOINTS => DMA_STREAMS,
 
-                -- HBM_WR_BASE/HBM_RD_BASE index i = ep*4 + buf*2 + port; endpoint 0's own four
-                -- named bases are explicit (named aggregate choices, so this stays correct
-                -- regardless of DMA_STREAMS), endpoint 1's and beyond are HBM_ZERO_BASE like today
-                -- -- every port addresses only its own pseudo-channel.
-                HBM_WR_BASE => (0 => HBM_WRBUFF_WR_PORT0_BASE, 1 => HBM_WRBUFF_WR_PORT1_BASE,
-                                2 => HBM_RDBUFF_WR_PORT0_BASE, 3 => HBM_RDBUFF_WR_PORT1_BASE,
+                -- HBM_WR_BASE/HBM_RD_BASE index i = ep*6 + slot; WRBUFF logical port l takes slot 2*l's
+                -- base. Endpoint 0's named bases are explicit, the rest are HBM_ZERO_BASE: every port
+                -- addresses only its own pseudo-channel.
+                HBM_WR_BASE => (0 => HBM_WRBUFF_WR_PORT0_BASE, 2 => HBM_WRBUFF_WR_PORT1_BASE,
+                                4 => HBM_RDBUFF_WR_PORT0_BASE, 5 => HBM_RDBUFF_WR_PORT1_BASE,
                                 others => HBM_ZERO_BASE),
-                HBM_RD_BASE => (0 => HBM_WRBUFF_RD_PORT0_BASE, 1 => HBM_WRBUFF_RD_PORT1_BASE,
-                                2 => HBM_RDBUFF_RD_PORT0_BASE, 3 => HBM_RDBUFF_RD_PORT1_BASE,
+                HBM_RD_BASE => (0 => HBM_WRBUFF_RD_PORT0_BASE, 2 => HBM_WRBUFF_RD_PORT1_BASE,
+                                4 => HBM_RDBUFF_RD_PORT0_BASE, 5 => HBM_RDBUFF_RD_PORT1_BASE,
                                 others => HBM_ZERO_BASE)
             )
             port map (
