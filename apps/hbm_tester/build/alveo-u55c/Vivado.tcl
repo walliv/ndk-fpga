@@ -108,10 +108,10 @@ lappend HIERARCHY(MOD) "$CARD_BASE/src/card_top.vhd"
 
 # --------- Add constraints to the design ---------------------------------------
 lappend SYNTH_FLAGS(CONSTR) "$CARD_BASE/src/general.xdc"
-# ILA left out: its capture paths are the only timing-failing group, and the counters it would
-# probe are readable over MI instead. Uncomment to capture received data over JTAG.
+# ILA left out: its capture paths fail timing, and its counters are readable over MI.
 # lappend SYNTH_FLAGS(CONSTR) "$CARD_BASE/src/ilas.xdc"
 
+# pcie_half.xdc holds SYSRST_N, both SYSCLK pairs and lanes 0-7; pcie_full.xdc adds 8-15.
 lappend SYNTH_FLAGS(CONSTR) "$COMBO_BASE/cards/amd/alveo-u55c/constr/pcie_half.xdc"
 
 if {$PCIE_ENDPOINT_MODE == 0 || $PCIE_ENDPOINT_MODE == 1} {
