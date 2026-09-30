@@ -2128,6 +2128,9 @@ begin
                 -- Off by default; turned on to locate where the DMA spends stalled cycles.
                 PROFILE_EN => true,
 
+                -- Hold each endpoint's WRBUFF drain AR issue while its ingest FIFO fills.
+                DRAIN_HOLD_EN => true,
+
                 -- Streams feeding this one DMA instance: queue/endpoint plumbing only (see
                 -- DMA_IUVENTUS's own PCIE_ENDPOINTS generic comment).
                 PCIE_ENDPOINTS => DMA_STREAMS,

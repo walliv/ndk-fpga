@@ -56,6 +56,15 @@ CC_STALL_CNTR_L_ADDR             = 0x148
 DEV_INFLIGHT_ACC_L_ADDR          = 0x150
 TOTAL_CYCLES_CNTR_L_ADDR         = 0x158
 
+# DESIGN_ERR fault bits above the per-queue wedge flags [15:0].
+DESIGN_ERR_BITS = (
+    (16, "STOP TIMEOUT"),
+    (17, "RD_CPL OVERFLOW (PAGES LEAKED)"),
+    (18, "CQ BACK-PRESSURED"),
+    (19, "WRITE ON WRONG ENDPOINT"),
+    (20, "WRBUFF DATA LOST"),
+)
+
 # The seven OP_CTRL stall classes, in OP_PROF bit order; see stall_profile() below for how they
 # are scored, and the DMA core's own documentation for their semantics.
 OP_PROF_CLASS_ADDRS = (
@@ -200,9 +209,13 @@ class DMAIuventusConfig:
                 # Align multi-line output for deserialized CQEntry
                 formatted_val = pformat(str(val), indent=4, width=80).replace("\n", "\n" + " " * (max_len + 3))
             elif name == "design_err":
-                wedged = [q for q in range(32) if (val >> q) & 1]
-                formatted_val = (f"{hex(val)}" if not wedged
-                                 else f"{hex(val)}\t*** QUEUE(S) WEDGED: {wedged} ***")
+                wedged = [q for q in range(16) if (val >> q) & 1]
+                faults = [n for b, n in DESIGN_ERR_BITS if (val >> b) & 1]
+                formatted_val = hex(val)
+                if wedged:
+                    formatted_val += f"\t*** QUEUE(S) WEDGED: {wedged} ***"
+                if faults:
+                    formatted_val += f"\t*** {', '.join(faults)} ***"
             elif name == "tag_fifo_status":
                 formatted_val = f"{val}/2048"
             elif name in ["cq_wr_unalign_start", "cq_wr_unalign_size", "cq_wr_over16beats"]:
@@ -549,6 +562,35 @@ class DMAIuventusRegAccess(nfb.BaseComp):
         """Cycles the WRBUFF drain guard held RX off. See the DMA core's own documentation for
         interpretation together with fence_clip."""
         return self._comp.read64(FENCE_AFULL_CNTR_L_ADDR)
+
+    @property
+    def drain_hold_cycles(self) -> int:
+        """Cycles a WRBUFF drain's new HBM reads were held while its ingest FIFO filled, every
+        endpoint summed. Zero proves the HBM ports never starved the fill."""
+        return self._comp.read64(IuventusMiRegMap.DRAIN_HOLD_CNTR_L.value)
+
+    @property
+    def drain_hold_events(self) -> int:
+        """Drain holds started (see drain_hold_cycles)."""
+        return self._comp.read64(IuventusMiRegMap.DRAIN_HOLD_EVT_CNTR_L.value)
+
+    @property
+    def poisoned_drains(self) -> int:
+        """Drains that delivered data a WRBUFF capacity drop lost, each reported as DATA_LOST."""
+        return self._comp.read64(IuventusMiRegMap.POISONED_DRAIN_CNTR_L.value)
+
+    @property
+    def ingest_hwm(self) -> tuple:
+        """(EP0, EP1) WRBUFF ingest-FIFO high-water mark in words since the last rst_cntrs()."""
+        v = self._comp.read32(IuventusMiRegMap.INGEST_HWM.value)
+        return (v & 0xFFFF, v >> 16)
+
+    def pc_beats(self, channel: int, write: bool) -> int:
+        """WRBUFF data beats of one HBM channel (PROFILE_EN build), every endpoint summed. Samples
+        every counter, as sample_cntrs() does."""
+        self._comp.write32(IuventusMiRegMap.PC_BEAT_SEL.value, channel + (0 if write else 4))
+        self.sample_cntrs()
+        return self._comp.read64(IuventusMiRegMap.PC_BEATS_L.value)
 
     @property
     def succ_cpls(self) -> int:

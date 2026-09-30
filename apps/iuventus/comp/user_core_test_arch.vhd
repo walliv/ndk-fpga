@@ -71,7 +71,7 @@ architecture TEST of USER_CORE is
     -- MFB_GENERATOR_MI32 below); needed only to size/slice the raw generator TX_MFB_META.
     constant GEN_LENGTH_WIDTH   : natural := 18;
 
-    constant ADDR_LENGTH        : natural := 7;   -- decode 0x00..0x7C (integrity regs live at 0x30..0x54)
+    constant ADDR_LENGTH        : natural := 8;   -- decode 0x00..0xFC (integrity regs live at 0x30..0x54)
     constant MI_SPLIT_PORTS     : natural := 3;
     constant MI_SPLIT_BASES     : slv_array_t(MI_SPLIT_PORTS-1 downto 0)(MI_WIDTH-1 downto 0) := (
         0 => X"00000000",                         -- Control and Status Registers
@@ -114,6 +114,8 @@ architecture TEST of USER_CORE is
     signal rd_ch_minmax_reg_sel             : std_logic;
     signal rd_burst_reg_sel                 : std_logic;
     signal seq_addr_sel_reg_sel             : std_logic;
+    signal rd_hold_period_reg_sel           : std_logic;
+    signal rd_hold_len_reg_sel              : std_logic;
 
     -- Registers
     signal nvme_rd_req_lba_ptr_reg : std_logic_vector(SQE_LBA_PTR_W -1 downto 0);
@@ -134,6 +136,14 @@ architecture TEST of USER_CORE is
     signal rd_mfb_id_vld_reg       : std_logic;
     signal wr_mfb_pkt_cnt_reg      : unsigned(15 downto 0);
     signal wr_mfb_word_cnt_reg     : unsigned(15 downto 0);
+
+    -- Periodic RD MFB hold (stress knob, 0x80 period / 0x84 length in DMA_CLK cycles): the
+    -- generator's read streams are refused for the first LEN cycles of every PERIOD, so completed
+    -- reads pile up in WRBUFF and then drain at full rate. PERIOD = 0 disables it.
+    signal rd_hold_period_reg : unsigned(31 downto 0);
+    signal rd_hold_len_reg    : unsigned(31 downto 0);
+    signal rd_hold_cnt_r      : unsigned(31 downto 0);
+    signal rd_hold_r          : std_logic;
 
     -- Read-side QID round-robin: min/max queue and burst count (requests per queue before advancing),
     -- mirroring MFB_GENERATOR_MI32. Default (0,0) keeps reads on queue 0 until software sets the range.
@@ -547,6 +557,8 @@ begin
         rd_ch_minmax_reg_sel                    <= '0';
         rd_burst_reg_sel                        <= '0';
         seq_addr_sel_reg_sel                    <= '0';
+        rd_hold_period_reg_sel                  <= '0';
+        rd_hold_len_reg_sel                     <= '0';
 
         -- Zero-extend to 12 bits to match x"000" style
         reg_sel_addr                          := (others => '0');
@@ -569,6 +581,8 @@ begin
             when x"58" => rd_ch_minmax_reg_sel               <= '1';
             when x"5C" => rd_burst_reg_sel                   <= '1';
             when x"70" => seq_addr_sel_reg_sel               <= '1';
+            when x"80" => rd_hold_period_reg_sel             <= '1';
+            when x"84" => rd_hold_len_reg_sel                <= '1';
             when others => null;
         end case;
     end process;
@@ -708,6 +722,39 @@ begin
                 rd_burst_reg <= std_logic_vector(to_unsigned(1, rd_burst_reg'length));
             elsif (rd_burst_reg_sel = '1' and mi_split_wr(0) = '1') then
                 rd_burst_reg <= mi_split_dwr(0)(15 downto 0);
+            end if;
+        end if;
+    end process;
+
+    rd_hold_reg_p : process (DMA_CLK)
+    begin
+        if (rising_edge(DMA_CLK)) then
+            if (core_rst = '1') then
+                rd_hold_period_reg <= (others => '0');
+                rd_hold_len_reg    <= (others => '0');
+            elsif (mi_split_wr(0) = '1') then
+                if (rd_hold_period_reg_sel = '1') then
+                    rd_hold_period_reg <= unsigned(mi_split_dwr(0));
+                end if;
+                if (rd_hold_len_reg_sel = '1') then
+                    rd_hold_len_reg <= unsigned(mi_split_dwr(0));
+                end if;
+            end if;
+        end if;
+    end process;
+
+    rd_hold_p : process (DMA_CLK)
+    begin
+        if (rising_edge(DMA_CLK)) then
+            if (core_rst = '1' or rd_hold_period_reg = 0 or rd_hold_cnt_r + 1 >= rd_hold_period_reg) then
+                rd_hold_cnt_r <= (others => '0');
+            else
+                rd_hold_cnt_r <= rd_hold_cnt_r + 1;
+            end if;
+            if (core_rst = '1' or rd_hold_period_reg = 0 or rd_hold_cnt_r >= rd_hold_len_reg) then
+                rd_hold_r <= '0';
+            else
+                rd_hold_r <= '1';
             end if;
         end if;
     end process;
@@ -1007,9 +1054,11 @@ begin
     checker_ep_s <= queue_ep_f(to_integer(unsigned(checker_qid)), NUM_QUEUES, PCIE_ENDPOINTS);
 
     -- The checker consumes one read at a time on the stream of ITS OWN queue; every other stream
-    -- is simply accepted and discarded, exactly as the generator does with all of them.
+    -- is simply accepted and discarded, exactly as the generator does with all of them, outside a
+    -- periodic stress hold.
     rd_dst_rdy_g : for ep in 0 to PCIE_ENDPOINTS-1 generate
-        core_rd_mfb_dst_rdy(ep) <= chk_rd_mfb_dst_rdy when (integ_en = '1' and checker_ep_s = ep) else '1';
+        core_rd_mfb_dst_rdy(ep) <= chk_rd_mfb_dst_rdy when (integ_en = '1' and checker_ep_s = ep) else
+                                   not rd_hold_r;
     end generate;
 
     -- Endpoint 0's own ready, which is what rd_mfb_id_reg_p above qualifies its capture with.
@@ -1150,6 +1199,8 @@ begin
                 when x"78" =>
                     mi_split_drd(0)(ADDR_CNTR_WIDTH -33 downto 0)           <= seq_addr_view(ADDR_CNTR_WIDTH -1 downto 32);
                     mi_split_drd(0)(31)                                     <= not seq_addr_sel_vld;
+                when x"80" => mi_split_drd(0)                                               <= std_logic_vector(rd_hold_period_reg);
+                when x"84" => mi_split_drd(0)                                               <= std_logic_vector(rd_hold_len_reg);
                 when others => mi_split_drd(0)                                               <= X"CAFEBABE";
             end case;
         end if;

@@ -152,6 +152,23 @@ class IuventusMiRegMap(IntEnum):
     LAT_S2_ACC_H                    = 0x1B4
     LAT_S3_ACC_L                    = 0x1B8
     LAT_S3_ACC_H                    = 0x1BC
+    # WRBUFF drain hold, every endpoint summed: cycles new drain reads were held for a filling
+    # ingest FIFO, and holds started. Zero means the HBM ports never starved the fill.
+    DRAIN_HOLD_CNTR_L               = 0x1C0
+    DRAIN_HOLD_CNTR_H               = 0x1C4
+    DRAIN_HOLD_EVT_CNTR_L           = 0x1C8
+    DRAIN_HOLD_EVT_CNTR_H           = 0x1CC
+    # Drains that read a page a WRBUFF capacity drop poisoned; each also sent a DATA_LOST OP_STAT
+    # and set DESIGN_ERR bit 20.
+    POISONED_DRAIN_CNTR_L           = 0x1D0
+    POISONED_DRAIN_CNTR_H           = 0x1D4
+    # {EP1[31:16], EP0[15:0]} WRBUFF ingest-FIFO high-water mark in words, live; RST_CNTRS clears it.
+    INGEST_HWM                      = 0x1D8
+    # Per-HBM-channel WRBUFF beat counters (PROFILE_EN): write the index (0-3 W channel c, 4-7 R
+    # channel c-4), SAMPLE_CNTRS, then read PC_BEATS_L/H.
+    PC_BEAT_SEL                     = 0x1DC
+    PC_BEATS_L                      = 0x1E0
+    PC_BEATS_H                      = 0x1E4
 
 
 # Base offset and per-queue slot stride of the PER-QUEUE 2D register block. Queue 0 is q=0 of it

@@ -1426,6 +1426,32 @@ async def _case_latency_qd1(dut, dev, test, mode: str = "rd"):
     )
 
 
+async def _case_rd_hold_knob(dut, dev, test):
+    """The periodic RD MFB hold (0x80 period, 0x84 length, DMA_CLK cycles): endpoint 0's read
+    stream must be refused for exactly LEN of every PERIOD cycles, and never once PERIOD is 0."""
+    c = dev.nfb.comp_open("ziti,iuventus_test_ctrl")
+    period, length, periods = 100, 30, 10
+    await e(c.write32)(0x84, length)
+    await e(c.write32)(0x80, period)
+    assert await e(c.read32)(0x80) == period and await e(c.read32)(0x84) == length, \
+        "RD hold registers do not read back"
+    rdy = dut.core_rd_mfb_dst_rdy
+    # Align to the start of a hold window, then count refused cycles over whole periods.
+    assert await _wait_until(lambda: (int(rdy.value) & 1) == 1, dut, max_cycles=4 * period)
+    assert await _wait_until(lambda: (int(rdy.value) & 1) == 0, dut, max_cycles=4 * period)
+    held = 0
+    for _ in range(period * periods):
+        held += (int(rdy.value) & 1) == 0
+        await RisingEdge(dut.DMA_CLK)
+    assert held == length * periods, f"RD hold refused {held} of {period * periods} cycles, expected {length * periods}"
+    await e(c.write32)(0x80, 0)
+    # The posted write crosses MI_ASYNC; the read-back orders it before the check.
+    assert await e(c.read32)(0x80) == 0
+    for _ in range(2 * period):
+        assert (int(rdy.value) & 1) == 1, "RD MFB still held with the hold period at 0"
+        await RisingEdge(dut.DMA_CLK)
+
+
 @cocotb.test(timeout_time=2000, timeout_unit='us')
 async def test_user_core_reference_model(dut):
     """Stage 2+3: reference-model-predicted expected output vs a scoreboard comparing against the
@@ -1524,3 +1550,7 @@ async def test_user_core_reference_model(dut):
     await dev._reset()
     dev.dma_model.reset()
     await _case_write_gen_burst_mode(dut, dev, test)
+
+    await dev._reset()
+    dev.dma_model.reset()
+    await _case_rd_hold_knob(dut, dev, test)
