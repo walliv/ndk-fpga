@@ -27,10 +27,9 @@ proc get_ip_dir_key {ip_params_l script_path} {
         append acc [read $fh]
         close $fh
     }
-    if {[catch {package require sha256}]} {
-        return [format %08x [zlib crc32 $acc]]
-    }
-    return [string range [::sha2::sha256 -hex $acc] 0 11]
+    # Bare tclsh lacks tcllib's sha256 while Vivado's Tcl has it, so one build keyed the same IP two
+    # ways; CRC32 is built into every Tcl 8.6.
+    return [format %08x [zlib crc32 $acc]]
 }
 
 proc get_ip_mod_files {ip_components_l ip_params_l} {
