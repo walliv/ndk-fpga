@@ -12,14 +12,17 @@ read_vhdl -library work -vhdl2008 ${shell_git_root}/apps/sparklev/build/alveo-u5
 read_vhdl -library work -vhdl2008 ${shell_git_root}/apps/sparklev/comp/core_logic.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/apps/sparklev/comp/user_core_full_arch.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/apps/sparklev/comp/user_core_ent.vhd
-set IP_PARAMS_L {IP_COMP_TYPE 0 SDM_SYSMON_ARCH USP_IDCOMP CLOCK_GEN_ARCH USP PCIE_GEN 4 IP_GEN_FILES false PCIE_MOD_ARCH USP_PCIE4C PCIE_ENDPOINT_MODE 3 IP_COMP_NAME axi_quad_spi_0 USE_IP_SUBDIRS true IP_MODIFY_BASE @@SHELL_GIT_ROOT@@/cards/amd/alveo-u55c/src/ip/axi_quad_spi DMA_TYPE 6 CORE_BASE @@SHELL_GIT_ROOT@@/core PCIE_ENDPOINTS 1 IP_BUILD_DIR @@SHELL_GIT_ROOT@@/apps/sparklev/build/alveo-u55c/src USR_CORE_ARCH FULL}
+set IP_PARAMS_L {IP_COMP_TYPE 0 SDM_SYSMON_ARCH USP_IDCOMP CLOCK_GEN_ARCH USP PCIE_GEN 4 IP_GEN_FILES false PCIE_MOD_ARCH USP_PCIE4C PCIE_ENDPOINT_MODE 3 IP_COMP_NAME axi_quad_spi_0 USE_IP_SUBDIRS true IP_MODIFY_BASE @@SHELL_GIT_ROOT@@/cards/amd/alveo-u55c/src/ip/axi_quad_spi DMA_TYPE 6 CORE_BASE @@SHELL_GIT_ROOT@@/core PCIE_ENDPOINTS 1 IP_BUILD_DIR @@SHELL_GIT_ROOT@@/apps/sparklev/build/alveo-u55c/src/ipcfg_8c41bb16 USR_CORE_ARCH FULL}
 set IP_PARAMS_L [string map [list @@SHELL_GIT_ROOT@@ $shell_git_root] $IP_PARAMS_L]
+file mkdir [dict get $IP_PARAMS_L IP_BUILD_DIR]
 source ${shell_git_root}/cards/amd/alveo-u55c/src/ip/axi_quad_spi/axi_quad_spi.ip.tcl
-set IP_PARAMS_L {IP_COMP_TYPE 0 SDM_SYSMON_ARCH USP_IDCOMP CLOCK_GEN_ARCH USP PCIE_GEN 4 IP_GEN_FILES false PCIE_MOD_ARCH USP_PCIE4C PCIE_ENDPOINT_MODE 3 IP_COMP_NAME hbm_ip USE_IP_SUBDIRS true IP_MODIFY_BASE @@SHELL_GIT_ROOT@@/cards/amd/alveo-u55c/src/ip/hbm_ip DMA_TYPE 6 CORE_BASE @@SHELL_GIT_ROOT@@/core PCIE_ENDPOINTS 1 IP_BUILD_DIR @@SHELL_GIT_ROOT@@/apps/sparklev/build/alveo-u55c/src USR_CORE_ARCH FULL}
+set IP_PARAMS_L {IP_COMP_TYPE 0 SDM_SYSMON_ARCH USP_IDCOMP CLOCK_GEN_ARCH USP PCIE_GEN 4 IP_GEN_FILES false PCIE_MOD_ARCH USP_PCIE4C PCIE_ENDPOINT_MODE 3 IP_COMP_NAME hbm_ip USE_IP_SUBDIRS true IP_MODIFY_BASE @@SHELL_GIT_ROOT@@/cards/amd/alveo-u55c/src/ip/hbm_ip DMA_TYPE 6 CORE_BASE @@SHELL_GIT_ROOT@@/core PCIE_ENDPOINTS 1 IP_BUILD_DIR @@SHELL_GIT_ROOT@@/apps/sparklev/build/alveo-u55c/src/ipcfg_efb6e66a USR_CORE_ARCH FULL}
 set IP_PARAMS_L [string map [list @@SHELL_GIT_ROOT@@ $shell_git_root] $IP_PARAMS_L]
+file mkdir [dict get $IP_PARAMS_L IP_BUILD_DIR]
 source ${shell_git_root}/cards/amd/alveo-u55c/src/ip/hbm_ip/hbm_ip.ip.tcl
-set IP_PARAMS_L {IP_COMP_TYPE 0 SDM_SYSMON_ARCH USP_IDCOMP CLOCK_GEN_ARCH USP PCIE_GEN 4 IP_GEN_FILES false PCIE_MOD_ARCH USP_PCIE4C PCIE_ENDPOINT_MODE 3 IP_COMP_NAME pcie4_uscale_plus USE_IP_SUBDIRS true IP_MODIFY_BASE @@SHELL_GIT_ROOT@@/cards/amd/alveo-u55c/src/ip/pcie4_uscale_plus DMA_TYPE 6 CORE_BASE @@SHELL_GIT_ROOT@@/core PCIE_ENDPOINTS 1 IP_BUILD_DIR @@SHELL_GIT_ROOT@@/apps/sparklev/build/alveo-u55c/src USR_CORE_ARCH FULL}
+set IP_PARAMS_L {IP_COMP_TYPE 0 SDM_SYSMON_ARCH USP_IDCOMP CLOCK_GEN_ARCH USP PCIE_GEN 4 IP_GEN_FILES false PCIE_MOD_ARCH USP_PCIE4C PCIE_ENDPOINT_MODE 3 IP_COMP_NAME pcie4_uscale_plus USE_IP_SUBDIRS true IP_MODIFY_BASE @@SHELL_GIT_ROOT@@/cards/amd/alveo-u55c/src/ip/pcie4_uscale_plus DMA_TYPE 6 CORE_BASE @@SHELL_GIT_ROOT@@/core PCIE_ENDPOINTS 1 IP_BUILD_DIR @@SHELL_GIT_ROOT@@/apps/sparklev/build/alveo-u55c/src/ipcfg_db350ede USR_CORE_ARCH FULL}
 set IP_PARAMS_L [string map [list @@SHELL_GIT_ROOT@@ $shell_git_root] $IP_PARAMS_L]
+file mkdir [dict get $IP_PARAMS_L IP_BUILD_DIR]
 source ${shell_git_root}/cards/amd/alveo-u55c/src/ip/pcie4_uscale_plus/pcie4_uscale_plus.ip.tcl
 read_vhdl -library work -vhdl2008 ${shell_git_root}/cards/silicom/fb2cghh/src/comp/axi_quad_flash_controller/axi_quad_flash_controller.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/cards/silicom/fb2cghh/src/comp/axi_quad_flash_controller/comp/axi4_lite_mi_bridge/axi4_lite_mi_bridge.vhd
