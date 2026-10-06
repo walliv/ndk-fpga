@@ -244,6 +244,10 @@ proc target_filelist { {filename "filelist.tcl"} } {
                         if {[string first $git_root_token $var_value] >= 0} {
                             append content "set $var_name \[string map \[list $git_root_token \$shell_git_root] \$$var_name]\n"
                         }
+                        # The IP's keyed build directory exists only where the NDK flow ran, and create_ip -dir does not create it.
+                        if {$var_name == "IP_PARAMS_L" && [dict exists $var_value IP_BUILD_DIR]} {
+                            append content "file mkdir \[dict get \$IP_PARAMS_L IP_BUILD_DIR]\n"
+                        }
                     }
                 }
                 append content "source $fname\n"
