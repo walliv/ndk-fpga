@@ -18,6 +18,9 @@ DMA_TYPE=5
 # GROUPBY is the streaming aggregation engine. Override on the command line, e.g.
 # `make USR_CORE_ARCH=GROUPBY`.
 USR_CORE_ARCH?=TEST
+# 1 builds the TEST core's line-rate read-data checker (app_conf.tcl reads it from the
+# environment, like CQ_SINK), e.g. `make USR_DATA_CHECK=1`.
+export USR_DATA_CHECK?=0
 
 USER_ENV?=
 
