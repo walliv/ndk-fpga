@@ -14,21 +14,105 @@ from dataclasses import dataclass
 REGION_BEAT_BYTES = 64
 SECT_SIZE = 512
 
-# LFSR_SIMPLE_RANDOM_GEN(DATA_WIDTH=21) taps, per fce_get_taps: XNOR_TAPS=(0,0,21,19), evaluated in
-# the RTL's loop order (i=3 downto 0: tap 19 first, then 21); taps are 1-based bit positions (bit
-# index = tap - 1).
-_LFSR21_TAPS = (19, 21)
-_LFSR21_SEED = int("000011010110011100001", 2)
-_LFSR21_MASK = (1 << 21) - 1
+# user_core_test_arch.vhd's lfsr_r: LFSR_SIMPLE_RANDOM_GEN's DATA_WIDTH=64 step (XNOR taps
+# 64,63,61,60, 1-based bit positions, order irrelevant), seeded with LFSR_SEED, MSB first.
+_LFSR64_TAPS = (60, 61, 63, 64)
+_LFSR64_SEED = int("0000110101100111000010000110101100001101011001110000100001101011", 2)
+_LFSR64_MASK = (1 << 64) - 1
 
 
-def lfsr21_step(reg: int) -> int:
-    """One clock step of user_core_test_arch.vhd's lfsr_rand_addr_gen_i (Fibonacci LFSR, width 21)."""
+def lfsr64_step(reg: int) -> int:
+    """One step of lfsr_step_f (Fibonacci LFSR, width 64)."""
     v = 1
-    for tap in _LFSR21_TAPS:
+    for tap in _LFSR64_TAPS:
         bit = (reg >> (tap - 1)) & 1
         v = 1 if v == bit else 0  # XNOR
-    return ((reg << 1) | v) & _LFSR21_MASK
+    return ((reg << 1) | v) & _LFSR64_MASK
+
+
+# LFSR steps between two draws (user_core_test_arch.vhd's LFSR_LEAP): consecutive draws share no
+# state bit.
+LFSR_LEAP = 64
+
+
+def _leap_tables():
+    """The affine map of one leap (LFSR_LEAPS(1)) as its constant and, per state byte, the XOR of
+    that byte's bit columns for each of its 256 values."""
+    def stepped(reg):
+        for _ in range(LFSR_LEAP):
+            reg = lfsr64_step(reg)
+        return reg
+    const = stepped(0)
+    cols = [stepped(1 << i) ^ const for i in range(64)]
+    tables = []
+    for b in range(8):
+        t = [0] * 256
+        for v in range(1, 256):
+            low = v & -v
+            t[v] = t[v ^ low] ^ cols[8*b + low.bit_length() - 1]
+        tables.append(t)
+    return const, tables
+
+
+_LEAP_CONST, _LEAP_TABLES = _leap_tables()
+
+
+def lfsr64_leap(reg: int, draws: int = 1) -> int:
+    """`draws` leaps of LFSR_LEAP steps, each through the leap's map as the RTL applies it."""
+    t0, t1, t2, t3, t4, t5, t6, t7 = _LEAP_TABLES
+    for _ in range(draws):
+        reg = (_LEAP_CONST ^ t0[reg & 0xFF] ^ t1[reg >> 8 & 0xFF] ^ t2[reg >> 16 & 0xFF] ^ t3[reg >> 24 & 0xFF]
+               ^ t4[reg >> 32 & 0xFF] ^ t5[reg >> 40 & 0xFF] ^ t6[reg >> 48 & 0xFF] ^ t7[reg >> 56])
+    return reg
+
+
+# As user_core_test_arch.vhd asserts of its leap map: it must agree with stepping the LFSR.
+_reg = _LFSR64_SEED
+for _ in range(LFSR_LEAP):
+    _reg = lfsr64_step(_reg)
+assert lfsr64_leap(_LFSR64_SEED) == _reg, "the LFSR leap map disagrees with stepping the LFSR"
+del _reg
+
+
+class RandDrawModel:
+    """The RTL's random stream: slot 0 serves an accepted read, slot r+1 write region r, slot k
+    being the state k leaps on; the state then moves past the highest slot taken, so no two accepts
+    share a draw. `adv` is the leaps the last cycle moved it by."""
+
+    def __init__(self, regions: int = 1, state: int = None):
+        self.regions = regions
+        self.state = _LFSR64_SEED if state is None else state
+        self.adv = 0
+
+    def reset(self) -> None:
+        self.state = _LFSR64_SEED
+
+    def slot(self, k: int) -> int:
+        return rand_lba(lfsr64_leap(self.state, k))
+
+    def cycle(self, read: bool, writes=(), active: bool = True):
+        """Draws this cycle's accepts take -- the read's, then one per write region -- and the step
+        after them. Addresses of requests not accepted are None."""
+        rd = self.slot(0) if read else None
+        wr = [self.slot(r + 1) if w else None for r, w in enumerate(writes)]
+        adv = 1 if read else 0
+        for r, w in enumerate(writes):
+            if w:
+                adv = r + 2
+        self.adv = adv if active else 0
+        if self.adv:
+            self.state = lfsr64_leap(self.state, self.adv)
+        return rd, wr
+
+
+def rand_lba(reg: int) -> int:
+    """rand_draw: a slot state's low ADDR_CNTR_WIDTH bits in whole drive units, folded once by
+    RAND_LBA_SPAN so no request runs past the namespace."""
+    units = (reg & ((1 << ADDR_CNTR_WIDTH) - 1)) // LBA_ALIGN
+    span_units = RAND_LBA_SPAN // LBA_ALIGN
+    if units >= span_units:
+        units -= span_units
+    return units * LBA_ALIGN
 
 
 def gen_wr_mfb_data(pkt_cnt: int, word_cnt: int, sof: bool, eof: bool) -> bytes:
@@ -139,7 +223,7 @@ class ReadReqModel:
         # An accepted request only moves the counter of the queue it names, so a round-robin
         # stream steps each queue once per full rotation rather than once per request.
         self.seq_addr = [0] * num_queues
-        self.lfsr_reg = _LFSR21_SEED
+        self.rand = RandDrawModel()
         self.addressing = "seq"
         self.lba_num = 0
         self.contig = False
@@ -157,10 +241,9 @@ class ReadReqModel:
         return qid if qid < self.num_queues else 0
 
     def dut_reset(self) -> None:
-        """Mirrors DMA_RST/data_logger_rst: reseeds the LFSR and the round-robin QID counter, and
-        re-arms EVERY queue's seq_addr_cntr entry from nvme_rd_req_lba_ptr_reg -- which the same
-        reset clears to 0 (user_core_test_arch.vhd's rd_req_lba_ptr_reg_p, :709)."""
-        self.lfsr_reg = _LFSR21_SEED
+        """DMA_RST: reseeds the LFSR and round-robin QID and re-arms every seq_addr_cntr from
+        nvme_rd_req_lba_ptr_reg, which the same reset clears to 0."""
+        self.rand = RandDrawModel()
         self.rr.qid = 0
         self.rr.burst_cnt = 0
         self.seq_addr = [0] * self.num_queues
@@ -202,24 +285,16 @@ class ReadReqModel:
         addressing too -- tst_sel_reg(0) only selects which address is read out."""
         qid = self.rr.next_qid()
         idx = self._seq_idx(qid)
-        addr = self.seq_addr[idx] if self.addressing == "seq" else self.lfsr_reg
-        if self.test_active or self.contig:
+        active = self.test_active or self.contig
+        draw, _ = self.rand.cycle(read=True, active=active)
+        addr = self.seq_addr[idx] if self.addressing == "seq" else draw
+        if active:
             self.seq_addr[idx] += (self.lba_num + 1)
         return ExpectedReadReq(lba_ptr=addr, lba_num=self.lba_num, qid=qid)
 
     def on_completion(self) -> None:
-        """Mirrors lfsr_rand_addr_gen_i's ENABLE, `core_op_stat_vld and ((not tst_finished) or
-        contig_test)` (user_core_test_arch.vhd:1295): the random address is the part of tst_addr
-        that still moves on the completion. The sequential counter moves on acceptance instead --
-        see next_burst_request().
-
-        One call per completion. The callers drive it from the pin-side accept callback, which is
-        only equivalent while the harness's DMA model keeps a single read outstanding: the request
-        pipe grants the engine REQ_FIFO_ITEMS credits per queue (user_core_if_pipe.vhd:356), so
-        against a deeper backend the engine stamps an address many completions before the matching
-        request reaches the DMA pins."""
-        if self.test_active or self.contig:
-            self.lfsr_reg = lfsr21_step(self.lfsr_reg)
+        """No-op: the random stream steps on the accept, in next_burst_request(); kept for
+        callers that drive the model per completion."""
 
 
 class WriteFrameModel:
@@ -290,6 +365,8 @@ ADDR_CNTR_WIDTH = 33
 LBA_ALIGN = 4096 // SECT_SIZE
 # Largest request: NVME_RD_REQ_LBA_NUM is 8 bits, 0-based. Random starts must leave room for it.
 MAX_REQ_LBAS = 256
+# Where the random stream folds (user_core_test_arch.vhd's RAND_LBA_SPAN).
+RAND_LBA_SPAN = TST_LBA_COUNT - MAX_REQ_LBAS
 
 
 def seq_fold(lba: int) -> int:

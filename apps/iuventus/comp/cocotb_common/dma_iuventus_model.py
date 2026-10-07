@@ -192,9 +192,12 @@ class SimplifiedDmaModel:
         self._dut.NVME_OP_STAT_VLD.value = 0
 
     def enable_backpressure(self, bp_period: int = 10, bp_low_cycles: int = 3) -> None:
-        """Arms periodic backpressure: RDY/DST_RDY will be held low for `bp_low_cycles` cycles out
-        of every `bp_period` cycles, starting from the next cycle boundary `_backpressure_loop`
-        observes."""
+        """Holds RDY/DST_RDY low for `bp_low_cycles` of every `bp_period` cycles. At least two ready
+        cycles per period: USER_CORE_IF_PIPE picks its offer from RDY a cycle ahead, so a one-cycle
+        window is gone when the offer lands."""
+        assert bp_period - bp_low_cycles >= 2, (
+            f"backpressure {bp_low_cycles}/{bp_period} leaves a one-cycle ready window, which the "
+            f"request pipe can never hit")
         self.bp_period = bp_period
         self.bp_low_cycles = bp_low_cycles
         self._bp_enabled = True

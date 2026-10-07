@@ -35,6 +35,10 @@ entity USER_CORE is
         -- MFB parameters: width of one item in bits
         DMA_MFB_ITEM_WIDTH  : natural := 8;
 
+        -- TEST architecture only: build the line-rate read-data checker and the pattern-mode write
+        -- payload (user_core_test_arch.vhd, data_check_g). Off, none of that logic exists.
+        DATA_CHECK : boolean := false;
+
         FPGA_ID_WIDTH : integer := 16;
         DEVICE        : string  := "ULTRASCALE"
     );
@@ -111,8 +115,8 @@ entity USER_CORE is
         -- =========================================================================================
         -- One stream per endpoint: element e carries only the queues endpoint e serves.
         NVME_RD_MFB_DATA    : in  slv_array_t(DMA_STREAMS-1 downto 0)(DMA_MFB_REGIONS*DMA_MFB_REGION_SIZE*DMA_MFB_BLOCK_SIZE*DMA_MFB_ITEM_WIDTH-1 downto 0);
-        -- Per region: bits [CQ_ENTRY_CMD_ID_W-1:0] = CID, bits above = QID. Together they name the
-        -- command whose data this frame carries, so returned data can be attributed to a request.
+        -- Per region: bits [QID_W-1:0] = QID, bits above = CID (DMA_IUVENTUS drives CID & QID).
+        -- Together they name the command whose data this frame carries.
         NVME_RD_MFB_META    : in  slv_array_t(DMA_STREAMS-1 downto 0)(DMA_MFB_REGIONS*(maximum(1, log2(NUM_QUEUES)) + CQ_ENTRY_CMD_ID_W) -1 downto 0);
         NVME_RD_MFB_SOF     : in  slv_array_t(DMA_STREAMS-1 downto 0)(DMA_MFB_REGIONS-1 downto 0);
         NVME_RD_MFB_EOF     : in  slv_array_t(DMA_STREAMS-1 downto 0)(DMA_MFB_REGIONS-1 downto 0);
