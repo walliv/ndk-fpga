@@ -15,7 +15,6 @@ set MFB_GEN_BASE       "$OFM_PATH/comp/mfb_tools/debug/generator"
 set MFB_RECONF_BASE    "$OFM_PATH/comp/mfb_tools/flow/reconfigurator"
 set DATA_LOGGER_BASE   "$OFM_PATH/comp/debug/data_logger"
 set LATENCY_METER_BASE "$OFM_PATH/comp/debug/latency_meter"
-set LFSR_GEN_BASE      "$OFM_PATH/comp/base/logic/lfsr_simple_random_gen"
 set EVENT_CNTR_BASE    "$OFM_PATH/comp/base/misc/event_counter"
 set MFB_PIPE_BASE      "$OFM_PATH/comp/mfb_tools/flow/pipe"
 set FIFOX_BASE         "$OFM_PATH/comp/base/fifo/fifox"
@@ -36,7 +35,6 @@ lappend COMPONENTS [list "MFB_GENERATOR_MI32"     $MFB_GEN_BASE        "FULL"]
 lappend COMPONENTS [list "MFB_RECONFIGURATOR"     $MFB_RECONF_BASE     "FULL"]
 lappend COMPONENTS [list "DATA_LOGGER"            $DATA_LOGGER_BASE    "FULL"]
 lappend COMPONENTS [list "LATENCY_METER"          $LATENCY_METER_BASE  "FULL"]
-lappend COMPONENTS [list "LFSR_SIMPLE_RANDOM_GEN" $LFSR_GEN_BASE       "FULL"]
 lappend COMPONENTS [list "EVENT_COUNTER"          $EVENT_CNTR_BASE     "FULL"]
 lappend COMPONENTS [list "MFB_PIPE"               $MFB_PIPE_BASE       "FULL"]
 lappend COMPONENTS [list "FIFOX"                  $FIFOX_BASE          "FULL"]

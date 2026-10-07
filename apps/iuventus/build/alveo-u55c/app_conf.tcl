@@ -49,6 +49,13 @@ if { [info exist env(CQ_SINK)] && $env(CQ_SINK) != 0 } {
     set CQ_SINK true
 }
 
+# Build the TEST user core's line-rate read-data checker and pattern-mode writes (USER_CORE's
+# DATA_CHECK generic); without it the checker's registers read 0xCAFEBABE.
+set USR_DATA_CHECK false
+if { [info exist env(USR_DATA_CHECK)] && [string is true -strict $env(USR_DATA_CHECK)] } {
+    set USR_DATA_CHECK true
+}
+
 # ------------------------------------------------------------------------------
 # Constant parameters (do not change)
 # ------------------------------------------------------------------------------
@@ -100,3 +107,4 @@ VhdlPkgInt PCIE_ENDPOINT_MODE       $PCIE_ENDPOINT_MODE
 VhdlPkgBool PCIE_CORE_DEBUG_ENABLE  $PCIE_DEBUG_ENABLE
 VhdlPkgBool PCIE_CTRL_DEBUG_ENABLE  $PCIE_DEBUG_ENABLE
 VhdlPkgBool CQ_SINK                 $CQ_SINK
+VhdlPkgBool USR_DATA_CHECK          $USR_DATA_CHECK

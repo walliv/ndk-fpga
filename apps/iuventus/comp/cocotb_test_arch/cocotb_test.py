@@ -11,7 +11,6 @@ import math
 import os
 import random
 import sys
-from unittest import mock
 
 import cocotb
 from cocotb.clock import Clock
@@ -44,7 +43,7 @@ from endpoint_view import attach_endpoint_mfb_properties  # noqa: E402
 from dma_iuventus_model import QID_W, SQE_LBA_PTR_W, SimplifiedDmaModel  # noqa: E402
 from user_core_model import ReadReqModel, WriteFrameModel, ExpectedReadReq, ExpectedWrFrame  # noqa: E402
 from user_core_model import (  # noqa: E402
-    ADDR_CNTR_WIDTH, LBA_ALIGN, MAX_REQ_LBAS, TST_LBA_COUNT, SeqAddrModel,
+    ADDR_CNTR_WIDTH, LBA_ALIGN, MAX_REQ_LBAS, TST_LBA_COUNT, SeqAddrModel, RandDrawModel,
 )
 from scoreboard import Scoreboard  # noqa: E402
 
@@ -695,27 +694,9 @@ ENGINE_SCORED_REQS_PER_QUEUE = 12
 
 
 async def _case_rd_burst_and_rand(dut, dev, test):
-    """Stage 3.4: two directed corner cases for the read burst path, folded into one (both need
-    NUM_QUEUES>1 to be meaningful and are skipped otherwise):
-      - rd_burst > 1: RD_BURST=2 means the QID round-robin advances every 2 accepted requests
-        instead of every 1 (user_core_test_arch.vhd's rd_qid_rr_p / RoundRobinQid.next_qid()).
-      - random addressing: LBA_PTR follows the LFSR (lfsr_rand_addr_gen_i / lfsr21_step) instead
-        of the sequential counter.
-
-    Scored at the ENGINE boundary (rd_req_accepted_s / nvme_rd_req_qid_s / core_rd_req_lba_ptr),
-    unlike every other case here, because NEITHER property survives user_core_if_pipe.vhd. Its
-    read-request path is a per-queue FIFO whose ENG_RD_REQ_RDY is credit-gated (:356), not gated
-    on the DMA's ready: the engine issues one request per DMA_CLK cycle into those FIFOs, and the
-    DMA drains them through mv_pick_p's own rotation over the non-empty queues. Both consequences
-    are measured, not assumed. The pin-side QID sequence is that rotation (0,1,2,3,...) and
-    carries no trace of RD_BURST; and the LFSR, which steps on core_op_stat_vld, is still on its
-    seed for the engine's first ~32 addresses, because one DMA round trip costs ~22 cycles more
-    than the engine needs to fill the FIFOs. A pin-side scoreboard could only assert things
-    neither register controls.
-
-    The two model hooks are driven by the events they name: the sequential counter advances on the
-    accept and the LFSR on the completion, exactly where user_core_test_arch.vhd puts them.
-    """
+    """RD_BURST=2 must step the QID round-robin every 2 accepts and random addressing must take
+    LFSR draws; scored at the engine boundary, as user_core_if_pipe's per-queue FIFOs drain in
+    their own rotation and erase RD_BURST at the pins."""
     if NUM_QUEUES <= 1:
         return
 
@@ -740,14 +721,9 @@ async def _case_rd_burst_and_rand(dut, dev, test):
         except ValueError:
             return 0
 
-    lfsr_stepped = False
-    scored_after_step = 0
+    scored_lbas = []
 
     async def _engine_monitor():
-        # An accept and a completion can land in the same cycle. The accepted request carries the
-        # address the LFSR held BEFORE that cycle's step (both registers take this cycle's
-        # inputs), so the accept is scored first and the completion applied after.
-        nonlocal lfsr_stepped, scored_after_step
         while sb.checked < scored_reqs:
             await RisingEdge(dut.DMA_CLK)
             await ReadOnly()
@@ -758,11 +734,7 @@ async def _case_rd_burst_and_rand(dut, dev, test):
                     lba_num=_lvl(dut.core_rd_req_lba_num),
                     qid=_lvl(dut.nvme_rd_req_qid_s),
                 ))
-                if lfsr_stepped:
-                    scored_after_step += 1
-            if _lvl(dut.core_op_stat_vld) == 1:
-                model.on_completion()
-                lfsr_stepped = True
+                scored_lbas.append(_lvl(dut.core_rd_req_lba_ptr))
 
     # Pin-side tally only. The pipe's arbiter decides the order there, so nothing about that order
     # is asserted -- only that the requests the engine issued do reach the DMA.
@@ -793,13 +765,11 @@ async def _case_rd_burst_and_rand(dut, dev, test):
     )
     sb.assert_empty()
 
-    # Anti-vacuity guard: some scored request must carry a STEPPED LFSR value, not the seed. The
-    # engine issues one request/cycle while the first completion is a round trip away, so closing
-    # before it would pass unchanged with on_completion deleted.
-    assert scored_after_step > 0, (
-        f"every one of the {scored_reqs} scored addresses predated the first completion, so they "
-        f"were all the LFSR seed and the lfsr21_step/on_completion path went unchecked"
-    )
+    # Every accept takes its own draw: accepts sharing one would pass the scoreboard if the model
+    # shared it too.
+    assert len(set(scored_lbas)) == len(scored_lbas), (
+        f"accepted random reads repeated an LBA: {len(scored_lbas) - len(set(scored_lbas))} "
+        f"repeats in {len(scored_lbas)}")
 
     # The engine can run a whole credit pool ahead of the DMA, so a window that closes inside that
     # pool has not yet shown anything reached the pins. This is what the pin side can still prove.
@@ -814,8 +784,81 @@ async def _case_rd_burst_and_rand(dut, dev, test):
     await aset(test, "rd_burst", 1)  # restore the default for subsequent cases
 
 
-# The card campaign's sweep order: all random sizes, then sequential; the 1-, 2- and 4-LBA random
-# points leave each queue's counter off a drive unit for the next sequential point.
+async def _case_rand_draw_per_accept(dut, dev, test, cycles=6000):
+    """Random reads and write frames together: each accept, even a same-cycle read and write, takes
+    its own draw and the stream steps only on accepts; addresses and the LFSR state are scored
+    against RandDrawModel at the engine boundary."""
+    await e(test.set_queue_range)(NUM_QUEUES)
+    model = RandDrawModel(regions=1)
+    stats = {"rd": 0, "wr": 0, "both": 0, "cycles_active": 0}
+    errors = []
+    running = True
+
+    def _lvl(sig):
+        try:
+            return int(sig.value)
+        except ValueError:
+            return 0
+
+    async def _monitor():
+        while running:
+            await RisingEdge(dut.DMA_CLK)
+            await ReadOnly()
+            if _lvl(dut.lfsr_r) != model.state:
+                errors.append(f"LFSR state {_lvl(dut.lfsr_r):#x}, model {model.state:#x}")
+                return
+            active = _lvl(dut.seq_en) == 1
+            rand = _lvl(dut.tst_sel_reg) & 1
+            rd = _lvl(dut.rd_req_accepted_s) == 1
+            wr = (_lvl(dut.gen_nvme_wr_accept) & 1) == 1
+            rd_lba, (wr_lba,) = model.cycle(read=rd, writes=(wr,), active=active)
+            if not (active and rand):
+                continue
+            stats["cycles_active"] += 1
+            if rd:
+                stats["rd"] += 1
+                got = _lvl(dut.core_rd_req_lba_ptr)
+                if got != rd_lba:
+                    errors.append(f"read took {got:#x}, model draw {rd_lba:#x}")
+            if wr:
+                stats["wr"] += 1
+                got = _lvl(dut.gen_wr_meta_full) & ((1 << SQE_LBA_PTR_W) - 1)
+                if got != wr_lba:
+                    errors.append(f"write frame took {got:#x}, model draw {wr_lba:#x}")
+            if rd and wr:
+                stats["both"] += 1
+                if rd_lba == wr_lba:
+                    errors.append(f"a same-cycle read and write frame shared {rd_lba:#x}")
+
+    mon = cocotb.start_soon(_monitor())
+    await aset(test, "tst_addressing", "rand")
+    await aset(test, "tst_mode", "rd")
+    await aset(test, "rd_req_lba_num", 0)
+    await aset(test.gen, "bursting", False)
+    await aset(test.gen, "burst_size", 1)
+    await aset(test, "contig_test", True)
+    # One-beat frames give a write accept almost every cycle, so read accepts share it, and flood
+    # the model's OP_STAT (two cycles a completion); a three-beat round runs first to supply reads.
+    for frame_len in (192, 64):
+        await aset(test.gen, "frame_length", frame_len)
+        await aset(test.gen, "enabled", True)
+        await ClockCycles(dut.DMA_CLK, cycles // 2)
+        await aset(test.gen, "enabled", False)
+    await aset(test, "contig_test", False)
+    await aset(test.gen, "enabled", False)
+    await ClockCycles(dut.DMA_CLK, 200)
+    running = False
+    await mon
+    await RisingEdge(dut.DMA_CLK)
+
+    assert not errors, f"{len(errors)} random-draw errors, first: {errors[:3]}"
+    cocotb.log.info(f"random draws scored: {stats}")
+    assert stats["rd"] >= 20 and stats["wr"] >= 20, f"too little random traffic scored: {stats}"
+    assert stats["both"] >= 5, f"too few cycles accepted a read and a write frame together: {stats}"
+
+
+# The card's sweep order: all random sizes, then sequential; the 1-, 2- and 4-LBA random points
+# leave each queue's counter off a drive unit for the next sequential point.
 ALIGN_SWEEP_CAMPAIGN = ([("rd", "rand", s) for s in (0, 1, 3, 7, 15, 31, 63, 127, 255)]
                         + [("rd", "seq", 7), ("rd", "seq", 255)])
 # A sequential stride that is not a whole unit, direct random-to-sequential transitions, and writes
@@ -951,17 +994,15 @@ async def _case_lba_alignment_sweep(dut, dev, test, n_queues):
     # Out-of-range completions skip the data phase: the one-outstanding model would otherwise drain a
     # credit pool of 128 KiB reads after every stop. Only addresses are under test.
     dev.dma_model.lba_space_size = 0
-    dev.dma_model.enable_backpressure(bp_period=random.randint(5, 16), bp_low_cycles=random.randint(1, 4))
+    bp_period = random.randint(5, 16)
+    dev.dma_model.enable_backpressure(bp_period=bp_period, bp_low_cycles=random.randint(1, min(4, bp_period - 2)))
     try:
-        # This DevTree has no DMA Iuventus node, so the host-side "fzc is running" guard cannot pass;
-        # it checks the card's setup, not the core.
-        with mock.patch.object(iuventus_rw_test, "assert_fzc_running", lambda _test: None):
-            for mode, addressing, size in ALIGN_SWEEP_CAMPAIGN + ALIGN_SWEEP_MIXED:
+        for mode, addressing, size in ALIGN_SWEEP_CAMPAIGN + ALIGN_SWEEP_MIXED:
+            await _run_point(mode, addressing, size)
+        for lba, points in ALIGN_SWEEP_FOLD:
+            await _load(lba)
+            for mode, addressing, size in points:
                 await _run_point(mode, addressing, size)
-            for lba, points in ALIGN_SWEEP_FOLD:
-                await _load(lba)
-                for mode, addressing, size in points:
-                    await _run_point(mode, addressing, size)
         await _load(0)
     finally:
         running = False
@@ -1531,6 +1572,10 @@ async def test_user_core_reference_model(dut):
     await dev._reset()
     dev.dma_model.reset()
     await _case_rd_burst_and_rand(dut, dev, test)
+
+    await dev._reset()
+    dev.dma_model.reset()
+    await _case_rand_draw_per_accept(dut, dev, test)
 
     await dev._reset()
     dev.dma_model.reset()
