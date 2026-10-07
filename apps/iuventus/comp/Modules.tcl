@@ -25,7 +25,6 @@ set MFB_RECONF_BASE          "$OFM_PATH/comp/mfb_tools/flow/reconfigurator"
 set MFB_PIPE_BASE            "$OFM_PATH/comp/mfb_tools/flow/pipe"
 set DATA_LOGGER_BASE         "$OFM_PATH/comp/debug/data_logger"
 set LATENCY_METER_BASE       "$OFM_PATH/comp/debug/latency_meter"
-set LFSR_GEN_BASE            "$OFM_PATH/comp/base/logic/lfsr_simple_random_gen"
 set EVENT_CNTR_BASE          "$OFM_PATH/comp/base/misc/event_counter"
 set ASFIFOX_BASE             "$OFM_PATH/comp/base/fifo/asfifox"
 set MFB_ASFIFOX_BASE         "$OFM_PATH/comp/mfb_tools/storage/asfifox"
@@ -76,6 +75,11 @@ lappend IP_COMPONENTS [list "mem"  "hbm_ip"          "hbm_ip"            0 1]
 lappend MOD {*}[get_ip_mod_files $IP_COMPONENTS [array get ARCHGRP_ARR]]
 
 lappend MOD "$ENTITY_BASE/user_core_ent.vhd"
+# The checker exists only in the TEST architecture; any other one would build silently without it.
+if {[info exists ARCHGRP_ARR(USR_DATA_CHECK)] && $ARCHGRP_ARR(USR_DATA_CHECK)
+    && $ARCHGRP_ARR(USR_CORE_ARCH) != "TEST"} {
+    error "USR_DATA_CHECK needs USR_CORE_ARCH=TEST, got '$ARCHGRP_ARR(USR_CORE_ARCH)'."
+}
 if {$ARCHGRP_ARR(USR_CORE_ARCH) == "FULL"} {
     lappend MOD "$ENTITY_BASE/user_core_full_arch.vhd"
 } elseif {$ARCHGRP_ARR(USR_CORE_ARCH) == "TEST"} {
@@ -86,7 +90,6 @@ if {$ARCHGRP_ARR(USR_CORE_ARCH) == "FULL"} {
     lappend COMPONENTS [list "MFB_PIPE"                $MFB_PIPE_BASE        "FULL" ]
     lappend COMPONENTS [list "DATA_LOGGER"             $DATA_LOGGER_BASE     "FULL" ]
     lappend COMPONENTS [list "LATENCY_METER"           $LATENCY_METER_BASE   "FULL" ]
-    lappend COMPONENTS [list "LFSR_SIMPLE_RANDOM_GEN"  $LFSR_GEN_BASE        "FULL" ]
     lappend COMPONENTS [list "EVENT_COUNTER"           $EVENT_CNTR_BASE      "FULL" ]
 
     lappend MOD "$ENTITY_BASE/iuventus_integrity_checker.vhd"
