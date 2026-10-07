@@ -2655,6 +2655,9 @@ begin
             DMA_MFB_BLOCK_SIZE  => DMA_MFB_BLOCK_SIZE,
             DMA_MFB_ITEM_WIDTH  => DMA_MFB_ITEM_WIDTH,
 
+            -- Build knob USR_DATA_CHECK (app_conf.tcl); only the TEST architecture reads it.
+            DATA_CHECK => USR_DATA_CHECK,
+
             FPGA_ID_WIDTH => FPGA_ID_WIDTH,
             DEVICE        => DEVICE
         )

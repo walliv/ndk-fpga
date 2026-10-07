@@ -32,7 +32,7 @@ DEBUG_ENABLE ?= false
 NETCOPE_TEMP ?= $(CURDIR)/netcope_tmp/
 export NETCOPE_TEMP
 
-.PHONY: all devtree test clean_devtree
+.PHONY: all devtree test test-data-check clean_devtree
 
 all: test
 
@@ -46,6 +46,15 @@ devtree:
 # which value the design was built with and can predict the round-robin QID pattern.
 test: devtree
 	NUM_QUEUES=$(NUM_QUEUES) NVC_ELAB_ARGS="-g NUM_QUEUES=$(NUM_QUEUES)" $(MAKE) "SYNTHFILES=$(OFM_PATH)/build/targets/comp_vivado.tcl" nvc-sim
+
+# The DATA_CHECK bench (cocotb_data_check.py): USER_CORE elaborated as the app instantiates it -- four
+# queues, two endpoints, one 512 b region -- with the read-data checker built in.
+DC_GENERICS := -g NUM_QUEUES=4 -g PCIE_ENDPOINTS=2 -g DMA_STREAMS=2 -g DMA_MFB_REGION_SIZE=1 \
+               -g DMA_MFB_BLOCK_SIZE=64 -g DATA_CHECK=true
+
+test-data-check: devtree
+	NUM_QUEUES=4 PCIE_ENDPOINTS=2 DATA_CHECK=1 COCOTB_TEST_MODULES=cocotb_data_check \
+		NVC_ELAB_ARGS="$(DC_GENERICS)" $(MAKE) "SYNTHFILES=$(OFM_PATH)/build/targets/comp_vivado.tcl" nvc-sim
 
 $(WAVEFORM_FILE): all
 
