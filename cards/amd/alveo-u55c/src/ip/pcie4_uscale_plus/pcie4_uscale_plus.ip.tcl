@@ -115,9 +115,8 @@ if {$PARAMS(PCIE_ENDPOINT_MODE) == 0} {
 
 # x8 
 } elseif {$PARAMS(PCIE_ENDPOINT_MODE) == 2} {
-    # X1Y1 is the stock site. The HBM-adjacent routing congestion was caused by the HBM data
-    # ports being mapped west of the DMA pblock; with them on 24-30 the design routes with zero
-    # overlaps from X1Y1.
+    # X1Y1 is the stock site: with no HBM data port mapped west of the DMA pblock, the design
+    # routes from it with zero overlaps.
     lappend config_list \
         CONFIG.pcie_blk_locn {X1Y1} \
         CONFIG.PL_LINK_CAP_MAX_LINK_WIDTH {X8}

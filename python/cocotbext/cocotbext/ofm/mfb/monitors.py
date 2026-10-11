@@ -16,17 +16,9 @@ class MFBProtocolError(Exception):
 
 
 class MFBMonitor(BusMonitor):
-    """
-    Monitor for the MFB bus.
-
-    Args:
-        trans_type: The desired type for the transactions returned by the monitor.
-                    Defaults to `bytes` for backward compatibility.
-                    Consider using a child class of `MfbTransaction` for more structured data.
-
-        meta_valid_with: Specifies which signal indicates the validity of metadata
-                         if the 'meta' signal is present. Must be either "sof" (start of frame)
-                         or "eof" (end of frame).
+    """Monitor for the MFB bus. `trans_type` is the returned transaction type (`bytes`, or an
+    `MfbTransaction` subclass, the default); `meta_vld_with` ("sof" or "eof") names the signal that
+    qualifies `meta` when present.
     """
 
     _signals = ["data", "sof_pos", "eof_pos", "sof", "eof", "src_rdy", "dst_rdy"]
@@ -43,13 +35,9 @@ class MFBMonitor(BusMonitor):
         self._trans_type  = trans_type
         self._transaction = MfbTransaction() if self._trans_type is bytes else trans_type()
 
-        # Per-region field widths in bits, taken from the ACTUAL signal slices so
-        # they stay in range whether mfb_params were inferred or passed explicitly.
-        # EOF_POS width is read straight off the signal (len(eof_pos)//regions);
-        # SOF_POS uses log2(region_size) so the region_size==1 placeholder bit
-        # (a 1-bit dummy SOF_POS) is treated as width 0. The bus values are read
-        # each cycle as cocotb LogicArray/Logic snapshots; _field()/_data_bytes()
-        # slice them.
+        # Per-region field widths in bits, from the signal slices so they hold for inferred and
+        # explicit mfb_params. SOF_POS uses log2(region_size), so the 1-bit dummy at region_size==1
+        # has width 0.
         self._sof_pos_w     = int(log2(self._region_size))         # 0 when region_size==1
         self._eof_pos_w     = len(self.bus.eof_pos) // self._regions
         self._region_data_w = self._region_items*self._item_width  # data bits/region (= len(data)//regions)

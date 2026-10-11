@@ -14,9 +14,8 @@ use work.iuventus_sizing_pkg.all;
 
 architecture TEST of USER_CORE is
     constant DLOGGER_HIST_EN    : boolean := FALSE;
-    -- Queue-Identifier width for round-robin distribution across DMA queues. At NUM_QUEUES = 1,
-    -- QID_W collapses to 1 bit but every QID-related signal below is explicitly forced to 0,
-    -- reproducing today's single-queue behaviour bit-for-bit.
+    -- At NUM_QUEUES = 1, QID_W is 1 bit but every QID signal below is forced to 0, so the design
+    -- behaves as a single-queue one.
     constant QID_W              : natural := maximum(1, log2(NUM_QUEUES));
 
     -- Core-side halves of the DMA interfaces; user_core_if_pipe_i sits between these and the ports.
@@ -139,9 +138,6 @@ architecture TEST of USER_CORE is
     signal rd_ch_min_reg     : std_logic_vector(QID_W -1 downto 0);
     signal rd_ch_max_reg     : std_logic_vector(QID_W -1 downto 0);
     signal rd_burst_reg      : std_logic_vector(15 downto 0);
-    -- Which queue's sequential address counter the readback at 0x6C shows. Debug only:
-    -- the counter is ADDR_CNTR_WIDTH bits, so a sequential stream repeats its LBA range
-    -- once it wraps, and only a live readback says where in that cycle a run sits.
     signal rd_qid_cntr       : unsigned(QID_W -1 downto 0);
     signal rd_burst_cntr     : unsigned(15 downto 0);
     -- Round-robin QID for the read-request submit interface; forced to 0 when NUM_QUEUES = 1.
@@ -150,9 +146,8 @@ architecture TEST of USER_CORE is
     -- rd_qid_select_p), skipping full queues: the DMA accepts one request at a time, so
     -- presenting a full queue would stall every other queue too.
     signal rd_qid_cand       : unsigned(QID_W -1 downto 0);
-    -- '1' when rd_qid_cand is actually ready (some queue in [min,max] currently has room); '0'
-    -- when every queue in range is full -- gates NVME_RD_REQ_VLD off so the generator holds
-    -- instead of presenting a request to a queue that would just stall.
+    -- '0' when every queue in [min,max] is full: gates NVME_RD_REQ_VLD off so the generator holds
+    -- rather than stall on a full queue.
     signal rd_qid_cand_rdy   : std_logic;
     -- Scalar view of the per-queue read handshake, so the generator/checker logic below stays
     -- queue-agnostic: request offered, and the RDY bit of the queue QID names.
@@ -298,7 +293,7 @@ architecture TEST of USER_CORE is
     signal contig_test          : std_logic;
     -- Latency mode (TST_SEQ_RAND_SEL bit 4): serialises the read generator to ONE operation in
     -- flight -- LATENCY_METER pairs positionally with no tag, so concurrency would pair a
-    -- completion with the wrong start. Deliberately QD1, not a throughput mode.
+    -- completion with the wrong start.
     signal lat_meas_mode        : std_logic;
     -- '0' while a measured operation is still outstanding.
     signal lat_meas_issue_ok    : std_logic;
@@ -508,9 +503,8 @@ architecture TEST of USER_CORE is
     -- Number of LBAs one generated write frame covers.
     signal wr_frame_lba_cnt    : unsigned(WR_LBA_CNT_W -1 downto 0);
 
-    -- Registered stage between MFB_RECONFIGURATOR and the WR MFB outputs. Breaks the
-    -- DMA-to-user-core critical path: core_wr_mfb_dst_rdy is driven combinationally from inside
-    -- the DMA and was landing 20 logic levels later, WNS -1.246 ns.
+    -- Registered stage between MFB_RECONFIGURATOR and the WR MFB outputs: core_wr_mfb_dst_rdy is
+    -- driven combinationally from deep inside the DMA.
     signal pip_nvme_wr_sof     : std_logic_vector(core_wr_mfb_sof'range);
     signal pip_nvme_wr_eof     : std_logic_vector(core_wr_mfb_eof'range);
     signal pip_nvme_wr_sof_pos : std_logic_vector(core_wr_mfb_sof_pos'range);
@@ -556,9 +550,8 @@ architecture TEST of USER_CORE is
     signal dc_mi_drd      : std_logic_vector(MI_WIDTH -1 downto 0);
 
     attribute mark_debug : string;
-    -- mark_debug preserves a net from optimisation; nothing consumes these since the ILA that
-    -- probed them is commented out in src/ilas.xdc, and report_qor_assessment flags them on a bus
-    -- already over budget. Re-enable together with ilas.xdc only.
+    -- mark_debug keeps a net from optimisation and only the ILA in src/ilas.xdc consumes these:
+    -- re-enable both together.
     -- attribute mark_debug of core_rd_mfb_data    : signal is "true";
     -- attribute mark_debug of core_rd_mfb_sof     : signal is "true";
     -- attribute mark_debug of core_rd_mfb_eof     : signal is "true";
@@ -1148,9 +1141,9 @@ begin
             pip_wr_meta((r+1)*(SQE_LBA_PTR_W + QID_W) -1 downto r*(SQE_LBA_PTR_W + QID_W));
     end generate;
 
-    -- Data is generated from the framing rather than carried through the reconfigurator, built
-    -- from the PIPED SOF/EOF: wr_mfb_data_cnt_p counts on the write handshake, now this pipe's TX
-    -- side, keeping counters and framing in step.
+    -- Data is generated from the PIPED SOF/EOF rather than carried through the reconfigurator:
+    -- wr_mfb_data_cnt_p counts on the pipe's TX-side handshake, keeping counters and framing in
+    -- step.
     core_wr_mfb_data    <= chk_wr_data when (integ_en = '1') else
                            dc_wr_pat_data when (dc_pat_wr_en = '1') else
                            gen_wr_mfb_data(wr_mfb_pkt_cnt_reg, wr_mfb_word_cnt_reg, pip_nvme_wr_sof, pip_nvme_wr_eof);
@@ -1301,8 +1294,7 @@ begin
                     mi_split_drd(0)(31)                                     <= rd_mfb_id_vld_reg;
 
                 -- Sequential-address readback (debug): 0x70 selects the queue, 0x74 shows its live
-                -- LBA. Bit 31 of 0x74 flags a select naming no built queue, so queue 0's address
-                -- isn't mistaken for it; only this readback says where a wrapped stream sits.
+                -- LBA.
                 when x"70" =>
                     mi_split_drd(0)(7 downto 0)                             <= seq_addr_sel_reg;
                 when x"74" =>
@@ -1423,9 +1415,7 @@ begin
         TX_DST_RDY => gen_nvme_wr_dst_rdy
     );
 
-    -- QID threaded alongside the write frame through the reconfigurator; forced to 0 when
-    -- NUM_QUEUES = 1 so the single-queue behaviour is unchanged regardless of the generator's
-    -- (unconfigured) channel default.
+    -- Forced to 0 at NUM_QUEUES = 1, whatever the generator's unconfigured channel default.
     gen_nvme_wr_qid_mskd <= (others => '0') when (NUM_QUEUES = 1) else gen_nvme_wr_qid;
 
     -- Registered stage on the reconfigurator's TX side. RX_DATA is tied off and TX_DATA left open

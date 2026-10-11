@@ -3,12 +3,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Register access for HBM_THROUGHPUT_TESTER.
-
-The tester runs in the HBM port clock domain and counts beats against cycles there, so a rate
-derived from these counters is the port's own. The host clock is used only to decide how long to
-leave the generator running -- never as a divisor, since a rate taken against wall time would
-absorb every pause between register reads.
+"""Register access for HBM_THROUGHPUT_TESTER. Rates divide beats by HBM port clock cycles, never
+by wall time, which would absorb every pause between register reads.
 """
 
 from dataclasses import dataclass

@@ -14,17 +14,15 @@ from cocotbext.ofm.dma.iuventus import IuventusMiRegMap, CtrlRegBits, StatRegBit
 from cocotbext.ofm.dma.iuventus import IuventusPerQueueCntrRegMap, per_queue_cntr_reg_addr
 from cocotbext.ofm.dma.iuventus import IuventusPerQueueRegMap, per_queue_reg_addr
 
-# WRBUFF peer-write 32B-alignment stats (HW-measured fit of NVMe CQ peer-writes to a 32B-aligned,
-# <=16-beat AXI burst). Not in IuventusMiRegMap, which only lists addresses needed for SSD
-# throughput/HW debug.
+# WRBUFF peer-write 32B-alignment stats (NVMe CQ peer-writes vs. a 32B-aligned, <=16-beat AXI
+# burst); not in IuventusMiRegMap, which lists only addresses needed for SSD throughput/HW debug.
 CQ_WR_TOTAL_CNTR_L_ADDR         = 0x0CC
 CQ_WR_UNALIGN_START_CNTR_L_ADDR = 0x0D4
 CQ_WR_UNALIGN_SIZE_CNTR_L_ADDR  = 0x0DC
 CQ_WR_OVER16BEATS_CNTR_L_ADDR   = 0x0E4
 
-# WRBUFF_FIFO capacity drops: inbound read-data frames dropped because the ingest FIFO was
-# full. Always-on (not PROFILE_EN-gated). 0 is healthy; see the DMA core's own documentation
-# for diagnosis of a non-zero value.
+# WRBUFF_FIFO capacity drops: inbound read-data frames lost to a full ingest FIFO. Always-on (not
+# PROFILE_EN-gated); 0 is healthy, see the DMA core's documentation for a non-zero value.
 WRBUFF_DROPPED_FRAME_CNTR_L_ADDR = 0x0EC
 
 # HBM datapath alignment counters. Always-on, not PROFILE_EN-gated. A burst that is not
@@ -32,9 +30,8 @@ WRBUFF_DROPPED_FRAME_CNTR_L_ADDR = 0x0EC
 WRBUFF_UNALIGNED_CNTR_L_ADDR     = 0x114
 RDBUFF_RD_UNALIGNED_CNTR_L_ADDR  = 0x11C
 
-# Drain/fence counters, addressed directly rather than through IuventusMiRegMap because that enum
-# does not carry them. Each is a 64-bit counter whose low word sits at the address below. See the
-# DMA core's own documentation for their semantics.
+# Drain/fence counters, addressed directly because IuventusMiRegMap lacks them; each is a 64-bit
+# counter with its low word at the address below (semantics: the DMA core's documentation).
 DRAIN_ADMIT_CNTR_L_ADDR          = 0x0FC
 DRAIN_FENCE_W_CNTR_L_ADDR        = 0x104
 DRAIN_HBM_W_CNTR_L_ADDR          = 0x10C
@@ -46,9 +43,8 @@ FENCE_AFULL_CNTR_L_ADDR          = 0x12C
 FENCE_GAP_ADDR                   = 0x134
 FENCE_TARGET_ADDR                = 0x138
 
-# Write-path drain counters. These three plus TOTAL_CYCLES split every cycle into idle /
-# cc-stalled / serving and give the mean commands in flight. See the DMA core's own
-# documentation for their semantics.
+# Write-path drain counters: these three plus TOTAL_CYCLES split every cycle into idle / cc-stalled
+# / serving and give the mean commands in flight (semantics: the DMA core's documentation).
 DRAIN_IDLE_CNTR_L_ADDR           = 0x140
 CC_STALL_CNTR_L_ADDR             = 0x148
 DEV_INFLIGHT_ACC_L_ADDR          = 0x150
@@ -242,9 +238,8 @@ class DMAIuventusRegAccess(nfb.BaseComp):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-    # NVMe doorbells sit at BAR + 0x1000 + 2*qid*stride, so every queue on one SSD shares that
-    # drive's doorbell base above the page offset; two queues resolving to the same page means
-    # both were bound to the same drive.
+    # NVMe doorbells sit at BAR + 0x1000 + 2*qid*stride, so queues of one SSD share its doorbell
+    # base above the page offset; two queues in the same page are bound to the same drive.
     DBL_PAGE_MASK = ~0xFFF
 
     def queue_ssd_key(self, qid: int) -> int:
@@ -256,13 +251,9 @@ class DMAIuventusRegAccess(nfb.BaseComp):
             per_queue_reg_addr(IuventusPerQueueRegMap.SQTDBL_BADDR_L, qid)) & self.DBL_PAGE_MASK
 
     def check_one_queue_per_ssd(self, num_queues: int) -> None:
-        """Raise if more than one queue pair is bound to the same SSD.
-
-        The design supports exactly one SQ/CQ pair per drive. Queues sharing a drive contend for
-        that drive's completion path while the per-queue counters still report per queue, so any
-        throughput or latency figure derived from them stops attributing to a device. The binding
-        is made by fzc (-i <queue> -t traddr:<ssd>), and each fzc instance cannot see the others,
-        so this is the first place in the stack where the collision is observable.
+        """Raise if two queue pairs bind the same SSD: they would share its completion path while
+        the per-queue counters still report per queue. fzc instances cannot see each other's
+        bindings, so this is the first place the collision shows.
         """
         seen = {}
         for qid in range(num_queues):
@@ -281,11 +272,9 @@ class DMAIuventusRegAccess(nfb.BaseComp):
         self._comp.wait_for_bit(IuventusMiRegMap.STATUS.value, StatRegBits.READY.value, level=True)
 
     def disable(self) -> None:
-        """Graceful stop + drain barrier. Clearing ENABLE stops the design from accepting new
-        traffic and drains every outstanding command; STATUS.READY only drops once the design is
-        fully idle, so this call BLOCKS until the drain has completed. Always call this (never a
-        bare CONTROL=0 write) and let it return BEFORE tearing down the host NVMe queues -- otherwise
-        the SSD's outstanding P2P fetches are stranded and its controller state is corrupted."""
+        """Graceful stop and drain barrier: blocks until STATUS.READY drops (design idle). Call it,
+        never a bare CONTROL=0 write, before tearing down host NVMe queues, or the SSD's outstanding
+        P2P fetches strand and corrupt its controller."""
         self._comp.clr_bit(IuventusMiRegMap.CONTROL.value, CtrlRegBits.ENABLE.value)
         self._comp.wait_for_bit(IuventusMiRegMap.STATUS.value, StatRegBits.READY.value, level=False)
 
@@ -444,8 +433,6 @@ class DMAIuventusRegAccess(nfb.BaseComp):
     def lba_mask(self, value: int) -> None:
         self._comp.write16(IuventusMiRegMap.LBA_NUM_MASK.value, value)
 
-    # succ_cpls/unsucc_cpls below are COMMON aggregates (all queues); pq_succ_cpls(qid)/pq_unsucc_cpls(qid)/
-    # pq_sqe_disp(qid)/pq_cqe_proc(qid) further down give the per-queue breakdown for localizing a stall.
     @property
     def rd_pages_free(self) -> int:
         """Free READ pages. 0 under load is normal."""
@@ -481,10 +468,8 @@ class DMAIuventusRegAccess(nfb.BaseComp):
         return self._comp.read64(DEV_INFLIGHT_ACC_L_ADDR)
 
     def write_drain_split(self) -> dict:
-        """The write drain as fractions of one cycle budget, plus the mean queue depth at the drive.
-
-        Reads all four counters from one sample so they share a window. 'serving' is the remainder,
-        so the three fractions sum to 1 by construction.
+        """The write drain as fractions of one cycle budget plus the drive's mean queue depth, all
+        from one sample; 'serving' is the remainder, so the fractions sum to 1.
         """
         cyc = self.total_cycles
         if cyc == 0:
@@ -499,24 +484,18 @@ class DMAIuventusRegAccess(nfb.BaseComp):
         }
 
     def op_prof_classes(self) -> dict:
-        """Raw cycle count of each OP_CTRL stall class plus the elapsed cycles they share a
-        window with, all from ONE snapshot so they are comparable.
-
-        Reads zero on a build without PROFILE_EN. 'cycles' is TOTAL_CYCLES, which free-runs while
-        the counters are not reset, so it also covers cycles the core was disabled."""
+        """Raw cycle count per OP_CTRL stall class plus elapsed cycles, from one snapshot; zero
+        without PROFILE_EN. 'cycles' is the free-running TOTAL_CYCLES, so it includes cycles the
+        core was disabled."""
         self.sample_cntrs()
         out = {name: self._comp.read64(addr) for name, addr in OP_PROF_CLASS_ADDRS}
         out["cycles"] = self._comp.read64(TOTAL_CYCLES_CNTR_L_ADDR)
         return out
 
     def stall_profile(self, before: dict = None) -> dict:
-        """The stall classes as fractions of ELAPSED cycles, with 'idle' as the unclassified
-        remainder -- pass a previous op_prof_classes() sample as `before` to window it.
-
-        A share of the classified cycles alone cannot be falsified by an idle DMA: eight busy
-        cycles in a second render as a full-looking breakdown. Scoring against elapsed makes that
-        case read idle=1.000 with raw counts in single digits. 'idle' also absorbs the cycles the
-        core was disabled."""
+        """Stall classes as fractions of ELAPSED cycles, 'idle' the unclassified remainder (disabled
+        cycles included); pass an earlier op_prof_classes() as `before` to window it. An idle DMA
+        then reads idle=1.000, not a full-looking breakdown."""
         now = self.op_prof_classes()
         if before is not None:
             now = {k: now[k] - before[k] for k in now}
@@ -590,6 +569,8 @@ class DMAIuventusRegAccess(nfb.BaseComp):
         self.sample_cntrs()
         return self._comp.read64(IuventusMiRegMap.PC_BEATS_L.value)
 
+    # succ_cpls/unsucc_cpls are COMMON aggregates (all queues); pq_succ_cpls/pq_unsucc_cpls/
+    # pq_sqe_disp/pq_cqe_proc below give the per-queue breakdown for localizing a stall.
     @property
     def succ_cpls(self) -> int:
         return self._comp.read64(IuventusMiRegMap.SUCC_COMPL_CNTR_L.value)
@@ -633,10 +614,8 @@ class DMAIuventusRegAccess(nfb.BaseComp):
     def tag_fifo_status(self) -> int:
         return self._comp.read16(IuventusMiRegMap.TAG_FIFO_STATUS.value)
 
-    # ==== Buffer page occupancy ====
-    # Both registers pack {31:16 = fewest pages ever free, 15:0 = free right now}. The watermark is
-    # cleared only by RST, not by sample_cntrs()/rst_cntrs(), so it survives the run it explains.
-
+    # Both registers pack {31:16 = fewest pages ever free, 15:0 = free currently}; the watermark is
+    # cleared only by RST, not sample_cntrs()/rst_cntrs(), so it survives the run it explains.
     @property
     def rd_pages_free(self) -> int:
         return self._comp.read32(IuventusMiRegMap.RD_PAGES_FREE.value) & 0xFFFF
@@ -653,10 +632,8 @@ class DMAIuventusRegAccess(nfb.BaseComp):
     def wr_pages_free_min(self) -> int:
         return (self._comp.read32(IuventusMiRegMap.WR_PAGES_FREE.value) >> 16) & 0xFFFF
 
-    # --- Read-drain observability ---
-    # A wedged queue is not always visible in completion-level indicators; see design_err /
-    # queue_wedged() below for per-queue detection.
-
+    # A wedged queue is not always visible in completion-level indicators; design_err /
+    # queue_wedged() below detect it per queue.
     @property
     def design_err(self) -> int:
         return self._comp.read32(IuventusMiRegMap.DESIGN_ERR.value)
@@ -669,9 +646,8 @@ class DMAIuventusRegAccess(nfb.BaseComp):
         err = self.design_err
         return [q for q in range(32) if (err >> q) & 1]
 
-    # --- Per-queue SSD-facing stat counters (PER_Q_CNTR_BASE) ---
-    # Read-only, via sample_cntrs() like every counter here. `qid` is 0..NUM_QUEUES-1; see
-    # IuventusPerQueueCntrRegMap's docstring for why sq_pcie_rds has no per-queue counterpart.
+    # Per-queue counters (PER_Q_CNTR_BASE), read-only via sample_cntrs(); `qid` is 0..NUM_QUEUES-1.
+    # IuventusPerQueueCntrRegMap's docstring explains why sq_pcie_rds has no per-queue counterpart.
     def pq_succ_cpls(self, qid: int) -> int:
         return self._comp.read64(per_queue_cntr_reg_addr(IuventusPerQueueCntrRegMap.SUCC_CPLS_L, qid))
 
@@ -688,7 +664,7 @@ class DMAIuventusRegAccess(nfb.BaseComp):
     def nvme_flush_disp(self) -> int:
         return self._comp.read64(IuventusMiRegMap.NVME_FLUSH_DISP_CNTR_L.value)
 
-    # --- WRBUFF peer-write 32B-alignment statistics (empirical HW measurement) -----------------
+    # WRBUFF peer-write 32B-alignment statistics (empirical HW measurement)
     @property
     def cq_wr_total(self) -> int:
         return self._comp.read64(CQ_WR_TOTAL_CNTR_L_ADDR)
