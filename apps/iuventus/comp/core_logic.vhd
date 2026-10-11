@@ -196,9 +196,8 @@ architecture FULL of CORE_LOGIC is
         return hbm_dma_driven_port_f(idx);
     end function;
 
-    -- AXI_PIPE stages per active data port on the 450 MHz side (hbm_axi_cdc_bridge_i -> hbm_ip, see
-    -- hbm_450_pipe_i) help close timing; stage count is a tunable top-level knob. Added latency is
-    -- acceptable; lost throughput is not.
+    -- AXI_PIPE stages per DMA-driven port in front of hbm_ip (hbm_450_pipe_i), for timing: added
+    -- latency is acceptable, lost throughput is not.
     constant HBM_450_PIPE_STAGES : natural := 2;
 
     -- DMA MFB RQ parameters
@@ -480,9 +479,8 @@ architecture FULL of CORE_LOGIC is
     signal hbm_axi_bvalid : std_logic_vector(HBM_PORTS-1 downto 0);
     signal hbm_axi_bready : std_logic_vector(HBM_PORTS-1 downto 0);
 
-    -- 450 MHz AXI from DMA_IUVENTUS (already clock-crossed), feeding each active port's AXI_PIPE,
-    -- sized HBM_PORTS wide. cdc_axi_* is the pipe's M_AXI (bridge-side); hbm_axi_* is its S_AXI
-    -- (hbm_ip-side), one stage per port, all in the 450 MHz domain.
+    -- 450 MHz AXI from DMA_IUVENTUS into each DMA-driven port's AXI_PIPE: cdc_axi_* on the pipe's
+    -- M_AXI (DMA side), hbm_axi_* on its S_AXI (hbm_ip side).
     signal cdc_axi_araddr  : slv_array_t(HBM_PORTS-1 downto 0)(HBM_ADDR_WIDTH-1 downto 0);
     signal cdc_axi_arburst : slv_array_t(HBM_PORTS-1 downto 0)(HBM_BURST_WIDTH-1 downto 0);
     signal cdc_axi_arid    : slv_array_t(HBM_PORTS-1 downto 0)(HBM_ID_WIDTH-1 downto 0);
@@ -1671,9 +1669,8 @@ begin
         generic map (
             BANDWIDTH        => "OPTIMIZED",
             DIVCLK_DIVIDE    => 1,
-            -- Fvco 1350 MHz (100 x 13.5) for the same 450 MHz CLKOUT0: MMCM jitter falls as Fvco
-            -- rises, and DS923 puts MMCM_FVCOMIN/MAX at 800/1600 MHz, so 1350 sits well inside
-            -- range. CLKOUT1..6 stay /2 and are unconnected.
+            -- MMCM jitter falls as Fvco rises; DS923 bounds Fvco to 800-1600 MHz. CLKOUT1..6 stay
+            -- /2 and are unconnected.
             CLKFBOUT_MULT_F  => 13.5,
             CLKOUT0_DIVIDE_F => 3.0,
             CLKOUT1_DIVIDE   => 2,
@@ -1704,17 +1701,13 @@ begin
             RST       => SYSRST
         );
 
-    -- Internal feedback loop (CLKFBOUT -> CLKFBIN, no BUFG) -- mirrors mmcm_i's own CLKFBOUT/
-    -- CLKFBIN loop exactly; CLKOUT0 is a separate, independently divided 450 MHz tap needing only
-    -- its own output BUFG, not a feedback role.
+    -- Feedback stays internal (CLKFBOUT -> CLKFBIN, no BUFG), as in mmcm_i; only CLKOUT0 needs one.
     hbm_450_bufg_i : component BUFG
         port map (
             I => hbm_450_clk_raw,
             O => hbm_450_clk);
 
-    -- Reset synchronization into the new 450 MHz domain (mirrors global_reset_i's own
-    -- SYSCLK-domain ASYNC_RESET pattern below): held asserted until BOTH the main SYSCLK PLL
-    -- (pll_locked) and this dedicated MMCM (hbm_450_locked) have locked.
+    -- Held in reset until both the SYSCLK PLL (pll_locked) and this MMCM (hbm_450_locked) lock.
     hbm_450_rst_i : entity work.ASYNC_RESET
         generic map (
             TWO_REG  => FALSE,
@@ -2746,9 +2739,6 @@ begin
         -- and unused_port_g partition HBM_PORTS exactly.
         dma_driven_port_g : if (hbm_dma_driven_port_f(i)) generate
             hbm_axi_wdata_parity(i) <= (others => '0');
-            -- DMA_IUVENTUS's AXI is already in the 450 MHz domain, so this only pipes it onward
-            -- (see the DMA core's docs). AXI_PIPE stage between the DMA's HBM AXI (cdc_axi_*,
-            -- M_AXI) and hbm_ip (hbm_axi_*, S_AXI); CLK/RESET share the 450 MHz domain.
             hbm_450_pipe_i : entity work.AXI_PIPE
             generic map (
                 AXI_ADDR_WIDTH  => HBM_ADDR_WIDTH,

@@ -352,9 +352,8 @@ begin
         INTERVAL_CYCLES => evcr_interval_cycles_reg,
         INTERVAL_SET    => evcr_interval_set,
 
-        -- Constant weight: the event already means a whole beat was accepted, and a beat always
-        -- carries RECS_BEAT records. TOTAL_EVENTS therefore counts records, not beats, and cannot
-        -- disagree with the record count the engine reports.
+        -- An accepted beat always carries RECS_BEAT records, so TOTAL_EVENTS counts records and
+        -- cannot disagree with the engine's record count.
         EVENT_CNT => std_logic_vector(to_unsigned(RECS_BEAT, log2(RECS_BEAT + 1))),
         EVENT_VLD => sts_rec_event,
 
@@ -363,9 +362,8 @@ begin
         TOTAL_UPDATE => evcr_update
     );
 
-    -- Both totals are snapshotted on the same update, so the pair software divides describes one
-    -- interval; reading the live outputs could let a boundary fall between the two MI reads and
-    -- mix a numerator from one window with a denominator from the next.
+    -- Both totals snapshot on the same update, so the pair software divides describes one
+    -- interval, never a numerator and a denominator from adjacent windows.
     evcr_reg_p : process (DMA_CLK) is
     begin
         if (rising_edge(DMA_CLK)) then

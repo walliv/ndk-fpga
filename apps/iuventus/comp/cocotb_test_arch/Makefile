@@ -5,9 +5,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 TOP_LEVEL_ENT=USER_CORE
-# Modules.tcl lives here, not one level up: see its header for why USER_CORE gets a bespoke,
-# component-scoped source list instead of ../Modules.tcl, which builds the whole app (PCIe core,
-# DMA_IUVENTUS, boot/SDM/HWID).
+# A local Modules.tcl, because ../Modules.tcl builds the whole app (PCIe core, DMA_IUVENTUS,
+# boot/SDM/HWID).
 TOP_LEVEL_PATH=.
 TARGET=nvc-sim
 NVC_PLATFORM_TAGS := xilinx
@@ -26,9 +25,8 @@ NUM_QUEUES ?= 1
 WAVEFORM_FILE=user_core.fst
 DEBUG_ENABLE ?= false
 
-# Where the component-level DevTree.dtb is written, and where cocotbext.nfb reads it back at run
-# time. The generic nvc build path does not export NETCOPE_TEMP the way the vendor targets do, so
-# this component sets it directly.
+# Where DevTree.dtb is written and cocotbext.nfb reads it back; the generic nvc build path does not
+# export NETCOPE_TEMP the way the vendor targets do.
 NETCOPE_TEMP ?= $(CURDIR)/netcope_tmp/
 export NETCOPE_TEMP
 

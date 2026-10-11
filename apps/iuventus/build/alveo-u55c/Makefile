@@ -14,9 +14,8 @@ APP_CONF=app_conf.tcl
 
 PCIE_CONF=1xGen4x8
 DMA_TYPE=5
-# Which USER_CORE architecture to build: TEST is the traffic generator plus integrity checker,
-# GROUPBY is the streaming aggregation engine. Override on the command line, e.g.
-# `make USR_CORE_ARCH=GROUPBY`.
+# USER_CORE architecture: TEST (traffic generator plus integrity checker) or GROUPBY (streaming
+# aggregation engine), e.g. `make USR_CORE_ARCH=GROUPBY`.
 USR_CORE_ARCH?=TEST
 # 1 builds the TEST core's line-rate read-data checker (app_conf.tcl reads it from the
 # environment, like CQ_SINK), e.g. `make USR_DATA_CHECK=1`.

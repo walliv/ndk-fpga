@@ -4,9 +4,8 @@
 # Author(s): Vladislav Valek <vladislav.valek@stud.uni-heidelberg.de>
 #
 # SPDX-License-Identifier: Apache-2.0
-"""Checks the error channels a throughput number can't be trusted without: unsucc_cpls and
-sqes_dispatched==succ_cpls stay clean even while a queue is silently wedged, so DESIGN_ERR and
-the per-queue completion balance are what actually catch it.
+"""Run-validity gate: unsucc_cpls and sqes_dispatched==succ_cpls stay clean while a queue silently
+wedges, so DESIGN_ERR and the per-queue completion balance are checked too.
 """
 import os
 import sys

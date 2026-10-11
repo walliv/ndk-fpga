@@ -333,18 +333,16 @@ begin
         end if;
     end process;
 
-    -- Every request the engine counts as issued reaches the DMA and completes, even one queued
-    -- when a run aborts. Dropping them would leave the completion count short of the issue count;
-    -- reconciling the two is how software knows the abort has quiesced.
+    -- Every request the engine counts as issued reaches the DMA, even after an abort: software
+    -- knows the abort has quiesced once the completion count matches the issue count.
     fifo_rd_p : process (all) is
     begin
         fifo_rd         <= (others => '0');
         fifo_rd(mv_sel) <= mv_fire;
     end process;
 
-    -- An empty queue has no head request, so offer the largest read instead: that is the size
-    -- admission applied to every queue before, so an idle queue cannot be admitted on a smaller
-    -- footprint than the request that eventually arrives.
+    -- An empty queue has no head request, so offer the largest read: an idle queue must not be
+    -- admitted on a smaller footprint than the request that eventually arrives.
     head_num_g : for q in 0 to NUM_QUEUES-1 generate
         DMA_RD_REQ_NPAGES_ALL((q+1)*NPAGES_W-1 downto q*NPAGES_W) <=
             fifo_do(q)(FIFO_W-1 downto LBA_PTR_W+8) when (fifo_empty(q) = '0') else

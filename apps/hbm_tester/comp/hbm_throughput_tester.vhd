@@ -217,9 +217,8 @@ begin
                     when A_PORT_EN =>
                         port_en_r <= MI_DWR(PORTS-1 downto 0);
                     when A_ADDR_MASK =>
-                        -- Byte-address span the generator walks before wrapping, as a mask. The
-                        -- default covers the whole pseudo-channel; a small mask keeps the traffic
-                        -- inside one DRAM page and separates page-hit rate from raw bandwidth.
+                        -- Byte-address span walked before wrapping. A mask inside one DRAM page
+                        -- separates page-hit rate from raw bandwidth.
                         addr_mask_r <= resize(unsigned(MI_DWR), HBM_ADDR_WIDTH);
                     when A_W_BASE =>
                         -- ORed onto the write address: with bits above ADDR_MASK the write stream

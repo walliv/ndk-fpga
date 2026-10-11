@@ -4,8 +4,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-# Mirrors the USR_CORE_ARCH=="GROUPBY" branch of ../Modules.tcl. Far shorter than the TEST mirror
-# because this architecture instantiates only its MI slave, the engine and the engine's table.
+# Mirrors the USR_CORE_ARCH=="GROUPBY" branch of ../Modules.tcl.
 set APP_COMP_BASE [file normalize "$ENTITY_BASE/.."]
 
 set MI_ASYNC_BASE      "$OFM_PATH/comp/mi_tools/async"
