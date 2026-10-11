@@ -13,9 +13,8 @@ use IEEE.numeric_std.all;
 use work.math_pack.all;
 use work.type_pack.all;
 
--- AMD XPM macros for the memory arrays (XPM_MEMORY_TDPRAM/XPM_MEMORY_SDPRAM), instantiated
--- directly rather than inferred -- see the DEVICE assertion and XPM_WRITE_MODE below for why
--- the write mode has to be stated explicitly here.
+-- XPM memory macros are instantiated directly rather than inferred, so the write mode is stated
+-- explicitly (see the DEVICE assertion and XPM_WRITE_MODE below).
 library xpm;
 use xpm.vcomponents.all;
 
@@ -429,11 +428,8 @@ begin
         addr_cntr_nst <= addr_cntr_pst;
         chan_num_next <= chan_num_reg;
 
-        -- Increment the address for a next word by 8 (the number of DWs in the
-        -- word) to be written to the BRAMs.  When the new packet arrives, its
-        -- address is stored and incremented by one region size
-
-        -- Be careful! The number '8' is only correct for one region
+        -- Each accepted word advances the address by its DW count; a frame start reloads it from
+        -- that region's META, advanced by the regions left in the word.
         if (pcie_mfb_src_rdy_inp_reg(INP_REG_NUM) = '1') then
             -- Address Increment
             -- +16 (amount of DWs for two regions)
@@ -1218,9 +1214,8 @@ begin
         end if;
     end process;
 
-    -- READ_LATENCY => 1: rd_chan_p_reg/rd_off_reg/rd_row_lsb_reg ARE the cycle-1 results above
-    -- (plain wires, no added registers -- keeps this configuration's netlist identical to before
-    -- READ_LATENCY existed).
+    -- READ_LATENCY => 1: rd_chan_p_reg/rd_off_reg/rd_row_lsb_reg ARE the cycle-1 results above,
+    -- plain wires with no added register.
     rd_pipe_lat1_g : if (READ_LATENCY = 1) generate
         rd_chan_p_reg  <= rd_chan_p_reg_stg1;
         rd_off_reg     <= rd_off_reg_stg1;

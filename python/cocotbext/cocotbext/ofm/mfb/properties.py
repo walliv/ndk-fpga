@@ -50,11 +50,9 @@ def _field_str(binstr, hi, lo):
 
 
 class MFBProperty:
-    """Passive conformance checker for one MFB interface.
-
-    Samples the bus every rising edge and reports any departure from the MFB specification in
-    `comp/mfb_tools/readme.rst`. It never drives a signal, so it can ride alongside a driver, a
-    monitor, or an interface that has neither.
+    """Passive conformance checker for one MFB interface: samples every rising edge and reports
+    departures from `comp/mfb_tools/readme.rst`. It never drives a signal, so it can ride alongside
+    a driver, a monitor, or neither.
     """
 
     _signals = ["data", "sof", "eof", "src_rdy", "dst_rdy"]
@@ -71,9 +69,8 @@ class MFBProperty:
         self.reset_active_level = reset_active_level
         self.straddling = straddling
         self.max_errors = max_errors
-        # A testbench driving a ready line mid-cycle (to keep its monitor off the clock edge) leaves
-        # that line one cycle stale at ReadOnly. Sampling past the write realigns with the
-        # registered signals; give (value, unit) to enable it.
+        # A ready line driven mid-cycle (to keep its monitor off the clock edge) is one cycle stale
+        # at ReadOnly; sampling past the write realigns it. Give (value, unit) to enable.
         self._settle = Timer(*sample_delay) if sample_delay else None
 
         unknown = set(disable) - set(MFB_RULES)
@@ -301,9 +298,8 @@ class MFBProperty:
                 continue
 
             if s and e:
-                # Both edges in one region is legal in exactly two shapes: a whole frame, or the
-                # end of the open frame followed by the start of the next. A second frame may not
-                # also end here, so which shape it is follows from the two positions.
+                # Both edges in one region is legal as a whole frame or as the end of the open frame
+                # plus the start of the next; the two positions say which.
                 if e_item >= s_item:
                     if self.frame_open:
                         self._violation("sof_while_frame_open",
@@ -370,10 +366,8 @@ class MFBProperty:
 
 
 def attach_mfb_properties(entity, clock, reset=None, include=None, exclude=(), **kwargs):
-    """Attach an MFBProperty to every MFB interface the entity exposes.
-
-    Interfaces are discovered from the `<name>_SRC_RDY` ports, so a bus that no driver or monitor
-    touches is covered too. Returns them keyed by interface name.
+    """Attach an MFBProperty to every MFB interface the entity exposes, keyed by interface name.
+    Discovery uses the `<name>_SRC_RDY` ports, so a bus no driver or monitor touches is covered too.
     """
     handles = {a.upper(): a for a in dir(entity)}
     names = []
@@ -396,7 +390,7 @@ def attach_mfb_properties(entity, clock, reset=None, include=None, exclude=(), *
             continue
         props[base] = MFBProperty(entity, base, clock, reset=reset, **kwargs)
     # Announce what got covered: a silent checker and an absent one look identical in a green log,
-    # and a bus dropped by a rename would otherwise pass as verified.
+    # and a bus lost in a rename would otherwise pass as verified.
     entity._log.info("MFB conformance checks on: %s" % (", ".join(
         f"{n} MFB#({p._regions},{p._region_size},{p._block_size},{p._item_width})"
         for n, p in sorted(props.items())) or "<none found>"))

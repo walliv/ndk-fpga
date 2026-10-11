@@ -1,7 +1,6 @@
-# user_core_model.py: behavioral reference model of USER_CORE's TEST architecture read/write
-# request generation (apps/iuventus/comp/user_core_test_arch.vhd), predicting the DUT's expected
-# NVME_RD_REQ / NVME_WR_MFB output streams from scratch (not by re-running the RTL) so a scoreboard
-# can compare DUT vs model.
+# user_core_model.py: reference model of USER_CORE's TEST-architecture request generation
+# (user_core_test_arch.vhd), predicting the NVME_RD_REQ and NVME_WR_MFB streams independently of the
+# RTL for a scoreboard.
 # Copyright (C) 2026 Universitaet Heidelberg, Institut fuer Technische Informatik (ZITI)
 # Author(s): Vladislav Valek <vladislav.valek@stud.uni-heidelberg.de>
 #
@@ -9,8 +8,8 @@
 
 from dataclasses import dataclass
 
-# DMA_MFB_REGIONS(1) * DMA_MFB_REGION_SIZE(8) * DMA_MFB_BLOCK_SIZE(8) * DMA_MFB_ITEM_WIDTH(8) / 8
-# -- USER_CORE's default MFB geometry (unchanged by this harness's Modules.tcl/Makefile).
+# DMA_MFB_REGIONS(1) * DMA_MFB_REGION_SIZE(8) * DMA_MFB_BLOCK_SIZE(8) * DMA_MFB_ITEM_WIDTH(8) / 8;
+# the data-check target's REGION_SIZE=1 with BLOCK_SIZE=64 keeps the same 64 B beat.
 REGION_BEAT_BYTES = 64
 SECT_SIZE = 512
 
@@ -116,9 +115,8 @@ def rand_lba(reg: int) -> int:
 
 
 def gen_wr_mfb_data(pkt_cnt: int, word_cnt: int, sof: bool, eof: bool) -> bytes:
-    """Reproduces user_core_test_arch.vhd's gen_wr_mfb_data function exactly: one region-beat
-    (REGION_BEAT_BYTES bytes) of deterministic data, tagged with the packet/word counters and
-    SOF/EOF flags that were live when that beat was accepted."""
+    """user_core_test_arch.vhd's gen_wr_mfb_data: one region beat tagged with the packet/word
+    counters and SOF/EOF flags live when it was accepted."""
     flag_byte = (pkt_cnt >> 8) & 0xFF
     if sof:
         flag_byte |= 0x80
@@ -149,12 +147,9 @@ def gen_wr_mfb_data(pkt_cnt: int, word_cnt: int, sof: bool, eof: bool) -> bytes:
 
 
 class RoundRobinQid:
-    """Shared round-robin QID predictor for both the read-request path (rd_qid_cntr/rd_burst_cntr,
-    user_core_test_arch.vhd's rd_qid_rr_p) and the write-side channel round-robin (MFB_GENERATOR_MI32's
-    chan_cnt/burst_cnt, comp/mfb_tools/debug/generator/mfb_generator.vhd's chan_cnt_g), which share the
-    same "advance every `burst` accepted items, wrap ch_max -> ch_min" shape. Both RTL counters reset
-    to 0 on their own domain's reset regardless of ch_min -- reproduced here as the `qid` constructor
-    default rather than defaulting to ch_min.
+    """Round-robin QID of the read path (rd_qid_rr_p) and of MFB_GENERATOR_MI32's write channels
+    (chan_cnt_g): advance every `burst` accepts, wrap ch_max -> ch_min. Both RTL counters reset to
+    0, not to ch_min.
     """
 
     def __init__(self, ch_min: int = 0, ch_max: int = 0, burst: int = 1, num_queues: int = 1):
@@ -166,9 +161,8 @@ class RoundRobinQid:
         self.burst_cnt = 0
 
     def next_qid(self) -> int:
-        """Return the QID for the NEXT accepted item, then advance state as the RTL would upon
-        that item's acceptance. NUM_QUEUES=1 always forces QID 0 (matches gen_rd_req_qid /
-        gen_nvme_wr_qid_mskd's explicit force-to-zero, independent of the round-robin state)."""
+        """QID of the next accepted item, advancing as the RTL does on its accept; NUM_QUEUES=1
+        forces 0 like gen_rd_req_qid / gen_nvme_wr_qid_mskd."""
         if self.num_queues == 1:
             return 0
 
@@ -199,29 +193,17 @@ class ExpectedWrFrame:
 
 
 class ReadReqModel:
-    """Predicts USER_CORE's NVME_RD_REQ stream.
-
-    Two distinct dispatch modes exist in the RTL and are modeled separately:
-      - manual (one-shot register write to 0x00, IuventusTest.disp_rd_req): LBA_PTR/LBA_NUM come
-        straight from the configured registers, bypassing seq/rand addressing entirely, and no
-        counter moves (seq_addr_cntr_p's gate is closed while tst_finished='1', contig_test='0').
-      - burst (tst_finished='0', or contig_test='1'): LBA_PTR is tst_addr -- the requested queue's
-        own seq_addr_cntr entry, or the shared LFSR.
-    In both modes the QID round-robin (rd_qid_cntr/rd_burst_cntr) advances on every accepted
-    request regardless of dispatch mode.
-
-    Only the read stream is modeled here. A write frame accepted while the same gate is open also
-    advances the queue it names (user_core_test_arch.vhd's seq_addr_cntr_p, :1342), so a scenario
-    running the write generator during a burst would have to feed that in too; none does, because
-    every case starts from a DMA_RST that clears MFB_GENERATOR_MI32's own enable.
+    """Predicts NVME_RD_REQ: a manual dispatch (0x00) sends the LBA_PTR/LBA_NUM registers and moves
+    no address counter, a burst sends tst_addr; both step the QID round-robin. Writes during a burst
+    also advance seq_addr_cntr and are not modeled.
     """
 
     def __init__(self, num_queues: int = 1):
         self.num_queues = num_queues
         self.rr = RoundRobinQid(num_queues=num_queues)
-        # One counter per queue, mirroring user_core_test_arch.vhd's seq_addr_cntr array (:278).
-        # An accepted request only moves the counter of the queue it names, so a round-robin
-        # stream steps each queue once per full rotation rather than once per request.
+        # One counter per queue, as user_core_test_arch.vhd's seq_addr_cntr array (:278); an accept
+        # moves only its own queue's counter, so a round-robin stream steps each queue once per
+        # rotation.
         self.seq_addr = [0] * num_queues
         self.rand = RandDrawModel()
         self.addressing = "seq"
@@ -235,9 +217,8 @@ class ReadReqModel:
         self.rr.burst = max(burst, 1)
 
     def _seq_idx(self, qid: int) -> int:
-        """Mirrors user_core_test_arch.vhd's seq_idx_f (:222): QID_W is a rounded-up log2, so at
-        NUM_QUEUES 1 or 3 a QID value can name a queue that does not exist; the RTL folds those
-        onto queue 0 rather than indexing the array out of range."""
+        """seq_idx_f: QID_W is a rounded-up log2, so at NUM_QUEUES 1 or 3 a QID can name a queue
+        that does not exist; the RTL folds it onto queue 0."""
         return qid if qid < self.num_queues else 0
 
     def dut_reset(self) -> None:
@@ -254,11 +235,8 @@ class ReadReqModel:
         return ExpectedReadReq(lba_ptr=lba_ptr, lba_num=lba_num, qid=qid)
 
     def start_burst(self, lba_ptr: int, lba_num: int, addressing: str, contig: bool) -> None:
-        """Mirrors tst_trigg's effect (a write to TST_ITERATIONS): EVERY queue's seq_addr_cntr
-        entry is (re)armed to the currently-configured LBA_PTR -- the RTL assigns the whole array
-        with `(others => resize(unsigned(nvme_rd_req_lba_ptr_reg), ADDR_CNTR_WIDTH))` (:1318), so
-        all queues start the burst on the same address and diverge only as each is used. The LFSR
-        is NOT reseeded here (only DMA_RST does that)."""
+        """tst_trigg (a TST_ITERATIONS write) re-arms every queue's seq_addr_cntr to LBA_PTR, so all
+        queues start on one address and diverge as each is used; only DMA_RST reseeds the LFSR."""
         assert addressing in ("seq", "rand")
         self.seq_addr = [lba_ptr] * self.num_queues
         self.lba_num = lba_num
@@ -270,19 +248,9 @@ class ReadReqModel:
         self.test_active = False
 
     def next_burst_request(self) -> ExpectedReadReq:
-        """Predicts ONE accepted burst request and applies that accept's own side effect.
-
-        LBA_PTR is the requested queue's own address: tst_addr indexes tst_addr_q by the QID the
-        request carries (user_core_test_arch.vhd:1359), so each queue reads its own counter, while
-        the random stream stays shared across queues (:1355).
-
-        seq_addr_cntr advances HERE, on acceptance (`rd_req_accepted_s`, :1330), and only for the
-        queue named by the request. Waiting for the completion instead would leave the next
-        address undefined for a whole round trip, capping a sequential stream at one useful
-        command in flight per queue. NVME_RD_REQ_LBA_NUM is a 0-based LBA count (0 => 1 LBA), so
-        the step of lba_num+1 keeps each queue's stream contiguous and disjoint. Gated exactly
-        like the RTL: (tst_finished = '0') or (contig_test = '1'). The counter runs in rand
-        addressing too -- tst_sel_reg(0) only selects which address is read out."""
+        """One accepted burst request: each queue reads its own seq_addr_cntr, the random stream
+        is shared. The named queue's counter steps by the 0-based lba_num+1 on the accept, while the
+        test runs or contig_test is set, in rand addressing too."""
         qid = self.rr.next_qid()
         idx = self._seq_idx(qid)
         active = self.test_active or self.contig
@@ -298,9 +266,8 @@ class ReadReqModel:
 
 
 class WriteFrameModel:
-    """Predicts USER_CORE's NVME_WR_MFB frame stream (MFB_GENERATOR_MI32's framing/channel +
-    user_core_test_arch.vhd's own gen_wr_mfb_data payload function -- see that function's header
-    comment for why the generator's own TX_MFB_DATA is irrelevant here (tied to `open`))."""
+    """Predicts NVME_WR_MFB: MFB_GENERATOR_MI32's framing and channels with gen_wr_mfb_data's
+    payload, as the generator's own TX_MFB_DATA is left open."""
 
     def __init__(self, num_queues: int = 1):
         self.num_queues = num_queues
@@ -320,11 +287,9 @@ class WriteFrameModel:
         self.word_cnt = 0
 
     def next_frame(self, lba_ptr: int, total_bytes: int) -> ExpectedWrFrame:
-        """`lba_ptr` is supplied by the caller, not predicted: every scenario here dispatches
-        writes with the test idle (tst_finished='1', contig_test='0'), where gen_wr_meta_lba is
-        the nvme_wr_req_lba_ptr_reg the caller just programmed (user_core_test_arch.vhd:863). A
-        write issued during a burst instead takes tst_addr_q of the queue its own region names,
-        which would have to be predicted from ReadReqModel's per-queue counters."""
+        """`lba_ptr` comes from the caller: every scenario writes with the test idle, where the
+        frame carries the programmed nvme_wr_req_lba_ptr_reg; a write during a burst would take its
+        queue's tst_addr_q, which this does not predict."""
         qid = self.rr.next_qid()
         num_beats = (total_bytes + REGION_BEAT_BYTES - 1) // REGION_BEAT_BYTES
 

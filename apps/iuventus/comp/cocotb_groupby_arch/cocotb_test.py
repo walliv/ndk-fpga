@@ -48,8 +48,8 @@ R_EVCR_INTERVAL, R_EVCR_TOTAL_EVENTS, R_EVCR_TOTAL_CYCLES = 0x60, 0x64, 0x68
 # Per-queue block, base 0x80, stride 0x10, q = 0..NUM_QUEUES-1.
 R_PQ_BASE, R_PQ_STRIDE = 0x80, 0x10
 R_PQ_SECT_LEFT, R_PQ_ISSUED, R_PQ_OK, R_PQ_FAILED = 0x0, 0x4, 0x8, 0xC
-# Below the per-queue block (0x80+) and past every "when N" decode arm in user_core_groupby_arch.vhd
-# (arms run 0x00..0x68), so reg_sel falls to "others" with pq_hit='0': guaranteed to read 0xCAFEBABE.
+# Below the per-queue block (0x80+) and past the last decode arm in user_core_groupby_arch.vhd
+# (0x68), so reg_sel falls to "others" with pq_hit='0' and reads 0xCAFEBABE.
 R_UNMAPPED = 0x6C
 
 STATUS_BUSY, STATUS_DONE, STATUS_ERR = 1 << 0, 1 << 1, 1 << 2
@@ -58,12 +58,8 @@ S_RUN, S_DONE, S_ERR = 4, 7, 8
 
 
 class GroupByNfbDevice(cocotbext.nfb.NfbDevice):
-    """USER_CORE (GROUPBY) as a standalone nfb device.
-
-    Same shape as the TEST architecture's device: three clocks, one MI slave, no PCIe or DMA of
-    its own. The DevTree this reads back has no netcope,dma_ctrl_ndp_* nodes, so the base class's
-    QueueManager comes out empty, which is what an MI-only test wants.
-    """
+    """USER_CORE (GROUPBY) as a standalone nfb device with one MI slave and no DMA; its DevTree
+    has no netcope,dma_ctrl_ndp_* nodes, so the base class's QueueManager stays empty."""
 
     async def _init_clks(self):
         await cocotb.start(Clock(self._dut.USR_CLK, 5, 'ns').start())
@@ -72,7 +68,7 @@ class GroupByNfbDevice(cocotbext.nfb.NfbDevice):
 
         self.dma_model = SimplifiedDmaModel(self._dut, self._dut.DMA_CLK)
         self.dma_model.data_integrity = True
-        # Each queue sweeps its own drive now, so the model must isolate storage per queue too --
+        # Each queue sweeps its own drive, so the model must isolate storage per queue too;
         # otherwise every queue would read back the same (qid 0) sectors.
         self.dma_model.per_queue_storage = True
         # The engine strides LBA_PTR by one per sector, not by 512.
@@ -103,12 +99,8 @@ class GroupByNfbDevice(cocotbext.nfb.NfbDevice):
 
 
 async def device(dut):
-    """A fresh device per test.
-
-    cocotb cancels every task a test started once that test ends, clocks included, so a device
-    shared across tests would leave the second one with no clock and its first MI access would
-    block forever.
-    """
+    """A fresh device per test: cocotb cancels a test's tasks, clocks included, when it ends, so
+    a shared device would block the next test's first MI access forever."""
     dev = GroupByNfbDevice(dut)
     await dev.init()
     return dev
@@ -217,9 +209,8 @@ async def test_register_map(dut):
 
 @cocotb.test()
 async def test_aggregate_end_to_end(dut):
-    """Fill every queue's own drive, aggregate across all of them through the DMA path, and check
-    the written-back table sums to the combined total -- each queue's data is distinct, so a queue
-    that read another's range would show up as a mismatch, not be masked by identical data."""
+    """Aggregate every queue's distinct data through the DMA path and check the table sums to the
+    combined total, so a queue reading another's range shows as a mismatch."""
     dev = await device(dut)
     comp = dev.nfb.comp_open("ziti,iuventus_groupby")
 
@@ -277,9 +268,8 @@ async def test_aggregate_end_to_end(dut):
 
 @cocotb.test()
 async def test_restart_clears_the_table(dut):
-    """A second run must report only its own records, not the first run's totals. Restricted to
-    one queue -- restart/clear behaviour is orthogonal to per-queue independence, which is covered
-    by test_aggregate_end_to_end -- so the expected sums are exactly the single-queue values."""
+    """A second run must report only its own records. One queue only: per-queue independence is
+    test_aggregate_end_to_end's job."""
     dev = await device(dut)
     comp = dev.nfb.comp_open("ziti,iuventus_groupby")
 
@@ -307,9 +297,9 @@ async def test_restart_clears_the_table(dut):
 
 @cocotb.test()
 async def test_self_test_fill(dut):
-    """With no host able to stage data, the engine writes its own records on one queue and reads
-    them back. Masked to that one queue: the fill only ever writes CTL_OUT_QID's drive, so leaving
-    the other queues enabled would have them sweep their own (unwritten) empty range instead."""
+    """With no host to stage data, the engine fills one queue's drive and reads it back. Masked to
+    that queue: the fill writes only CTL_OUT_QID's drive, so other queues would sweep an empty
+    range."""
     dev = await device(dut)
     comp = dev.nfb.comp_open("ziti,iuventus_groupby")
 
@@ -339,11 +329,9 @@ async def test_self_test_fill(dut):
 
 @cocotb.test()
 async def test_eps_periodic_windows(dut):
-    """EVENT_COUNTER only updates TOTAL_EVENTS/TOTAL_CYCLES when its programmed interval elapses.
-    A short interval closed several times over one collision-free, single-queue burst proves the
-    windowing itself and that TOTAL_EVENTS counts RECORDS (RECS_BEAT per beat), not beats: with no
-    lane collisions and no other queue's command to wait for, the read bus accepts one beat every
-    DMA_CLK cycle, so a saturated window must read back exactly RECS_BEAT * interval."""
+    """EVENT_COUNTER updates TOTAL_EVENTS/TOTAL_CYCLES only at interval end. A collision-free
+    single-queue burst takes one beat per DMA_CLK cycle, so a saturated window must read
+    RECS_BEAT * interval: records counted, not beats."""
     dev = await device(dut)
     comp = dev.nfb.comp_open("ziti,iuventus_groupby")
 
@@ -356,9 +344,9 @@ async def test_eps_periodic_windows(dut):
     seed_storage(dev.dma_model, 0x0, records, qid=0)
     await start_run(comp, 0x0, sectors, 0x4000, qid_mask=1)
 
-    # Sampled off NVME_RD_MFB (same wires STS_REC_EVENT uses), independent of the MI path and its
-    # CDC latency: ground truth per window. S_CLEAR (SLOTS cycles) precedes the first read, so
-    # leading windows before any beat appears are discarded.
+    # Ground truth per window from the NVME_RD_MFB wires STS_REC_EVENT uses, independent of MI CDC
+    # latency. S_CLEAR (SLOTS cycles) precedes the first read; windows before any beat are
+    # discarded.
     windows = []
     records_since = beats_since = 0
     prev_reached = False
@@ -373,9 +361,9 @@ async def test_eps_periodic_windows(dut):
         assert cycles < 2_000_000, f"never collected 5 active EVCR windows; got {len(windows)}"
         reached = bool(internal.int_reached.value)
         if reached and not prev_reached:
-            # Interval-boundary cycle: event_counter.vhd's eve_cnt_reg_pr increments for EVENT_VLD
-            # then unconditionally resets on int_reached in the same process, so a same-cycle event
-            # is discarded. Close the window on its pre-boundary total first.
+            # Boundary cycle: event_counter.vhd's eve_cnt_reg_pr resets on int_reached after
+            # counting EVENT_VLD, so a same-cycle event is discarded; close the window on its
+            # pre-boundary total.
             if seen_any_beat or windows:
                 windows.append((records_since, beats_since))
             records_since = beats_since = 0
@@ -413,11 +401,9 @@ async def test_eps_periodic_windows(dut):
 
 @cocotb.test()
 async def test_rec_cnt_high_word_latches_on_read(dut):
-    """Reading REC_CNT_L (0x24) must latch STS_REC_CNT's high half into the shadow that
-    REC_CNT_H (0x28) returns; the shadow must hold still except on that exact read, not track a
-    live value. Carrying a 48-bit counter past 2**32 records is not reachable in sim time, so this
-    checks the latch's update trigger directly against the internal registers instead of forcing
-    the value itself to change."""
+    """Reading REC_CNT_L (0x24) must latch STS_REC_CNT's high half into the REC_CNT_H (0x28)
+    shadow, which moves on no other cycle. 2**32 records is out of sim reach, so the latch trigger
+    is checked against internal registers."""
     dev = await device(dut)
     comp = dev.nfb.comp_open("ziti,iuventus_groupby")
 
@@ -428,9 +414,8 @@ async def test_rec_cnt_high_word_latches_on_read(dut):
     seed_storage(dev.dma_model, 0x0, records, qid=0)
     await start_run(comp, 0x0, sectors, 0x4000, qid_mask=1)
 
-    # Watches every DMA_CLK cycle while records are actively flowing; the shadow must never move
-    # except in the same cycle an MI read of reg_sel==9 (REC_CNT_L, word offset 9 = byte 0x24) is
-    # in progress.
+    # The shadow must never move except in a cycle where an MI read of reg_sel==9 (REC_CNT_L, word
+    # offset 9 = byte 0x24) is in progress; watched every DMA_CLK cycle while records flow.
     stray_updates = 0
 
     async def watch_shadow():
@@ -450,9 +435,8 @@ async def test_rec_cnt_high_word_latches_on_read(dut):
 
     watcher = cocotb.start_soon(watch_shadow())
 
-    # Poll REC_CNT_L (the latch under test) until something aggregated: S_CLEAR (SLOTS cycles)
-    # precedes any read, so polling right after start_run() sees zero. Each poll is a real 0x24
-    # read that watch_shadow() must already be running to catch.
+    # Poll REC_CNT_L (the latch under test) until it is non-zero: S_CLEAR (SLOTS cycles) precedes
+    # any read. Each poll is a real 0x24 read, so watch_shadow() must already be running.
     got_l = 0
     for _ in range(5000):
         got_l = await e(comp.read32)(R_REC_CNT_L)
@@ -479,9 +463,8 @@ async def test_rec_cnt_high_word_latches_on_read(dut):
 
 @cocotb.test()
 async def test_per_queue_register_block(dut):
-    """The per-queue block at 0x80 (stride 0x10) must report each queue's own progress: drained to
-    zero sectors left, one issued command per queue (the data fits in a single command), all of
-    them successful, and none failed."""
+    """The per-queue block at 0x80 (stride 0x10) must report each queue's own progress: zero
+    sectors left, one command issued (the data fits in one), one OK, none failed."""
     dev = await device(dut)
     comp = dev.nfb.comp_open("ziti,iuventus_groupby")
 
@@ -508,14 +491,9 @@ async def test_per_queue_register_block(dut):
 
 @cocotb.test()
 async def test_abort_leaves_the_read_path_usable(dut):
-    """Abort mid-run, then require a full correct run afterwards.
-
-    The interface pipeline buffers requests the engine has already counted as issued, and those
-    reads land after the abort. If their data were refused it would back up into the DMA, and if
-    the requests were discarded the completion count could never catch the issue count -- which is
-    the only signal software has that the abort has quiesced. Both faults show up here as a second
-    run that hangs or aggregates the first run's sectors.
-    """
+    """Abort mid-run, then require a full correct run. Pipeline-buffered reads land after the
+    abort: refusing their data jams the DMA, and dropping them keeps COMPL_CNT from ever reaching
+    ISSUED_CNT, software's only quiesce signal."""
     dev = await device(dut)
     comp = dev.nfb.comp_open("ziti,iuventus_groupby")
 
