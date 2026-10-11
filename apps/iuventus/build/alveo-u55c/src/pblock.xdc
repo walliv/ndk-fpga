@@ -12,11 +12,9 @@ set_property IS_SOFT 0 [get_pblocks pblock_pcie_i]
 # The DMA is left to the placer: the builds that closed timing ran with it unconstrained.
 
 create_pblock pblock_user_core
-# Everything the selected USER_CORE architecture builds, except its interface pipeline. Naming the
-# direct children rather than user_core_i itself is what catches each architecture's MI register
-# file, which is synthesised at the architecture level and has no instance name of its own to list.
-# The filter covers both architectures: GROUPBY names its pipeline if_pipe_i and TEST names it
-# user_core_if_pipe_i, so matching the shared substring excludes whichever one is built.
+# Everything USER_CORE builds except its interface pipeline. Direct children, not user_core_i, so
+# the architecture-level MI register file (no instance name) is caught; *if_pipe_i* matches both
+# GROUPBY's if_pipe_i and TEST's user_core_if_pipe_i.
 add_cells_to_pblock [get_pblocks pblock_user_core] [get_cells -filter {NAME !~ "*if_pipe_i*"} core_logic_i/user_core_i/*]
 # Except the pipeline's engine end: the read credits, the first request stage and the first write
 # stage handshake with the engine in the same cycle, so they sit beside it, not out in the gap.

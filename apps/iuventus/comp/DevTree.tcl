@@ -4,9 +4,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-# The node set follows the architecture that was built: the register maps have nothing in common,
-# so emitting the TEST layout for a GROUPBY build would hand software addresses that decode to
-# something else entirely.
+# Emit the built architecture's node set: TEST and GROUPBY register maps share nothing, so the
+# wrong layout would hand software addresses that decode to something else.
 proc dts_application {DTS base arch_type} {
     upvar 1 $DTS dts
 
