@@ -5,7 +5,7 @@
 
 from cocotb_bus.monitors import BusMonitor
 from cocotb.triggers import RisingEdge, ReadOnly
-from cocotbext.ofm.mfb.utils import get_mfb_params
+from cocotbext.ofm.mfb.utils import get_mfb_params, signal_binstr
 from cocotbext.ofm.mfb.transaction import MfbTransaction
 from math import log2
 from copy import copy
@@ -53,26 +53,46 @@ class MFBMonitor(BusMonitor):
         self._in_frame = False
 
     def _is_valid_word(self, signal_src_rdy, signal_dst_rdy):
-        if signal_dst_rdy is None:
-            return (signal_src_rdy.value == 1)
-        else:
-            return (signal_src_rdy.value == 1) and (signal_dst_rdy.value == 1)
+        if signal_binstr(signal_src_rdy) != "1":
+            return False
+        return signal_dst_rdy is None or signal_binstr(signal_dst_rdy) == "1"
 
     def _read_control_signals(self):
-        # Snapshot the bus as cocotb LogicArray/Logic values (range [W-1:0]).
-        self._data    = self.bus.data.value
-        self._sof_pos = self.bus.sof_pos.value
-        self._eof_pos = self.bus.eof_pos.value
-        self._sof     = self.bus.sof.value
-        self._eof     = self.bus.eof.value
+        # Plain ints slice per region far cheaper than LogicArrays. A word holding any bit but 0/1
+        # keeps the LogicArrays (range [W-1:0]), which _field and _data_bytes decode on their own.
+        bus = self.bus
+        try:
+            data    = int(signal_binstr(bus.data), 2)
+            sof_pos = int(signal_binstr(bus.sof_pos), 2)
+            eof_pos = int(signal_binstr(bus.eof_pos), 2)
+            sof     = int(signal_binstr(bus.sof), 2)
+            eof     = int(signal_binstr(bus.eof), 2)
+            meta    = int(signal_binstr(bus.meta), 2) if self._meta_width > 0 else None
+        except ValueError:
+            self._data    = bus.data.value
+            self._sof_pos = bus.sof_pos.value
+            self._eof_pos = bus.eof_pos.value
+            self._sof     = bus.sof.value
+            self._eof     = bus.eof.value
+            if self._meta_width > 0:
+                self._meta = bus.meta.value
+            return
 
-        if self._meta_width > 0:
-            self._meta = self.bus.meta.value
+        self._data    = data
+        self._sof_pos = sof_pos
+        self._eof_pos = eof_pos
+        self._sof     = [(sof >> r) & 1 for r in range(self._regions)]
+        self._eof     = [(eof >> r) & 1 for r in range(self._regions)]
+        if meta is not None:
+            self._meta = meta
 
     def _field(self, vec, r, width):
-        """Unsigned value of the per-region ``width``-bit field ``r`` of LogicArray ``vec``."""
+        """Unsigned value of the per-region ``width``-bit field ``r`` of ``vec``, an int or a
+        LogicArray."""
         if width <= 0:
             return 0
+        if isinstance(vec, int):
+            return (vec >> (r*width)) & ((1 << width) - 1)
         return vec[(r + 1)*width - 1 : r*width].to_unsigned()
 
     def _data_bytes(self, r, lo, hi):
@@ -80,6 +100,9 @@ class MFBMonitor(BusMonitor):
         if hi <= lo:
             return b""
         base = r*self._region_data_w
+        if isinstance(self._data, int):
+            n = hi - lo
+            return ((self._data >> (base + lo)) & ((1 << n) - 1)).to_bytes((n + 7) // 8, byteorder="little")
         return self._data[base + hi - 1 : base + lo].to_bytes(byteorder="little")
 
     def _recv_trans(self):

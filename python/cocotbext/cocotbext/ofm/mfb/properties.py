@@ -10,6 +10,7 @@ from cocotb.triggers import ReadOnly, RisingEdge, Timer
 from cocotb_bus.bus import Bus
 
 from .monitors import MFBProtocolError
+from .utils import signal_binstr
 
 
 # Every rule the checker knows. Pass a subset as `disable=` to switch individual ones off; the
@@ -33,9 +34,9 @@ MFB_RULES = (
 )
 
 
-def _binstr(value):
-    """Bit string of a signal value, MSB first, for both std_logic and std_logic_vector."""
-    return str(value)
+def _resolvable(binstr):
+    """cocotb's is_resolvable on a bit string: every bit a 0, 1, L or H."""
+    return not binstr.strip("01LH")
 
 
 def _resolved(binstr):
@@ -146,12 +147,12 @@ class MFBProperty:
     def _in_reset(self):
         if self.reset is None:
             return False
-        val = self.reset.value
+        val = signal_binstr(self.reset)
         # An unresolvable reset means the design has not been brought up yet, so there is nothing
         # to hold the bus to; checking there only reports the testbench's own start-up state.
-        if not val.is_resolvable:
+        if not _resolvable(val):
             return True
-        return _binstr(val) == str(self.reset_active_level)
+        return val == str(self.reset_active_level)
 
     def final_check(self):
         """Fail if the stream ended mid-frame or any violation was recorded but not raised."""
@@ -183,17 +184,17 @@ class MFBProperty:
         self._sample()
 
     def _sample(self):
-        src_rdy_v = self.bus.src_rdy.value
-        dst_rdy_v = self.bus.dst_rdy.value
-        if not src_rdy_v.is_resolvable:
-            self._violation("src_rdy_undefined", f"SRC_RDY = {_binstr(src_rdy_v)}")
+        src_rdy_v = signal_binstr(self.bus.src_rdy)
+        dst_rdy_v = signal_binstr(self.bus.dst_rdy)
+        if not _resolvable(src_rdy_v):
+            self._violation("src_rdy_undefined", f"SRC_RDY = {src_rdy_v}")
             return
-        if not dst_rdy_v.is_resolvable:
-            self._violation("dst_rdy_undefined", f"DST_RDY = {_binstr(dst_rdy_v)}")
+        if not _resolvable(dst_rdy_v):
+            self._violation("dst_rdy_undefined", f"DST_RDY = {dst_rdy_v}")
             return
 
-        src_rdy = _binstr(src_rdy_v) == "1"
-        dst_rdy = _binstr(dst_rdy_v) == "1"
+        src_rdy = src_rdy_v == "1"
+        dst_rdy = dst_rdy_v == "1"
 
         # The source may not withdraw an offer: once SRC_RDY rises it stays up until the sink
         # takes the word. Checked against the previous cycle, which is where the offer was made.
@@ -236,24 +237,24 @@ class MFBProperty:
         return " ".join(f"{n}={v}" for n, v in zip(names, self._ctrl_snapshot()))
 
     def _ctrl_snapshot(self):
-        parts = [_binstr(self.bus.sof.value), _binstr(self.bus.eof.value)]
+        parts = [signal_binstr(self.bus.sof), signal_binstr(self.bus.eof)]
         for sig in ("sof_pos", "eof_pos"):
             if hasattr(self.bus, sig):
-                parts.append(_binstr(getattr(self.bus, sig).value))
+                parts.append(signal_binstr(getattr(self.bus, sig)))
         return tuple(parts)
 
     def _data_snapshot(self):
         if "data_changed" in self._disabled:
             return None
-        parts = [_binstr(self.bus.data.value)]
+        parts = [signal_binstr(self.bus.data)]
         if hasattr(self.bus, "meta"):
-            parts.append(_binstr(self.bus.meta.value))
+            parts.append(signal_binstr(self.bus.meta))
         return tuple(parts)
 
     def _check_defined(self):
         """SOF/EOF and the position slices of flagged regions must resolve while SRC_RDY is high."""
-        sof = _binstr(self.bus.sof.value)
-        eof = _binstr(self.bus.eof.value)
+        sof = signal_binstr(self.bus.sof)
+        eof = signal_binstr(self.bus.eof)
         if not _resolved(sof):
             self._violation("sof_undefined", f"SOF = {sof}")
             return False
@@ -261,8 +262,8 @@ class MFBProperty:
             self._violation("eof_undefined", f"EOF = {eof}")
             return False
 
-        sof_pos = _binstr(self.bus.sof_pos.value) if hasattr(self.bus, "sof_pos") else ""
-        eof_pos = _binstr(self.bus.eof_pos.value) if hasattr(self.bus, "eof_pos") else ""
+        sof_pos = signal_binstr(self.bus.sof_pos) if hasattr(self.bus, "sof_pos") else ""
+        eof_pos = signal_binstr(self.bus.eof_pos) if hasattr(self.bus, "eof_pos") else ""
         ok = True
         for r in range(self._regions):
             if self._sof_pos_w and sof[len(sof) - 1 - r] == "1":
@@ -278,10 +279,10 @@ class MFBProperty:
         return ok
 
     def _check_word(self):
-        sof = _binstr(self.bus.sof.value)
-        eof = _binstr(self.bus.eof.value)
-        sof_pos = _binstr(self.bus.sof_pos.value) if hasattr(self.bus, "sof_pos") else ""
-        eof_pos = _binstr(self.bus.eof_pos.value) if hasattr(self.bus, "eof_pos") else ""
+        sof = signal_binstr(self.bus.sof)
+        eof = signal_binstr(self.bus.eof)
+        sof_pos = signal_binstr(self.bus.sof_pos) if hasattr(self.bus, "sof_pos") else ""
+        eof_pos = signal_binstr(self.bus.eof_pos) if hasattr(self.bus, "eof_pos") else ""
 
         word = (f"SOF={sof} EOF={eof} SOF_POS={sof_pos or '-'} EOF_POS={eof_pos or '-'}"
                 f" | prev {self._prev_word}")

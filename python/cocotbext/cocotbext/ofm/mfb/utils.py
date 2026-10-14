@@ -6,6 +6,12 @@
 from random import randint
 
 
+def signal_binstr(handle):
+    """A std_logic(_vector) signal's value as the simulator's own MSB-first bit string. Building a
+    cocotb Logic/LogicArray per read is a per-cycle sampler's largest Python cost."""
+    return handle._handle.get_signal_val_binstr()
+
+
 def get_mfb_params(signal_bus, params_dic):
     if params_dic is None:
         regions = len(signal_bus.sof)
