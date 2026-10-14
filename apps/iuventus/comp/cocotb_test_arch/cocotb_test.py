@@ -22,9 +22,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "sw"))
 # SimplifiedDmaModel and the scoreboard are shared with the GROUPBY architecture's bench, so they
 # live one level up rather than being forked per architecture.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "cocotb_common"))
+import iuventus_rw_test  # noqa: E402
 from iuventus_rw_test import (  # noqa: E402
     IuventusTest, run_read_dispatch, run_write_dispatch, _throughput_point_start, _throughput_point_stop,
 )
+
+# This DevTree has no DMA Iuventus node, so the card-side "fzc is running" guard cannot pass; it
+# checks the card's setup, not the core.
+iuventus_rw_test.assert_fzc_running = lambda _test: None
 
 import nfb_compat  # noqa: F401 (patches cocotb before cocotbext.nfb is imported)
 
