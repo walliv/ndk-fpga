@@ -111,6 +111,7 @@ class MultiQueueDmaModel:
         self.outstanding = [0] * num_queues
         self.pages_free = [pages_per_ep] * endpoints
         self._npages_all = [63] * num_queues
+        self._npages_h = [dut.NVME_RD_REQ_NPAGES_ALL[q] for q in range(num_queues)]
         self._issuing = None
         self._completions = []
         self._cqe_staged = None
@@ -323,8 +324,7 @@ class MultiQueueDmaModel:
             self._drive("NVME_WR_MFB_DST_RDY", int(self.rng.random() < self.wr_rdy_prob))
 
             await ReadOnly()
-            npg = _as_int(dut.NVME_RD_REQ_NPAGES_ALL.value)
-            self._npages_all = [(npg >> (6 * q)) & 0x3F for q in range(self.nq)]
+            self._npages_all = [_as_int(h.value) for h in self._npages_h]
             vld = _as_int(dut.NVME_RD_REQ_VLD.value)
             if vld & rdy:
                 qid = _as_int(dut.NVME_RD_REQ_QID.value)
