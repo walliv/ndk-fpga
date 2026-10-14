@@ -82,9 +82,9 @@ entity USER_CORE is
         -- The size of data (0-based value).
         NVME_RD_REQ_LBA_NUM     : out std_logic_vector(7 downto 0);
         -- Pages the head request on each queue needs, so the DMA admits a queue against what
-        -- that queue actually asks for rather than the largest read that could arrive. 6 bits per
-        -- queue: an 8 b LBA count is at most 32 pages.
-        NVME_RD_REQ_NPAGES_ALL  : out std_logic_vector(NUM_QUEUES*6 -1 downto 0);
+        -- that queue actually asks for rather than the largest read that could arrive. One element
+        -- per queue: an 8 b LBA count is at most 32 pages.
+        NVME_RD_REQ_NPAGES_ALL  : out slv_array_t(NUM_QUEUES -1 downto 0)(work.iuventus_sizing_pkg.RD_HEAD_NPAGES_W -1 downto 0);
         -- This is a LBA address (not a byte address) to the NVMe
         NVME_RD_REQ_LBA_PTR     : out std_logic_vector(63 downto 0);
         -- Per-queue handshake: at most one VLD bit, and it must be bit NVME_RD_REQ_QID. Accepted

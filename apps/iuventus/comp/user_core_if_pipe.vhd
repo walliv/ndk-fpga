@@ -86,7 +86,7 @@ entity USER_CORE_IF_PIPE is
         -- Pages each queue's head request needs, so the DMA admits against what it asks for. NOT
         -- routed through mv_sel (selects on DMA_RD_REQ_RDY -- would loop). 6 bits: an 8b LBA
         -- count maxes at 32 pages, matching MAX_XFER_PAGES; a mismatch fails elaboration.
-        DMA_RD_REQ_NPAGES_ALL  : out std_logic_vector(NUM_QUEUES*6-1 downto 0);
+        DMA_RD_REQ_NPAGES_ALL  : out slv_array_t(NUM_QUEUES-1 downto 0)(work.iuventus_sizing_pkg.RD_HEAD_NPAGES_W-1 downto 0);
         DMA_RD_REQ_CID         : in  std_logic_vector(CID_W-1 downto 0);
         DMA_RD_REQ_CID_VLD     : in  std_logic;
 
@@ -344,7 +344,7 @@ begin
     -- An empty queue has no head request, so offer the largest read: an idle queue must not be
     -- admitted on a smaller footprint than the request that eventually arrives.
     head_num_g : for q in 0 to NUM_QUEUES-1 generate
-        DMA_RD_REQ_NPAGES_ALL((q+1)*NPAGES_W-1 downto q*NPAGES_W) <=
+        DMA_RD_REQ_NPAGES_ALL(q) <=
             fifo_do(q)(FIFO_W-1 downto LBA_PTR_W+8) when (fifo_empty(q) = '0') else
             (others => '1');
     end generate;

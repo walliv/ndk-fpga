@@ -17,6 +17,8 @@ set MFB_MERGER_BASE    "$OFM_PATH/comp/mfb_tools/flow/merger_simple"
 lappend PACKAGES "$OFM_PATH/comp/base/pkg/math_pack.vhd"
 lappend PACKAGES "$OFM_PATH/comp/base/pkg/type_pack.vhd"
 lappend PACKAGES "$OFM_PATH/comp/base/pkg/nvme_meta_pack.vhd"
+# RD_HEAD_NPAGES_W: the per-queue width of USER_CORE's NVME_RD_REQ_NPAGES_ALL.
+lappend PACKAGES "$OFM_PATH/comp/dma/dma_iuventus/pkg/iuventus_sizing_pkg.vhd"
 # See the TEST bench's copy for why this stub exists: user_core_ent.vhd uses the package but reads
 # nothing from it, and the real one is generated during a card build.
 lappend PACKAGES "$ENTITY_BASE/combo_user_const_pkg.vhd"
