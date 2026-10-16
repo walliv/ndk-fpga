@@ -3,10 +3,15 @@
 # Author(s): Vladislav Valek <vladislav.valek@stud.uni-heidelberg.de>
 #
 # SPDX-License-Identifier: Apache-2.0
-# Global Addressing is DISABLED, so a master reaches only its own pseudo-channel (PG276: lowest
-# latency, returns ordered per master). Re-enabling it without cross-port addressing in the RTL
-# sends a cross-port access to the wrong bank.
+
 array set PARAMS $IP_PARAMS_L
+
+# Global Addressing lets every port reach every pseudo-channel (PG276). An app whose RTL addresses
+# only each port's own pseudo-channel sets HBM_SWITCH_ENABLE false, or its accesses hit wrong banks.
+set SWITCH_ENABLE TRUE
+if {[info exists PARAMS(HBM_SWITCH_ENABLE)] && !$PARAMS(HBM_SWITCH_ENABLE)} {
+    set SWITCH_ENABLE FALSE
+}
 
 set IP_COMP_NAME $PARAMS(IP_COMP_NAME)
 if {[get_ips -quiet $IP_COMP_NAME] eq ""} {
@@ -22,8 +27,8 @@ set IP [get_ips $IP_COMP_NAME]
 set config_list [list \
     CONFIG.USER_APB_EN {false} \
     CONFIG.USER_HBM_DENSITY {16GB} \
-    CONFIG.USER_SWITCH_ENABLE_00 {FALSE} \
-    CONFIG.USER_SWITCH_ENABLE_01 {FALSE} \
+    CONFIG.USER_SWITCH_ENABLE_00 $SWITCH_ENABLE \
+    CONFIG.USER_SWITCH_ENABLE_01 $SWITCH_ENABLE \
     CONFIG.USER_XSDB_INTF_EN {FALSE} \
 ]
 
