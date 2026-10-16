@@ -139,7 +139,7 @@ architecture FULL of CORE_LOGIC is
     constant NUM_QUEUES : natural := 4;
 
     -- HBM invariant: one bank per AXI port, both directions on its own channels, and no port
-    -- addresses another's pseudo-channel -- the AXI switch is off (hbm_ip.ip.tcl), so a
+    -- addresses another's pseudo-channel -- the AXI switch is off (Modules.tcl), so a
     -- cross-port access silently hits the wrong bank. Data ports run at 450 MHz.
     constant HBM_PORTS       : natural := 32;
     constant HBM_DATA_WIDTH  : natural := 256;
