@@ -6,7 +6,7 @@ if {$MODE eq ""} { set MODE "verify" }
 puts "### ILA insert MODE=$MODE"
 
 set RUNS alveo-u55c-iuventus-pcie1xGen4x8.runs
-set DMA  {core_logic_i/dma_g[0].dma_i}
+set DMA  {core_logic_i/dma_i}
 
 open_checkpoint $RUNS/synth_1/CARD_TOP.dcp
 
