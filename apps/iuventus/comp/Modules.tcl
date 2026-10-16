@@ -31,7 +31,6 @@ set MFB_ASFIFOX_BASE         "$OFM_PATH/comp/mfb_tools/storage/asfifox"
 set PIPE_BASE                "$OFM_PATH/comp/base/misc/pipe"
 set FIFOX_BASE               "$OFM_PATH/comp/base/fifo/fifox"
 set MFB_MERGER_BASE          "$OFM_PATH/comp/mfb_tools/flow/merger_simple"
-set MFB_SPEED_METER_BASE     "$OFM_PATH/comp/mfb_tools/logic/speed_meter"
 
 # Packages
 lappend PACKAGES "$OFM_PATH/comp/base/pkg/math_pack.vhd"
@@ -59,11 +58,6 @@ lappend COMPONENTS [list "ASFIFOX"              $ASFIFOX_BASE               "FUL
 # Endpoint 1's read and write streams between its own pcie_clks(1) and the user core's pcie_clks(0).
 lappend COMPONENTS [list "MFB_ASFIFOX"          $MFB_ASFIFOX_BASE           "FULL"                       ]
 lappend COMPONENTS [list "PIPE"                 $PIPE_BASE                  "FULL"                       ]
-# CQ_SINK's meters, their MI crossing and DMA_IUVENTUS are listed unconditionally: an analyser
-# resolves `entity work.X` even in a discarded generate branch, so a conditional list breaks the
-# variant that is not built.
-lappend COMPONENTS [list "MFB_SPEED_METER_MI"   $MFB_SPEED_METER_BASE       "FULL"                       ]
-lappend COMPONENTS [list "MI_ASYNC"             $MI_ASYNC_BASE              "FULL"                       ]
 
 lappend IP_COMPONENTS [list "pcie" "pcie4_uscale_plus" "pcie4_uscale_plus" 0 1]
 if {$ARCHGRP_ARR(PCIE_ENDPOINTS) == 2 && $ARCHGRP_ARR(PCIE_ENDPOINT_MODE) == 1} {
