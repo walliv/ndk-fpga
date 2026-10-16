@@ -182,13 +182,6 @@ architecture FULL of CORE_LOGIC is
         return driven;
     end function;
 
-    -- Every DMA port drives BOTH directions, so this is simply "is it a DMA port". Kept as a
-    -- named function because AXI_PIPE still takes separate WRITE_EN/READ_EN.
-    function hbm_read_port_f (idx : natural) return boolean is
-    begin
-        return hbm_dma_driven_port_f(idx);
-    end function;
-
     -- AXI_PIPE stages per DMA-driven port in front of hbm_ip (hbm_450_pipe_i), for timing: added
     -- latency is acceptable, lost throughput is not.
     constant HBM_450_PIPE_STAGES : natural := 2;
