@@ -42,7 +42,7 @@ Key steps (see `ila_insert.tcl`):
 3. **`read_xdc` the card physical constraints** (`src/general.xdc`, `src/pblock.xdc`,
    `constr/pcie_half.xdc`). These are implementation-only (pin `LOC`/`IOSTANDARD`) and are NOT in the
    synth checkpoint — **skip this and `write_bitstream` fails DRC NSTD-1/UCIO-1 and the pinout is wrong.**
-4. Clock: `set clk [get_nets -of_objects [get_pins core_logic_i/dma_g[0].dma_i/CLK]]` → the DMA clock
+4. Clock: `set clk [get_nets -of_objects [get_pins core_logic_i/dma_i/CLK]]` → the DMA clock
    (`core_logic_i/pcie_clks`). Clock the ILA on the **same domain as the marked nets**.
 5. `create_debug_core u_ila_0 ila`; `connect_debug_port u_ila_0/clk $clk`; add `probe` ports and
    `connect_debug_port u_ila_0/probeN $nets`. When collecting bus bits, **only include nets that
@@ -89,7 +89,7 @@ Interleave: launch capture in background, wait for `### ARMED` in its log, **the
 ### JTAG gotchas (all hit and solved)
 - **Device names are session-relative** in `hw_manager` (`xcu280_u55c_0` vs `_0_1` depending on which
   targets are open). Select the device that actually has your ILA/probes, not by fixed name.
-- **Probe names contain `[` `]`** (e.g. `dma_g[0]`) which are glob chars — match a probe by
+- **Probe names contain `[` `]`** (e.g. `PCIE_RQ_MFB_SOF[0]`) which are glob chars — match a probe by
   **substring** (`string match "*PCIE_RQ_MFB_SRC_RDY*"`), not exact name in `get_hw_probes <name>`.
 - `hw_ila` has **no `CORE_STATUS` property** in this flow; just `catch` the `wait_on_hw_ila -timeout`
   (it throws on timeout) and check its return.
