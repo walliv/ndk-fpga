@@ -57,6 +57,8 @@ if {$ARCHGRP_ARR(PCIE_ENDPOINTS) == 2 && $ARCHGRP_ARR(PCIE_ENDPOINT_MODE) == 1} 
     lappend IP_COMPONENTS [list "pcie" "pcie4_uscale_plus" "pcie4_uscale_plus_1" 0 1]
 }
 lappend IP_COMPONENTS [list "mem"  "axi_quad_spi"    "axi_quad_spi_0"    0 1]
+# core_logic.vhd addresses each HBM port's own pseudo-channel, so the IP's switch must stay off.
+set ARCHGRP_ARR(HBM_SWITCH_ENABLE) false
 lappend IP_COMPONENTS [list "mem"  "hbm_ip"          "hbm_ip"            0 1]
 
 lappend MOD {*}[get_ip_mod_files $IP_COMPONENTS [array get ARCHGRP_ARR]]
