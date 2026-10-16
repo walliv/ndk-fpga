@@ -4,7 +4,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-# Mirrors ../Modules.tcl's TEST branch minus the rest of the app, so MFB_SPEED_METER_MI is absent.
+# Mirrors ../Modules.tcl's TEST branch minus the rest of the app.
 set APP_COMP_BASE [file normalize "$ENTITY_BASE/.."]
 
 set MI_ASYNC_BASE      "$OFM_PATH/comp/mi_tools/async"

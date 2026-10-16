@@ -63,18 +63,9 @@ proc dts_build_iuventus {pcie_eps pcie_debug_en pcie_endpoint_mode pcie_mod_arch
             if {$pcie == 0} {
                 dts_iuventus_main_mi ret $pcie_eps $pcie_debug_en $pcie_endpoint_mode $pcie_mod_arch $usr_core_arch
 
-                if {$cq_sink} {
-                    # The CQ sink variant has no DMA: the same address space holds one speed
-                    # meter per endpoint, 0x20 apart (core_logic.vhd's cq_sink_g).
-                    append ret [dts_speed_meter $NdkCore::ADDR_DMA_MOD "cq_sink_ep0"]
-                    if {$pcie_eps == 2} {
-                        append ret [dts_speed_meter [expr $NdkCore::ADDR_DMA_MOD + 0x20] "cq_sink_ep1"]
-                    }
-                } else {
-                    # The one DMA_IUVENTUS instance sits behind endpoint 0's MI only; endpoint 1's
-                    # PF0 is a dummy no driver reads, so it gets no ziti,dma_iuventus node.
-                    dts_dma_iuventus ret $NdkCore::ADDR_DMA_MOD
-                }
+                # The one DMA_IUVENTUS instance sits behind endpoint 0's MI only; endpoint 1's PF0
+                # is a dummy no driver reads, so it gets no DMA nodes.
+                dts_dma_iuventus ret $NdkCore::ADDR_DMA_MOD $cq_sink $pcie_eps
             }
         }
     }
