@@ -29,7 +29,8 @@ def get_mfb_params(signal_bus, params_dic):
             eps = len(signal_bus.eof_pos) // regions
 
         region_size = 2**sps
-        block_size = 2**eps
+        # EOF_POS indexes items in the region, SOF_POS blocks in it, so the difference is the block
+        block_size = 2**(eps - sps)
         item_width = dw // (regions * region_size * block_size)
 
         if hasattr(signal_bus, "meta"):
