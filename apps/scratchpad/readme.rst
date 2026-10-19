@@ -35,7 +35,8 @@ Architecture
 
 - ``CORE_LOGIC`` (``comp/core_logic.vhd``) instantiates the PCIe module, the MI tree and per endpoint
   a ``PCIE_BAR2AXI`` on the DMA CQ/CC port with an ``xpm_nmu_mm`` (``SCRATCHPAD_NMU``) behind it, plus
-  the HBM block design. The DMA RQ ports are idle and RC is unused.
+  the HBM block design. Nothing issues requests, so the PCIe module runs with ``RQ_ENABLE = false``:
+  its RQ path is tied off and RC is unused.
 - The PCIe module hands PF0 BAR0 (target function 0, BAR ID 0) to its MTC; everything else arrives on
   the DMA CQ port. ``PCIE_BAR2AXI`` serves target function 1, BAR ID 0 (PF1 BAR0) and answers other
   non-posted requests with UR. The 1 GB window starts at AXI address 0x40_0000_0000 on both

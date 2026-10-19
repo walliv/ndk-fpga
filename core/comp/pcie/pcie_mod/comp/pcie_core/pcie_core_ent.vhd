@@ -61,6 +61,8 @@ entity PCIE_CORE is
         DBG_ENABLE          : boolean := false;
         -- Enable of XCV IP, for Xilinx only
         XVC_ENABLE          : boolean := false;
+        -- False when nothing issues requests: the RQ path to the IP is tied off, for Xilinx only
+        RQ_ENABLE           : boolean := true;
         -- Width of CARD/FPGA ID number
         CARD_ID_WIDTH       : natural := 0;
         -- Reset width for effective reset duplication

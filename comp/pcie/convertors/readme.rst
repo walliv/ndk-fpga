@@ -17,7 +17,8 @@ covers RQ. The RC interface (up to eight TLPs per beat) is not converted: with
 drops anything arriving on RC (a PSL assertion reports it in simulation) and leaves its RC MFB
 output idle. This suits applications that issue no requests. CC and RQ pass through
 ``PCIE_CPM5_TX_COND`` first. It accepts any legal MFB and emits one TLP per word, starting in
-region 0 and without pauses, as CPM5 requires.
+region 0 and without pauses, as CPM5 requires. With ``RQ_ENABLE = false`` PCIE_ADAPTER ties RQ off
+instead and leaves out its conditioner and convertor.
 
 .. toctree::
    :maxdepth: 1

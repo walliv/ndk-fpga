@@ -654,6 +654,7 @@ begin
             DEVICE             => DEVICE,
             CQ_FIFO_ITEMS      => 512,
             PCIE_MPS_DW        => 512/4,
+            RQ_ENABLE          => RQ_ENABLE,
             AXI_DATA_WIDTH     => AXI_DATA_WIDTH,
             AXI_CQUSER_WIDTH   => AXI_CQUSER_WIDTH,
             AXI_CCUSER_WIDTH   => AXI_CCUSER_WIDTH,

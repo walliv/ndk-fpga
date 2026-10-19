@@ -281,6 +281,7 @@ begin
         PTC_DISABLE         => true,
         DMA_BAR_ENABLE      => true,
         XVC_ENABLE          => false,
+        RQ_ENABLE           => false,
         MISC_TOP2PCIE_WIDTH => 1,
         MISC_PCIE2TOP_WIDTH => MISC_PCIE2TOP_WIDTH,
         DEVICE              => DEVICE

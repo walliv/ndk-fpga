@@ -46,6 +46,8 @@ entity PCIE_ADAPTER is
         CQ_FIFO_ITEMS      : natural := 512;
         -- Maximum write request (payload) size (in DWORDs)
         PCIE_MPS_DW        : natural := 512/4;
+        -- False when nothing drives RQ_MFB: the RQ path to the IP is tied off, for Xilinx only
+        RQ_ENABLE          : boolean := true;
 
         -- =====================================================================
         -- AXI configuration
@@ -488,7 +490,18 @@ begin
             CC_AXI_READY   => CC_AXI_READY
         );
 
-        rq_mfb2axi_g : if IS_CPM5_1024 generate
+        rq_mfb2axi_g : if not RQ_ENABLE generate
+            RQ_MFB_DST_RDY  <= '0';
+            RQ_AXI_DATA     <= (others => '0');
+            RQ_AXI_USER     <= (others => '0');
+            RQ_AXI_LAST     <= '0';
+            RQ_AXI_KEEP     <= (others => '0');
+            RQ_AXI_VALID    <= '0';
+            -- the CPM5 RQ checks read these
+            rq_conv_sof     <= (others => '0');
+            rq_conv_eof     <= (others => '0');
+            rq_conv_src_rdy <= '0';
+        elsif IS_CPM5_1024 generate
             rq_tx_cond_i : entity work.PCIE_CPM5_TX_COND
             generic map (
                 MFB_REGIONS     => RQ_MFB_REGIONS,
@@ -637,6 +650,10 @@ begin
             -- psl cpm5_rc_unused :
             --      assert always (PCIE_RESET = '0' -> RC_AXI_VALID = '0')
             --      report "PCIE_ADAPTER: CPM5 RC delivered a completion, RC is not converted and drops it";
+
+            -- psl cpm5_rq_disabled_idle :
+            --      assert always ((not RQ_ENABLE and PCIE_RESET = '0') -> RQ_MFB_SRC_RDY = '0')
+            --      report "PCIE_ADAPTER: RQ MFB carries a request although RQ_ENABLE is false";
 
             -- psl cpm5_cc_no_gap :
             --      assert always ((PCIE_RESET = '0' and cc_frame_open = '1') -> cc_conv_src_rdy = '1')
