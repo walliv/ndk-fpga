@@ -11,6 +11,7 @@ use IEEE.numeric_std.all;
 use work.math_pack.all;
 use work.type_pack.all;
 use work.pcie_meta_pack.all;
+use work.pcie_axi_cpm5_pack.all;
 
 entity PCIE_ADAPTER is
     generic (
@@ -49,14 +50,15 @@ entity PCIE_ADAPTER is
         -- =====================================================================
         -- AXI configuration
         -- =====================================================================
+        -- 1024 on "VERSAL" is CPM5, its RC is not converted (comp/pcie/convertors/readme.rst)
         AXI_DATA_WIDTH     : natural := CQ_MFB_REGIONS*CQ_MFB_REGION_SIZE*CQ_MFB_BLOCK_SIZE*CQ_MFB_ITEM_WIDTH;
-        -- Allowed values: 183 (USP Gen3x16), 88 (USP Gen3x8), 85 (V7 Gen3x8)
+        -- Allowed values: 183 (USP Gen3x16), 88 (USP Gen3x8), 85 (V7 Gen3x8), 465 (Versal CPM5 1024b)
         AXI_CQUSER_WIDTH   : natural := 183;
-        -- Allowed values: 81 (USP Gen3x16), 33 (USP Gen3x8), 33 (V7 Gen3x8)
+        -- Allowed values: 81 (USP Gen3x16), 33 (USP Gen3x8), 33 (V7 Gen3x8), 165 (Versal CPM5 1024b)
         AXI_CCUSER_WIDTH   : natural := 81;
-        -- Allowed values: 137 (USP Gen3x16), 62 (USP Gen3x8), 60 (V7 Gen3x8)
+        -- Allowed values: 137 (USP Gen3x16), 62 (USP Gen3x8), 60 (V7 Gen3x8), 373 (Versal CPM5 1024b)
         AXI_RQUSER_WIDTH   : natural := 137;
-        -- Allowed values: 161 (USP Gen3x16), 75 (USP Gen3x8), 75 (V7 Gen3x8)
+        -- Allowed values: 161 (USP Gen3x16), 75 (USP Gen3x8), 75 (V7 Gen3x8), 337 (Versal CPM5 1024b)
         AXI_RCUSER_WIDTH   : natural := 161;
         AXI_STRADDLING     : boolean := false;
 
@@ -190,10 +192,7 @@ entity PCIE_ADAPTER is
         -- =====================================================================
         -- RQ MFB interface
         --
-        -- MFB bus for transferring PCIe transactions (format according to the
-        -- PCIe IP used). Compared to the standard MFB specification, it does
-        -- not allow gaps (SRC_RDY=0) inside transactions and requires that
-        -- the first transaction in a word starts at byte 0.
+        -- No gaps inside a TLP and a word's first TLP at byte 0, unless in the CPM5 1024b mode
         -- =====================================================================
         RQ_MFB_DATA       : in  std_logic_vector(RQ_MFB_REGIONS*RQ_MFB_REGION_SIZE*RQ_MFB_BLOCK_SIZE*RQ_MFB_ITEM_WIDTH-1 downto 0);
         RQ_MFB_META       : in  std_logic_vector(RQ_MFB_REGIONS*PCIE_RQ_META_WIDTH-1 downto 0);
@@ -241,10 +240,7 @@ entity PCIE_ADAPTER is
         -- =====================================================================
         -- CC MFB interface
         --
-        -- MFB bus for transferring PCIe transactions (format according to the
-        -- PCIe IP used). Compared to the standard MFB specification, it does
-        -- not allow gaps (SRC_RDY=0) inside transactions and requires that
-        -- the first transaction in a word starts at byte 0.
+        -- No gaps inside a TLP and a word's first TLP at byte 0, unless in the CPM5 1024b mode
         -- =====================================================================
         CC_MFB_DATA       : in  std_logic_vector(CC_MFB_REGIONS*CC_MFB_REGION_SIZE*CC_MFB_BLOCK_SIZE*CC_MFB_ITEM_WIDTH-1 downto 0);
         CC_MFB_META       : in  std_logic_vector(CC_MFB_REGIONS*PCIE_CC_META_WIDTH-1 downto 0);
@@ -261,6 +257,10 @@ architecture FULL of PCIE_ADAPTER is
 
     constant IS_XILINX_DEVICE : boolean := (DEVICE = "ULTRASCALE") or (DEVICE = "VERSAL");
     constant IS_INTEL_DEVICE  : boolean := (DEVICE = "STRATIX10") or (DEVICE = "AGILEX");
+    constant IS_CPM5_1024     : boolean := (DEVICE = "VERSAL") and (AXI_DATA_WIDTH = 1024);
+
+    -- Largest CPM5 CC/RQ TLP: 1024 B of payload and a 16 B descriptor
+    constant CPM5_TX_MAX_TLP_BYTES : natural := 1024+16;
 
     signal cq_tph_present       : std_logic_vector(CQ_MFB_REGIONS-1 downto 0);
     signal cq_tph_type          : std_logic_vector(CQ_MFB_REGIONS*2-1 downto 0);
@@ -281,6 +281,23 @@ architecture FULL of PCIE_ADAPTER is
     signal cblk_rc_mfb_meta_arr : slv_array_t(RC_MFB_REGIONS-1 downto 0)(128+32+3-1 downto 0);
     signal cblk_cc_mfb_meta_arr : slv_array_t(CC_MFB_REGIONS-1 downto 0)(128+32-1 downto 0);
     signal cblk_rq_mfb_meta_arr : slv_array_t(RQ_MFB_REGIONS-1 downto 0)(128+32-1 downto 0);
+
+    -- CC and RQ MFB as the AXI converters see it (through PCIE_CPM5_TX_COND in the CPM5 1024b mode)
+    signal cc_conv_data         : std_logic_vector(CC_MFB_DATA'range);
+    signal cc_conv_sof          : std_logic_vector(CC_MFB_REGIONS-1 downto 0);
+    signal cc_conv_eof          : std_logic_vector(CC_MFB_REGIONS-1 downto 0);
+    signal cc_conv_sof_pos      : std_logic_vector(CC_MFB_SOF_POS'range);
+    signal cc_conv_eof_pos      : std_logic_vector(CC_MFB_EOF_POS'range);
+    signal cc_conv_src_rdy      : std_logic;
+    signal cc_conv_dst_rdy      : std_logic;
+    signal rq_conv_data         : std_logic_vector(RQ_MFB_DATA'range);
+    signal rq_conv_meta         : std_logic_vector(RQ_MFB_META'range);
+    signal rq_conv_sof          : std_logic_vector(RQ_MFB_REGIONS-1 downto 0);
+    signal rq_conv_eof          : std_logic_vector(RQ_MFB_REGIONS-1 downto 0);
+    signal rq_conv_sof_pos      : std_logic_vector(RQ_MFB_SOF_POS'range);
+    signal rq_conv_eof_pos      : std_logic_vector(RQ_MFB_EOF_POS'range);
+    signal rq_conv_src_rdy      : std_logic;
+    signal rq_conv_dst_rdy      : std_logic;
 
 begin
 
@@ -350,40 +367,99 @@ begin
 
         CQ_MFB_META <= slv_array_ser(cq_mfb_meta_arr);
 
-        rc_mfb2axi_i : entity work.PTC_PCIE_AXI2MFB
-        generic map (
-            MFB_REGIONS      => RC_MFB_REGIONS,
-            MFB_REG_SIZE     => RC_MFB_REGION_SIZE,
-            MFB_BLOCK_SIZE   => RC_MFB_BLOCK_SIZE,
-            MFB_ITEM_WIDTH   => RC_MFB_ITEM_WIDTH,
-            AXI_RCUSER_WIDTH => AXI_RCUSER_WIDTH,
-            AXI_DATA_WIDTH   => AXI_DATA_WIDTH,
-            DEVICE           => DEVICE
-        )
-        port map (
-            CLK            => PCIE_CLK,
-            RESET          => PCIE_RESET,
+        -- The CPM5 1024b RC interface carries up to 8 TLPs per beat and has no MFB converter. The apps
+        -- using it issue no requests, so RC is drained and its MFB side stays idle.
+        rc_axi2mfb_g : if not IS_CPM5_1024 generate
+            rc_mfb2axi_i : entity work.PTC_PCIE_AXI2MFB
+            generic map (
+                MFB_REGIONS      => RC_MFB_REGIONS,
+                MFB_REG_SIZE     => RC_MFB_REGION_SIZE,
+                MFB_BLOCK_SIZE   => RC_MFB_BLOCK_SIZE,
+                MFB_ITEM_WIDTH   => RC_MFB_ITEM_WIDTH,
+                AXI_RCUSER_WIDTH => AXI_RCUSER_WIDTH,
+                AXI_DATA_WIDTH   => AXI_DATA_WIDTH,
+                DEVICE           => DEVICE
+            )
+            port map (
+                CLK            => PCIE_CLK,
+                RESET          => PCIE_RESET,
 
-            RX_AXI_TDATA   => RC_AXI_DATA,
-            RX_AXI_TUSER   => RC_AXI_USER,
-            RX_AXI_TVALID  => RC_AXI_VALID,
-            RX_AXI_TREADY  => RC_AXI_READY,
+                RX_AXI_TDATA   => RC_AXI_DATA,
+                RX_AXI_TUSER   => RC_AXI_USER,
+                RX_AXI_TVALID  => RC_AXI_VALID,
+                RX_AXI_TREADY  => RC_AXI_READY,
 
-            TX_MFB_DATA    => RC_MFB_DATA,
-            TX_MFB_SOF     => RC_MFB_SOF,
-            TX_MFB_EOF     => RC_MFB_EOF,
-            TX_MFB_SOF_POS => RC_MFB_SOF_POS,
-            TX_MFB_EOF_POS => RC_MFB_EOF_POS,
-            TX_MFB_SRC_RDY => RC_MFB_SRC_RDY,
-            TX_MFB_DST_RDY => RC_MFB_DST_RDY
-        );
+                TX_MFB_DATA    => RC_MFB_DATA,
+                TX_MFB_SOF     => RC_MFB_SOF,
+                TX_MFB_EOF     => RC_MFB_EOF,
+                TX_MFB_SOF_POS => RC_MFB_SOF_POS,
+                TX_MFB_EOF_POS => RC_MFB_EOF_POS,
+                TX_MFB_SRC_RDY => RC_MFB_SRC_RDY,
+                TX_MFB_DST_RDY => RC_MFB_DST_RDY
+            );
 
-        rc_mfb_meta_g: for i in 0 to RC_MFB_REGIONS-1 generate
-            rc_mfb_meta_arr(i)(PCIE_CC_META_HEADER) <= (others => '0');
-            rc_mfb_meta_arr(i)(PCIE_CC_META_PREFIX) <= (others => '0');
+            rc_mfb_meta_g: for i in 0 to RC_MFB_REGIONS-1 generate
+                rc_mfb_meta_arr(i)(PCIE_CC_META_HEADER) <= (others => '0');
+                rc_mfb_meta_arr(i)(PCIE_CC_META_PREFIX) <= (others => '0');
+            end generate;
+
+            RC_MFB_META <= slv_array_ser(rc_mfb_meta_arr);
+
+        else generate
+            RC_AXI_READY   <= '1';
+            RC_MFB_DATA    <= (others => '0');
+            RC_MFB_META    <= (others => '0');
+            RC_MFB_SOF     <= (others => '0');
+            RC_MFB_EOF     <= (others => '0');
+            RC_MFB_SOF_POS <= (others => '0');
+            RC_MFB_EOF_POS <= (others => '0');
+            RC_MFB_SRC_RDY <= '0';
         end generate;
 
-        RC_MFB_META <= slv_array_ser(rc_mfb_meta_arr);
+        -- CPM5 needs TVALID held through a TLP and a fresh word to start in region 0; MTC and BAR2AXI
+        -- completions merged on CC guarantee neither, so both CC and RQ are conditioned.
+        cc_tx_cond_g : if IS_CPM5_1024 generate
+            cc_tx_cond_i : entity work.PCIE_CPM5_TX_COND
+            generic map (
+                MFB_REGIONS     => CC_MFB_REGIONS,
+                MFB_REGION_SIZE => CC_MFB_REGION_SIZE,
+                MFB_BLOCK_SIZE  => CC_MFB_BLOCK_SIZE,
+                MFB_ITEM_WIDTH  => CC_MFB_ITEM_WIDTH,
+                MFB_META_WIDTH  => 0,
+                MAX_TLP_BYTES   => CPM5_TX_MAX_TLP_BYTES,
+                DEVICE          => DEVICE
+            )
+            port map (
+                CLK            => PCIE_CLK,
+                RESET          => PCIE_RESET,
+
+                RX_MFB_DATA    => CC_MFB_DATA,
+                RX_MFB_META    => (others => '0'),
+                RX_MFB_SOF     => CC_MFB_SOF,
+                RX_MFB_EOF     => CC_MFB_EOF,
+                RX_MFB_SOF_POS => CC_MFB_SOF_POS,
+                RX_MFB_EOF_POS => CC_MFB_EOF_POS,
+                RX_MFB_SRC_RDY => CC_MFB_SRC_RDY,
+                RX_MFB_DST_RDY => CC_MFB_DST_RDY,
+
+                TX_MFB_DATA    => cc_conv_data,
+                TX_MFB_META    => open,
+                TX_MFB_SOF     => cc_conv_sof,
+                TX_MFB_EOF     => cc_conv_eof,
+                TX_MFB_SOF_POS => cc_conv_sof_pos,
+                TX_MFB_EOF_POS => cc_conv_eof_pos,
+                TX_MFB_SRC_RDY => cc_conv_src_rdy,
+                TX_MFB_DST_RDY => cc_conv_dst_rdy
+            );
+        else generate
+            cc_conv_data    <= CC_MFB_DATA;
+            cc_conv_sof     <= CC_MFB_SOF;
+            cc_conv_eof     <= CC_MFB_EOF;
+            cc_conv_sof_pos <= CC_MFB_SOF_POS;
+            cc_conv_eof_pos <= CC_MFB_EOF_POS;
+            cc_conv_src_rdy <= CC_MFB_SRC_RDY;
+            CC_MFB_DST_RDY  <= cc_conv_dst_rdy;
+        end generate;
 
         cc_mfb2axi_i : entity work.PCIE_CC_MFB2AXI
         generic map (
@@ -396,13 +472,13 @@ begin
             STRADDLING       => AXI_STRADDLING
         )
         port map (
-            CC_MFB_DATA    => CC_MFB_DATA,
-            CC_MFB_SOF     => CC_MFB_SOF,
-            CC_MFB_EOF     => CC_MFB_EOF,
-            CC_MFB_SOF_POS => CC_MFB_SOF_POS,
-            CC_MFB_EOF_POS => CC_MFB_EOF_POS,
-            CC_MFB_SRC_RDY => CC_MFB_SRC_RDY,
-            CC_MFB_DST_RDY => CC_MFB_DST_RDY,
+            CC_MFB_DATA    => cc_conv_data,
+            CC_MFB_SOF     => cc_conv_sof,
+            CC_MFB_EOF     => cc_conv_eof,
+            CC_MFB_SOF_POS => cc_conv_sof_pos,
+            CC_MFB_EOF_POS => cc_conv_eof_pos,
+            CC_MFB_SRC_RDY => cc_conv_src_rdy,
+            CC_MFB_DST_RDY => cc_conv_dst_rdy,
 
             CC_AXI_DATA    => CC_AXI_DATA,
             CC_AXI_USER    => CC_AXI_USER,
@@ -412,36 +488,171 @@ begin
             CC_AXI_READY   => CC_AXI_READY
         );
 
-        rq_mfb2axi_i : entity work.PTC_MFB2PCIE_AXI
-        generic map (
-            MFB_REGIONS      => RQ_MFB_REGIONS,
-            MFB_REGION_SIZE  => RQ_MFB_REGION_SIZE,
-            MFB_BLOCK_SIZE   => RQ_MFB_BLOCK_SIZE,
-            MFB_ITEM_WIDTH   => RQ_MFB_ITEM_WIDTH,
-            AXI_RQUSER_WIDTH => AXI_RQUSER_WIDTH
-        )
-        port map (
-            RX_MFB_DATA    => RQ_MFB_DATA,
-            RX_MFB_SOF_POS => RQ_MFB_SOF_POS,
-            RX_MFB_EOF_POS => RQ_MFB_EOF_POS,
-            RX_MFB_SOF     => RQ_MFB_SOF,
-            RX_MFB_EOF     => RQ_MFB_EOF,
-            RX_MFB_SRC_RDY => RQ_MFB_SRC_RDY,
-            RX_MFB_DST_RDY => RQ_MFB_DST_RDY,
-            RX_MFB_BE      => slv_array_ser(rq_mfb_be_arr),
+        rq_mfb2axi_g : if IS_CPM5_1024 generate
+            rq_tx_cond_i : entity work.PCIE_CPM5_TX_COND
+            generic map (
+                MFB_REGIONS     => RQ_MFB_REGIONS,
+                MFB_REGION_SIZE => RQ_MFB_REGION_SIZE,
+                MFB_BLOCK_SIZE  => RQ_MFB_BLOCK_SIZE,
+                MFB_ITEM_WIDTH  => RQ_MFB_ITEM_WIDTH,
+                MFB_META_WIDTH  => PCIE_RQ_META_WIDTH,
+                MAX_TLP_BYTES   => CPM5_TX_MAX_TLP_BYTES,
+                DEVICE          => DEVICE
+            )
+            port map (
+                CLK            => PCIE_CLK,
+                RESET          => PCIE_RESET,
 
-            RQ_DATA        => RQ_AXI_DATA,
-            RQ_USER        => RQ_AXI_USER,
-            RQ_LAST        => RQ_AXI_LAST,
-            RQ_KEEP        => RQ_AXI_KEEP,
-            RQ_READY       => RQ_AXI_READY,
-            RQ_VALID       => RQ_AXI_VALID
-        );
+                RX_MFB_DATA    => RQ_MFB_DATA,
+                RX_MFB_META    => RQ_MFB_META,
+                RX_MFB_SOF     => RQ_MFB_SOF,
+                RX_MFB_EOF     => RQ_MFB_EOF,
+                RX_MFB_SOF_POS => RQ_MFB_SOF_POS,
+                RX_MFB_EOF_POS => RQ_MFB_EOF_POS,
+                RX_MFB_SRC_RDY => RQ_MFB_SRC_RDY,
+                RX_MFB_DST_RDY => RQ_MFB_DST_RDY,
+
+                TX_MFB_DATA    => rq_conv_data,
+                TX_MFB_META    => rq_conv_meta,
+                TX_MFB_SOF     => rq_conv_sof,
+                TX_MFB_EOF     => rq_conv_eof,
+                TX_MFB_SOF_POS => rq_conv_sof_pos,
+                TX_MFB_EOF_POS => rq_conv_eof_pos,
+                TX_MFB_SRC_RDY => rq_conv_src_rdy,
+                TX_MFB_DST_RDY => rq_conv_dst_rdy
+            );
+
+            rq_mfb2axi_i : entity work.PCIE_RQ_MFB2AXI
+            generic map (
+                MFB_REGIONS      => RQ_MFB_REGIONS,
+                MFB_REGION_SIZE  => RQ_MFB_REGION_SIZE,
+                MFB_BLOCK_SIZE   => RQ_MFB_BLOCK_SIZE,
+                MFB_ITEM_WIDTH   => RQ_MFB_ITEM_WIDTH,
+                AXI_RQUSER_WIDTH => AXI_RQUSER_WIDTH,
+                AXI_DATA_WIDTH   => AXI_DATA_WIDTH,
+                STRADDLING       => AXI_STRADDLING
+            )
+            port map (
+                RQ_MFB_DATA    => rq_conv_data,
+                RQ_MFB_META    => rq_conv_meta,
+                RQ_MFB_SOF     => rq_conv_sof,
+                RQ_MFB_EOF     => rq_conv_eof,
+                RQ_MFB_SOF_POS => rq_conv_sof_pos,
+                RQ_MFB_EOF_POS => rq_conv_eof_pos,
+                RQ_MFB_SRC_RDY => rq_conv_src_rdy,
+                RQ_MFB_DST_RDY => rq_conv_dst_rdy,
+
+                RQ_AXI_DATA    => RQ_AXI_DATA,
+                RQ_AXI_USER    => RQ_AXI_USER,
+                RQ_AXI_LAST    => RQ_AXI_LAST,
+                RQ_AXI_KEEP    => RQ_AXI_KEEP,
+                RQ_AXI_VALID   => RQ_AXI_VALID,
+                RQ_AXI_READY   => RQ_AXI_READY
+            );
+        else generate
+            rq_mfb2axi_i : entity work.PTC_MFB2PCIE_AXI
+            generic map (
+                MFB_REGIONS      => RQ_MFB_REGIONS,
+                MFB_REGION_SIZE  => RQ_MFB_REGION_SIZE,
+                MFB_BLOCK_SIZE   => RQ_MFB_BLOCK_SIZE,
+                MFB_ITEM_WIDTH   => RQ_MFB_ITEM_WIDTH,
+                AXI_RQUSER_WIDTH => AXI_RQUSER_WIDTH
+            )
+            port map (
+                RX_MFB_DATA    => RQ_MFB_DATA,
+                RX_MFB_SOF_POS => RQ_MFB_SOF_POS,
+                RX_MFB_EOF_POS => RQ_MFB_EOF_POS,
+                RX_MFB_SOF     => RQ_MFB_SOF,
+                RX_MFB_EOF     => RQ_MFB_EOF,
+                RX_MFB_SRC_RDY => RQ_MFB_SRC_RDY,
+                RX_MFB_DST_RDY => RQ_MFB_DST_RDY,
+                RX_MFB_BE      => slv_array_ser(rq_mfb_be_arr),
+
+                RQ_DATA        => RQ_AXI_DATA,
+                RQ_USER        => RQ_AXI_USER,
+                RQ_LAST        => RQ_AXI_LAST,
+                RQ_KEEP        => RQ_AXI_KEEP,
+                RQ_READY       => RQ_AXI_READY,
+                RQ_VALID       => RQ_AXI_VALID
+            );
+        end generate;
 
         rq_mfb_meta_arr <= slv_array_deser(RQ_MFB_META, RQ_MFB_REGIONS);
 
         rq_mfb_be_arr_g: for i in 0 to RQ_MFB_REGIONS-1 generate
             rq_mfb_be_arr(i) <= rq_mfb_meta_arr(i)(PCIE_RQ_META_LBE) & rq_mfb_meta_arr(i)(PCIE_RQ_META_FBE);
+        end generate;
+
+        -- Simulation checks of the CPM5 1024b mode; synthesis drops the frame trackers as nothing reads them
+        cpm5_checks_g : if IS_CPM5_1024 generate
+            signal cc_frame_open    : std_logic;
+            signal rq_frame_open    : std_logic;
+            signal cc_first_sof_err : std_logic;
+            signal rq_first_sof_err : std_logic;
+
+            -- psl default clock is rising_edge(PCIE_CLK);
+        begin
+            assert (AXI_CQUSER_WIDTH = AXI_CQ1024_USER_W and AXI_CCUSER_WIDTH = AXI_CC1024_USER_W
+                    and AXI_RQUSER_WIDTH = AXI_RQ1024_USER_W and AXI_RCUSER_WIDTH = AXI_RC1024_USER_W and AXI_STRADDLING
+                    and CQ_MFB_REGIONS = AXI1024_TLPS and CC_MFB_REGIONS = AXI1024_TLPS and RQ_MFB_REGIONS = AXI1024_TLPS)
+                report "PCIE_ADAPTER: The 1024b CPM5 interface needs AXI_*USER_WIDTH = 465/165/373/337, AXI_STRADDLING and 4-region CQ/CC/RQ MFB"
+                severity FAILURE;
+
+            -- With REGION_SIZE = 1 every SOF opens its region, so the last flagged region of a word decides if a TLP stays open
+            frame_open_p : process (PCIE_CLK)
+            begin
+                if (rising_edge(PCIE_CLK)) then
+                    if (cc_conv_src_rdy = '1' and CC_AXI_READY = '1') then
+                        for r in 0 to CC_MFB_REGIONS-1 loop
+                            if (cc_conv_eof(r) = '1') then
+                                cc_frame_open <= '0';
+                            end if;
+                            if (cc_conv_sof(r) = '1' and cc_conv_eof(r) = '0') then
+                                cc_frame_open <= '1';
+                            end if;
+                        end loop;
+                    end if;
+
+                    if (rq_conv_src_rdy = '1' and RQ_AXI_READY = '1') then
+                        for r in 0 to RQ_MFB_REGIONS-1 loop
+                            if (rq_conv_eof(r) = '1') then
+                                rq_frame_open <= '0';
+                            end if;
+                            if (rq_conv_sof(r) = '1' and rq_conv_eof(r) = '0') then
+                                rq_frame_open <= '1';
+                            end if;
+                        end loop;
+                    end if;
+
+                    if (PCIE_RESET = '1') then
+                        cc_frame_open <= '0';
+                        rq_frame_open <= '0';
+                    end if;
+                end if;
+            end process;
+
+            cc_first_sof_err <= cc_conv_src_rdy and not cc_frame_open and (or cc_conv_sof) and not cc_conv_sof(0);
+            rq_first_sof_err <= rq_conv_src_rdy and not rq_frame_open and (or rq_conv_sof) and not rq_conv_sof(0);
+
+            -- psl cpm5_rc_unused :
+            --      assert always (PCIE_RESET = '0' -> RC_AXI_VALID = '0')
+            --      report "PCIE_ADAPTER: CPM5 RC delivered a completion, RC is not converted and drops it";
+
+            -- psl cpm5_cc_no_gap :
+            --      assert always ((PCIE_RESET = '0' and cc_frame_open = '1') -> cc_conv_src_rdy = '1')
+            --      report "PCIE_ADAPTER: conditioned CC MFB paused inside a TLP, CPM5 needs TVALID held for a whole TLP";
+
+            -- psl cpm5_cc_first_sof :
+            --      assert always (PCIE_RESET = '0' -> cc_first_sof_err = '0')
+            --      report "PCIE_ADAPTER: conditioned CC MFB word starts its first TLP outside region 0 without a TLP to continue";
+
+            -- psl cpm5_rq_no_gap :
+            --      assert always ((PCIE_RESET = '0' and rq_frame_open = '1') -> rq_conv_src_rdy = '1')
+            --      report "PCIE_ADAPTER: conditioned RQ MFB paused inside a TLP, CPM5 needs TVALID held for a whole TLP";
+
+            -- psl cpm5_rq_first_sof :
+            --      assert always (PCIE_RESET = '0' -> rq_first_sof_err = '0')
+            --      report "PCIE_ADAPTER: conditioned RQ MFB word starts its first TLP outside region 0 without a TLP to continue";
         end generate;
 
     end generate;
