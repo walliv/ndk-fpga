@@ -47,6 +47,7 @@ Other example applications will be added in the future, stay tuned!
 
     app-minimal
     ndk_apps/dram_pkt_capture/readme
+    ndk_apps/scratchpad/readme
     top_level_simulation
 
 --------
@@ -131,6 +132,7 @@ support a subset of these cards. A complete list of supported FPGA cards can be 
     ndk_cards/bittware/ia-860m/readme
     ndk_cards/amd/alveo-u200/readme
     ndk_cards/amd/alveo-u55c/readme
+    ndk_cards/amd/alveo-v80/readme
     ndk_cards/amd/vcu118/readme
     ndk_extra/nfb-200g2ql/readme
     ndk_cards/prodesign/pd-falcon/readme

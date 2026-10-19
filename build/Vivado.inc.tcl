@@ -76,6 +76,25 @@ proc EvalFile {FNAME OPT} {
         puts "BD added: $FNAME"
         generate_target all [get_files $FNAME] -force
         upgrade_ip [get_ips *] -quiet
+    } elseif {$opt(TYPE) == "VIVADO_BD_TCL"} {
+        # The script (or BD_PROC it defines, called with BD_NAME and BD_ARGS) creates and saves block design BD_NAME, whose generated HDL wrapper joins the sources.
+        set vars [list BD_NAME $opt(BD_NAME)]
+        if {[info exists opt(VARS)]} {
+            lappend vars {*}$opt(VARS)
+        }
+        puts "Creating BD $opt(BD_NAME) from script: $FNAME"
+        source_with_vars $FNAME $vars
+        if {[info exists opt(BD_PROC)]} {
+            set bd_args ""
+            if {[info exists opt(BD_ARGS)]} {
+                set bd_args $opt(BD_ARGS)
+            }
+            $opt(BD_PROC) $opt(BD_NAME) {*}$bd_args
+        }
+        set bd_file [get_files $opt(BD_NAME).bd]
+        generate_target all $bd_file
+        add_files -norecurse [make_wrapper -files $bd_file -top]
+        puts "BD added: $bd_file"
     } elseif {$opt(TYPE) == "VIVADO_TCL"} {
         if {[info exists opt(PHASE)] && "ADD_FILES" in $opt(PHASE)} {
             puts "Running script: $FNAME"
@@ -229,6 +248,26 @@ proc target_filelist { {filename "filelist.tcl"} } {
             # A Block Design
             append content "read_bd $fname\n"
             append content "generate_target all \[get_files $fname\] -force\n"
+
+        } elseif {$opt(TYPE) == "VIVADO_BD_TCL"} {
+            # A Block Design created by a TCL script, mirroring EvalFile
+            set vars [list BD_NAME $opt(BD_NAME)]
+            if {[info exists opt(VARS)]} {
+                lappend vars {*}$opt(VARS)
+            }
+            foreach {var_name var_value} $vars {
+                append content "set $var_name [list $var_value]\n"
+            }
+            append content "source $fname\n"
+            if {[info exists opt(BD_PROC)]} {
+                set bd_args ""
+                if {[info exists opt(BD_ARGS)]} {
+                    set bd_args $opt(BD_ARGS)
+                }
+                append content "$opt(BD_PROC) $opt(BD_NAME) $bd_args\n"
+            }
+            append content "generate_target all \[get_files $opt(BD_NAME).bd\]\n"
+            append content "add_files -norecurse \[make_wrapper -files \[get_files $opt(BD_NAME).bd\] -top\]\n"
 
         } elseif {$opt(TYPE) == "VIVADO_TCL"} {
             # An IP defined by a TCL generation script. Only run it in the

@@ -84,6 +84,8 @@ entity PCIE is
         PCIE_CORE_DBG_ENABLE : boolean := false;
         -- Enable of PCIe controller debug logic
         PCIE_CTRL_DBG_ENABLE : boolean := false;
+        -- False when nothing drives DMA_RQ: the RQ path to the IP is tied off, for Xilinx only
+        RQ_ENABLE            : boolean := true;
         -- Width of MISC signal between Top-Level FPGA design and PCIE core logic
         MISC_TOP2PCIE_WIDTH  : natural := 1;
         -- Width of MISC signal between PCIE core logic and Top-Level FPGA design
@@ -501,6 +503,7 @@ begin
         MI_WIDTH            => 32,
         DBG_ENABLE          => PCIE_CORE_DBG_ENABLE,
         XVC_ENABLE          => XVC_ENABLE,
+        RQ_ENABLE           => RQ_ENABLE,
         CARD_ID_WIDTH       => CARD_ID_WIDTH,
         RESET_WIDTH         => RESET_WIDTH,
         MISC_TOP2PCIE_WIDTH => MISC_TOP2PCIE_WIDTH,

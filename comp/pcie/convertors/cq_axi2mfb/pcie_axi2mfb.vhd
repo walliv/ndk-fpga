@@ -12,17 +12,15 @@ use IEEE.numeric_std.all;
 use work.math_pack.all;
 use work.type_pack.all;
 use work.pcie_axi_meta_pack.all;
+use work.pcie_axi_cpm5_pack.all;
 
--- The Purpose of this component is to convert AXI to MFB bus.
--- Supported are 512b and 256b with and without straddling, but
--- variants with straddling and all 256 variant has not been tested.
+-- Converts the AXI CQ bus to MFB. Supported are 512b and 256b with or without straddling (straddled
+-- and 256b variants are untested) and the 1024b Versal CPM5 interface, straddled only, as MFB (4,1,8,32).
 entity PCIE_CQ_AXI2MFB is
     generic (
-        -- =======================================================================
         -- MFB BUS CONFIGURATION:
         --
-        -- Supported configurations are: (2,1,8,32), (1,1,8,32)
-        -- =======================================================================
+        -- Supported configurations are: (4,1,8,32), (2,1,8,32), (1,1,8,32)
 
         MFB_REGIONS       : natural := 2;
         MFB_REGION_SIZE   : natural := 1;
@@ -31,17 +29,15 @@ entity PCIE_CQ_AXI2MFB is
         -- MFB bus: width of single data region in bits, auxiliary parameter, do not change value!
         MFB_REGION_WIDTH  : natural := MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH;
 
-        -- =======================================================================
         -- AXI BUS CONFIGURATION:
         --
-        -- CQ_USER_WIDTH = 183 for Gen3x16 PCIe - with straddling and without straddling!
-        -- CQ_USER_WIDTH = 88  for Gen3x8 PCIe - without straddling!
-        -- CQ_USER_WIDTH = 85  for Gen3x8 PCIe - without straddling!
-        -- =======================================================================
+        -- CQ_USER_WIDTH = 183 for Gen3x16 PCIe - with or without straddling
+        -- CQ_USER_WIDTH = 88 or 85 for Gen3x8 PCIe - without straddling
+        -- CQ_USER_WIDTH = 465 for 1024b Versal CPM5 PCIe - with straddling only
 
         AXI_CQUSER_WIDTH  : natural := AXI_CC512_USER_W;
         AXI_DATA_WIDTH    : natural := MFB_REGIONS*MFB_REGION_WIDTH;
-        -- Straddling is permited only for CQ_USER_WIDTH = 183
+        -- Straddling is permited only for CQ_USER_WIDTH = 183 and required for 465
         STRADDLING        : boolean := false;
         -- Select correct FPGA device: "ULTRASCALE", "VIRTEX7"
         DEVICE            : string := "ULTRASCALE"
@@ -155,8 +151,9 @@ architecture FULL of PCIE_CQ_AXI2MFB is
 begin
     assert ((MFB_REGIONS = 1 and (AXI_CQUSER_WIDTH = 85 or AXI_CQUSER_WIDTH = 88) and not STRADDLING)
             or (MFB_REGIONS = 2 and AXI_CQUSER_WIDTH = 183 and STRADDLING)
-            or (MFB_REGIONS = 2 and AXI_CQUSER_WIDTH = 183 and not STRADDLING))
-        report "PCIE_CQ_AXI2MFB: Unsupported AXI CQ USER port width, the supported are: 85 (MFB_REGIONS = 1), 88 (MFB_REGIONS = 1), 183 (MFB_REGIONS = 2)"
+            or (MFB_REGIONS = 2 and AXI_CQUSER_WIDTH = 183 and not STRADDLING)
+            or (MFB_REGIONS = 4 and AXI_CQUSER_WIDTH = AXI_CQ1024_USER_W and STRADDLING))
+        report "PCIE_CQ_AXI2MFB: Unsupported AXI CQ USER port width, the supported are: 85 (MFB_REGIONS = 1), 88 (MFB_REGIONS = 1), 183 (MFB_REGIONS = 2), 465 (MFB_REGIONS = 4, straddling)"
         severity FAILURE;
 
     -- =========================================================================
@@ -335,6 +332,69 @@ begin
     end generate;
 
     -- =========================================================================
+    -- Conversion AXI to MFB for VERSAL CPM5 1024b with straddling
+    --
+    -- TLPs start on 256b (region) boundaries
+    -- =========================================================================
+
+    axi_1024b_g: if (AXI_CQUSER_WIDTH = AXI_CQ1024_USER_W and STRADDLING) generate
+        constant RGN_PTR_W : natural := log2(MFB_REGIONS);
+
+        signal cq1024_sop     : std_logic_vector(AXI1024_TLPS-1 downto 0);
+        signal cq1024_sop_ptr : slv_array_t(AXI1024_TLPS-1 downto 0)(AXI1024_SOP_PTR_W-1 downto 0);
+        signal cq1024_eop     : std_logic_vector(AXI1024_TLPS-1 downto 0);
+        signal cq1024_eop_ptr : slv_array_t(AXI1024_TLPS-1 downto 0)(AXI1024_EOP_PTR_W-1 downto 0);
+        signal cq1024_fbe     : slv_array_t(AXI1024_TLPS-1 downto 0)(4-1 downto 0);
+        signal cq1024_lbe     : slv_array_t(AXI1024_TLPS-1 downto 0)(4-1 downto 0);
+    begin
+        assert (MFB_REGIONS = AXI1024_TLPS and MFB_REGION_SIZE = 1 and RGN_PTR_W + EOP_POS_WIDTH = AXI1024_EOP_PTR_W)
+            report "PCIE_CQ_AXI2MFB: The 1024b CPM5 interface requires MFB (4,1,8,32)"
+            severity FAILURE;
+
+        cq1024_sop <= CQ_AXI_USER(AXI_CQ1024_SOP);
+        cq1024_eop <= CQ_AXI_USER(AXI_CQ1024_EOP);
+
+        tlp_fields_g : for i in 0 to AXI1024_TLPS-1 generate
+            cq1024_sop_ptr(i) <= CQ_AXI_USER(AXI_CQ1024_SOP_PTR_O + (i+1)*AXI1024_SOP_PTR_W-1 downto AXI_CQ1024_SOP_PTR_O + i*AXI1024_SOP_PTR_W);
+            cq1024_eop_ptr(i) <= CQ_AXI_USER(AXI_CQ1024_EOP_PTR_O + (i+1)*AXI1024_EOP_PTR_W-1 downto AXI_CQ1024_EOP_PTR_O + i*AXI1024_EOP_PTR_W);
+            cq1024_fbe(i)     <= CQ_AXI_USER(AXI_CQ1024_FBE_O + (i+1)*4-1 downto AXI_CQ1024_FBE_O + i*4);
+            cq1024_lbe(i)     <= CQ_AXI_USER(AXI_CQ1024_LBE_O + (i+1)*4-1 downto AXI_CQ1024_LBE_O + i*4);
+        end generate;
+
+        CQ_BE          <= CQ_AXI_USER(AXI_CQ1024_BE);
+        -- CPM5 does not support TPH (PG346 p.24)
+        CQ_TPH_PRESENT <= (others => '0');
+        CQ_TPH_TYPE    <= (others => '0');
+        CQ_TPH_ST_TAG  <= (others => '0');
+        CQ_MFB_SOF_POS <= (others => '0');
+
+        sop_eop_1024_conv_p : process (all)
+            variable rgn : natural range 0 to MFB_REGIONS-1;
+        begin
+            CQ_MFB_SOF     <= (others => '0');
+            CQ_MFB_EOF     <= (others => '0');
+            CQ_MFB_EOF_POS <= (others => '0');
+            CQ_FBE         <= (others => '0');
+            CQ_LBE         <= (others => '0');
+
+            for i in 0 to AXI1024_TLPS-1 loop
+                if (cq1024_sop(i) = '1') then
+                    rgn                                := to_integer(unsigned(cq1024_sop_ptr(i)));
+                    CQ_MFB_SOF(rgn)                    <= '1';
+                    CQ_FBE((rgn+1)*4-1 downto rgn*4)   <= cq1024_fbe(i);
+                    CQ_LBE((rgn+1)*4-1 downto rgn*4)   <= cq1024_lbe(i);
+                end if;
+
+                if (cq1024_eop(i) = '1') then
+                    rgn                                                              := to_integer(unsigned(cq1024_eop_ptr(i)(AXI1024_EOP_PTR_W-1 downto EOP_POS_WIDTH)));
+                    CQ_MFB_EOF(rgn)                                                  <= '1';
+                    CQ_MFB_EOF_POS((rgn+1)*EOP_POS_WIDTH-1 downto rgn*EOP_POS_WIDTH) <= cq1024_eop_ptr(i)(EOP_POS_WIDTH-1 downto 0);
+                end if;
+            end loop;
+        end process;
+    end generate;
+
+    -- =========================================================================
     -- Parse FBE and LBE
     --
     -- It's defined for STRADDLING and non STRADDLING operation
@@ -359,7 +419,7 @@ begin
                 end if;
             end if;
         end process;
-    else generate
+    elsif (MFB_REGIONS = 1) generate
         CQ_FBE <= cq_axi_user_fbe when cq_axi_user_sop(0) = '1' else (others => '0');
         CQ_LBE <= cq_axi_user_lbe when cq_axi_user_sop(0) = '1' else (others => '0');
     end generate;

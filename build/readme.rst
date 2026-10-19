@@ -138,6 +138,13 @@ system can get a list with property name and value pairs instead of a single ite
   - *CONSTR_QUARTUS*
   - *CONSTR_VIVADO*
   - *VIVADO_IP_XACT* - automatically used for *xci* files
+  - *VIVADO_BD_TCL* - a TCL script that creates a block design in the Vivado project (see below)
+
+- **BD_NAME**, **BD_PROC**, **BD_ARGS** - only for the VIVADO_BD_TCL type. The build sources the
+  script with ``BD_NAME`` and the **VARS** pairs set as variables. If ``BD_PROC`` is given, it then
+  calls ``$BD_PROC $BD_NAME {*}$BD_ARGS``. Either way the script must create and save the block
+  design ``BD_NAME``. The build then runs ``generate_target all`` on it and adds its HDL wrapper
+  ``<BD_NAME>_wrapper`` to the sources, so HDL instantiates the BD as that component.
 
 - **SCOPED_TO_REF** - only for the CONSTR_VIVADO type, calls ``set_property SCOPED_TO_REF`` for the file
 
@@ -158,6 +165,7 @@ Example of using properties
 
    lappend MOD [list $ENTITY_BASE/dp_bmem_behav.vhd VIVADO_SET_PROPERTY [list -quiet FILE_TYPE {VHDL}]] ;# set the VHDL98 standard for this file
    lappend MOD [list "$ENTITY_BASE/bus_handshake.xdc" TYPE "CONSTR_VIVADO" SCOPED_TO_REF "ASYNC_BUS_HANDSHAKE" PROCESSING_ORDER "LATE"]
+   lappend MOD [list "$CARD_IP_BASE/v80_platform_bd.tcl" TYPE "VIVADO_BD_TCL" BD_NAME "v80_hbm" BD_PROC "create_v80_hbm_bd"]
 
 List of properties used in SV_LIBS
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

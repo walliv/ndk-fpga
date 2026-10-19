@@ -96,6 +96,7 @@ clean_build:
 	-@$(RM) -r *.dcp *.prm
 	-@$(RM) -r *.data *.runs *.cache *.filter *.hw *.sim .Xil *.ip_user_files
 	-@$(RM) -r $(OUTPUT_NAME).vivado.mk
+	-@$(RM) -r *.pdi *.bif *.rcdo *.rnpi *_sync_offsets.txt gen_files static_files wdi_info.xml
 
 # User's chance to add own cleaning stuff
 clean: clean_build clean_common $(CLEAN_DEPENDS)

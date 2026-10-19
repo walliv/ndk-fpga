@@ -38,6 +38,16 @@ apps/*/build/*/*.dcp
 apps/*/build/*/*.nfw
 apps/*/build/*/*.log
 apps/*/build/*/src/ipcfg_*/
+apps/*/build/*/.Xil/
+# Versal device image (PDI) flow outputs: write_device_image products and their staging dirs
+apps/*/build/*/*.pdi
+apps/*/build/*/*.bif
+apps/*/build/*/*.rcdo
+apps/*/build/*/*.rnpi
+apps/*/build/*/*_sync_offsets.txt
+apps/*/build/*/wdi_info.xml
+apps/*/build/*/gen_files/
+apps/*/build/*/static_files/
 
 # nvc work libraries, created beside each testbench by `make nvc-elab`
 work/

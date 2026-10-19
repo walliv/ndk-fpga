@@ -965,6 +965,7 @@ begin
             RQ_MFB_ITEM_WIDTH  => RQ_MFB_ITEM_WIDTH,
             ENDPOINT_TYPE      => ENDPOINT_TYPE,
             DEVICE             => DEVICE,
+            RQ_ENABLE          => RQ_ENABLE,
             AXI_CQUSER_WIDTH   => AXI_CQUSER_WIDTH,
             AXI_CCUSER_WIDTH   => AXI_CCUSER_WIDTH,
             AXI_RQUSER_WIDTH   => AXI_RQUSER_WIDTH,

@@ -13,6 +13,7 @@ set PTC_COMP_BASE  "$OFM_PATH/comp/pcie/ptc/comp"
 lappend PACKAGES "$OFM_PATH/comp/base/pkg/math_pack.vhd"
 lappend PACKAGES "$OFM_PATH/comp/base/pkg/type_pack.vhd"
 lappend PACKAGES "$OFM_PATH/comp/base/pkg/pcie_meta_pack.vhd"
+lappend PACKAGES "$OFM_PATH/comp/pcie/convertors/pkg/pcie_axi_cpm5_pack.vhd"
 
 # Components
 lappend COMPONENTS [ list "CONN_BLOCK" $PCIE_CBLK_BASE               "FULL" ]
@@ -20,6 +21,8 @@ lappend COMPONENTS [ list "CQ_AXI2MFB" "$PCIE_CONV_BASE/cq_axi2mfb"  "FULL" ]
 lappend COMPONENTS [ list "CC_MFB2AXI" "$PCIE_CONV_BASE/cc_mfb2axi"  "FULL" ]
 lappend COMPONENTS [ list "RC_AXI2MFB" "$PTC_COMP_BASE/pcie_axi2mfb" "FULL" ]
 lappend COMPONENTS [ list "RQ_MFB2AXI" "$PTC_COMP_BASE/mfb2pcie_axi" "FULL" ]
+lappend COMPONENTS [ list "RQ_MFB2AXI_CPM5" "$PCIE_CONV_BASE/rq_mfb2axi" "FULL" ]
+lappend COMPONENTS [ list "CPM5_TX_COND" "$PCIE_CONV_BASE/cpm5_tx_cond" "FULL" ]
 
 # Files
 lappend MOD "$ENTITY_BASE/pcie_adapter.vhd"

@@ -7,7 +7,14 @@
 # Packages
 lappend PACKAGES "$OFM_PATH/comp/base/pkg/math_pack.vhd"
 lappend PACKAGES "$OFM_PATH/comp/base/pkg/type_pack.vhd"
+lappend PACKAGES "$OFM_PATH/comp/base/pkg/pcie_meta_pack.vhd"
+lappend PACKAGES "$OFM_PATH/comp/base/pkg/pcie_axi_meta_pack.vhd"
+lappend PACKAGES "$OFM_PATH/comp/pcie/convertors/pkg/pcie_axi_cpm5_pack.vhd"
 
 # Source files for implemented component
 lappend MOD "$ENTITY_BASE/cq_axi2mfb/pcie_axi2mfb.vhd"
 lappend MOD "$ENTITY_BASE/cc_mfb2axi/pcie_mfb2axi.vhd"
+lappend MOD "$ENTITY_BASE/rq_mfb2axi/pcie_rq_mfb2axi.vhd"
+
+# Components
+lappend COMPONENTS [ list "PCIE_CPM5_TX_COND" "$ENTITY_BASE/cpm5_tx_cond" "FULL" ]
