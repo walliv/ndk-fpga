@@ -8,6 +8,7 @@
 lappend PACKAGES "$OFM_PATH/comp/base/pkg/math_pack.vhd"
 lappend PACKAGES "$OFM_PATH/comp/base/pkg/type_pack.vhd"
 lappend PACKAGES "$OFM_PATH/comp/base/pkg/pcie_axi_meta_pack.vhd"
+lappend PACKAGES "$OFM_PATH/comp/pcie/convertors/pkg/pcie_axi_cpm5_pack.vhd"
 
 # Source files for implemented component
 lappend MOD "$ENTITY_BASE/pcie_axi2mfb.vhd"

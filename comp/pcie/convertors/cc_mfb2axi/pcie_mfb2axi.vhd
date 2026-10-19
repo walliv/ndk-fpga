@@ -11,32 +11,30 @@ use IEEE.numeric_std.all;
 
 use work.math_pack.all;
 use work.type_pack.all;
+use work.pcie_axi_cpm5_pack.all;
 
 -- The Purpose of this component is to convert MFB to AXI bus.
--- Supported is only 512b variant without straddling
+-- Supported is the 512b variant without straddling and the 1024b Versal CPM5 interface with
+-- straddling only, from MFB (4,1,8,32).
 entity PCIE_CC_MFB2AXI is
     generic (
-        -- =======================================================================
         -- MFB BUS CONFIGURATION:
         --
-        -- Supported configuration is: (2,1,8,32), (1,1,8,32)
-        -- =======================================================================
+        -- Supported configuration is: (4,1,8,32), (2,1,8,32), (1,1,8,32)
         MFB_REGIONS       : natural := 2;
         MFB_REGION_SIZE   : natural := 1;
         MFB_BLOCK_SIZE    : natural := 8;
         MFB_ITEM_WIDTH    : natural := 32;
         -- MFB bus: width of single data region in bits, auxiliary parameter, do not change value!
         MFB_REGION_WIDTH  : natural := MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH;
-        -- =======================================================================
         -- AXI BUS CONFIGURATION:
         --
-        -- CC_USER_WIDTH = 81 for Gen3x16 PCIe - without straddling
-        -- CC_USER_WIDTH = 81 for Gen3x16 PCIe - with straddling
+        -- CC_USER_WIDTH = 81 for Gen3x16 PCIe - with or without straddling
         -- CC_USER_WIDTH = 33 for Gen3x8 PCIe - without straddling
-        -- =======================================================================
+        -- CC_USER_WIDTH = 165 for 1024b Versal CPM5 PCIe - with straddling only
         AXI_CCUSER_WIDTH  : natural := 81;
         AXI_DATA_WIDTH    : natural := 512;
-        -- Not supported
+        -- Required for CC_USER_WIDTH = 165
         STRADDLING        : boolean := false
 
     );
@@ -104,8 +102,9 @@ architecture FULL of PCIE_CC_MFB2AXI is
 begin
     assert ((MFB_REGIONS = 1 and AXI_CCUSER_WIDTH = 33 and not STRADDLING)
             or (MFB_REGIONS = 2 and AXI_CCUSER_WIDTH = 81 and STRADDLING)
-            or (MFB_REGIONS = 2 and AXI_CCUSER_WIDTH = 81 and not STRADDLING))
-        report "PCIE_CC_MFB2AXI: Unsupported AXI CC USER port width, the supported are: 33 (when MFB_REGIONS = 1), 81 (when MFB_REGIONS = 2)"
+            or (MFB_REGIONS = 2 and AXI_CCUSER_WIDTH = 81 and not STRADDLING)
+            or (MFB_REGIONS = 4 and AXI_CCUSER_WIDTH = AXI_CC1024_USER_W and STRADDLING and MFB_REGION_SIZE = 1 and MFB_BLOCK_SIZE = 8))
+        report "PCIE_CC_MFB2AXI: Unsupported AXI CC USER port width, the supported are: 33 (when MFB_REGIONS = 1), 81 (when MFB_REGIONS = 2), 165 (when MFB_REGIONS = 4, straddling)"
         severity FAILURE;
 
     axi_512b_g: if (MFB_REGIONS = 2 and AXI_CCUSER_WIDTH = 81) generate
@@ -190,6 +189,15 @@ begin
                 end if;
             end process;
         end generate;
+    elsif (MFB_REGIONS = AXI1024_TLPS and AXI_CCUSER_WIDTH = AXI_CC1024_USER_W and STRADDLING) generate
+        -- Straddled TLPs are delimited by is_sop/is_eop only, the core ignores TKEEP and TLAST (PG346 Table 25)
+        cc_keep <= (others => '1');
+
+        cc_user(AXI_CC1024_SOP_PTR_O + AXI_CC1024_SOP_PTR_W-1 downto AXI_CC1024_SOP_O) <= axi_straddle_sop_f(CC_MFB_SOF);
+        cc_user(AXI_CC1024_EOP_PTR_O + AXI_CC1024_EOP_PTR_W-1 downto AXI_CC1024_EOP_O) <= axi_straddle_eop_f(CC_MFB_EOF, CC_MFB_EOF_POS);
+        cc_user(AXI_CC1024_DISCON)                                                     <= (others => '0');
+        cc_user(AXI_CC1024_PARITY)                                                     <= (others => '0');
+
     else generate
         cc_user <= (others => '0');
 
