@@ -46,6 +46,9 @@ if {$ARCHGRP == "P_TILE"} {
     lappend MOD "$ENTITY_BASE/pcie_core_htile.vhd"
 } elseif {$ARCHGRP == "USP" || $ARCHGRP == "USP_PCIE4C" || $ARCHGRP == "USP_PCIE4"} {
     lappend MOD "$ENTITY_BASE/pcie_core_usp.vhd"
+} elseif {$ARCHGRP == "CPM5"} {
+    # The card or application adds the CIPS block design cpm5_cips (TYPE VIVADO_BD_TCL), as it adds the PCIe IP of the USP arch.
+    lappend MOD "$ENTITY_BASE/pcie_core_cpm5.vhd"
 } else {
     lappend MOD "$ENTITY_BASE/pcie_core_empty.vhd"
 }

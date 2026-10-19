@@ -38,6 +38,7 @@ A list of the supported PCIe Hard IPs is below. You can select the target archit
 - ``R_TILE`` - `R-Tile Avalon Streaming Intel FPGA IP for PCI Express <https://www.intel.com/content/www/us/en/docs/programmable/683501/>`_
 - ``P_TILE`` - `P-Tile Avalon Streaming Intel FPGA IP for PCI Express <https://www.intel.com/content/www/us/en/docs/programmable/683059/>`_
 - ``USP`` - `Xilinx UltraScale+ Device Integrated Block for PCI Express <https://docs.xilinx.com/r/en-US/pg213-pcie4-ultrascale-plus>`_
+- ``CPM5`` - `AMD Versal CPM5 in CPM Mode for PCI Express <https://docs.amd.com/r/en-US/pg346-cpm-pcie>`_, two Gen5 x8 endpoints with the 1024-bit straddled interface. The card or application adds the CIPS block design ``cpm5_cips`` (see :ref:`Alveo V80 <card_alveo_v80>`); its PL0 clock and reset leave the module on ``MISC_PCIE2TOP(0)``.
 
 The PCIe Control unit (PCIE_CTRL)
 *********************************
