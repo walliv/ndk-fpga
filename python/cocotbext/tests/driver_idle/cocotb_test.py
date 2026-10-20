@@ -5,7 +5,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Each driver sends whole words split by scripted idle words while the sink drops DST_RDY at random. Words
 must arrive once, in order and held while waiting, and each gap must last exactly its idle words. The fast MFB driver
-is also checked for byte enables and for the throughput probe."""
+is also checked for byte enables and for the throughput probe, and MFBProperty for its sample delay."""
 
 import itertools
 import random
@@ -14,7 +14,7 @@ from dataclasses import asdict
 import cocotb
 import pytest
 from cocotb.clock import Clock
-from cocotb.triggers import ClockCycles, ReadOnly, RisingEdge
+from cocotb.triggers import ClockCycles, ReadOnly, RisingEdge, Timer
 from cocotb.types import LogicArray
 from cocotb.utils import get_sim_time
 
@@ -23,6 +23,7 @@ from cocotbext.ofm.base.transaction import IdleTransactionFactory
 from cocotbext.ofm.mfb.drivers import MFBDriver
 from cocotbext.ofm.mfb.fast_drivers import MFBDriver as FastMFBDriver
 from cocotbext.ofm.mfb.protocol import MfbParams
+from cocotbext.ofm.mfb.properties import MFBProperty
 from cocotbext.ofm.mfb.transaction import MfbTransaction
 from cocotbext.ofm.mvb.drivers import MVBDriver
 from cocotbext.ofm.mvb.transaction import MvbTrClassic
@@ -235,3 +236,47 @@ async def run_throughput_probe_elapsed_time_test(dut):
 
     assert drv.item_cnt > 0
     assert probe._get_average_throughput() == pytest.approx(drv.item_cnt / elapsed, rel=1e-3)
+
+
+async def drive_dst_rdy_after_edge(sig, clk, rng):
+    """DST_RDY written 1 ns after each edge, as a bench does to keep its monitor off the edge."""
+    while True:
+        await RisingEdge(clk)
+        await Timer(1, "ns")
+        sig.value = int(rng.random() < 0.5)
+
+
+@cocotb.test()
+async def run_mfb_property_sample_delay_test(dut):
+    """With DST_RDY written after the edge, a checker sampling at ReadOnly pairs each word with the DST_RDY of the
+    cycle before; one sampling past the write follows the handshakes the sink takes at the edges."""
+    await start(dut)
+    geo = mfb_geometry(dut)
+    rng = random.Random(random.getrandbits(64))
+    plain = MFBProperty(dut, "RX_MFB", dut.CLK, mfb_params=asdict(geo), max_errors=0, label="plain")
+    delayed = MFBProperty(dut, "RX_MFB", dut.CLK, mfb_params=asdict(geo), max_errors=0, label="delayed",
+                          sample_delay=(2, "ns"))
+    cocotb.start_soon(drive_dst_rdy_after_edge(dut.RX_MFB_DST_RDY, dut.CLK, rng))
+
+    # Every word is a frame from block 0 of the first region to the last item of the last region.
+    last_item = geo.region_size * geo.block_size - 1
+    dut.RX_MFB_SOF.value = 1
+    dut.RX_MFB_EOF.value = 1 << (geo.regions - 1)
+    dut.RX_MFB_SOF_POS.value = 0
+    dut.RX_MFB_EOF_POS.value = last_item << (last_item.bit_length() * (geo.regions - 1))
+    dut.RX_MFB_DATA.value = rng.getrandbits(len(dut.RX_MFB_DATA))
+    dut.RX_MFB_SRC_RDY.value = 1
+    accepted = 0
+    while accepted < WORDS:
+        await RisingEdge(dut.CLK)
+        if int(dut.RX_MFB_DST_RDY.value):
+            accepted += 1
+            dut.RX_MFB_DATA.value = rng.getrandbits(len(dut.RX_MFB_DATA))
+    dut.RX_MFB_SRC_RDY.value = 0
+    await ClockCycles(dut.CLK, 4)
+
+    dut._log.info(f"{WORDS} words: plain checker {plain.words} words, {len(plain.errors)} violation(s); "
+                  f"delayed checker {delayed.words} words, {len(delayed.errors)} violation(s)")
+    assert not delayed.errors, f"delayed checker: {len(delayed.errors)} violation(s), first: {delayed.errors[0]}"
+    assert delayed.words == WORDS, f"delayed checker counted {delayed.words} of {WORDS} words"
+    assert plain.errors, "the checker without a sample delay saw no misaligned DST_RDY"

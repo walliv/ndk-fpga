@@ -6,7 +6,7 @@
 
 import cocotb
 
-from cocotb.triggers import ReadOnly, RisingEdge
+from cocotb.triggers import ReadOnly, RisingEdge, Timer
 from cocotb_bus.bus import Bus
 
 from ..utils.signals import binstr_bit, binstr_resolvable, binstr_resolved, signal_binstr
@@ -53,7 +53,8 @@ class MFBProperty:
     _optional_signals = ["sof_pos", "eof_pos", "meta", "be"]
 
     def __init__(self, entity, name, clock, reset=None, reset_active_level=1, mfb_params=None,
-                 straddling=None, no_gap_in_frame=False, disable=(), max_errors=1, label=None, start=True):
+                 straddling=None, no_gap_in_frame=False, disable=(), max_errors=1, label=None, start=True,
+                 sample_delay=None):
         self.bus = Bus(entity, name, self._signals, optional_signals=self._optional_signals)
         self.log = entity._log
         self.name = label or name
@@ -64,6 +65,9 @@ class MFBProperty:
         # PCIe-flavoured MFB keeps SRC_RDY high from the SOF to the EOF of a frame; plain MFB may pause inside one.
         self.no_gap_in_frame = no_gap_in_frame
         self.max_errors = max_errors
+        # A ready line driven mid-cycle (to keep its monitor off the clock edge) is one cycle stale
+        # at ReadOnly; sampling past the write realigns it. Give (value, unit) to enable.
+        self._settle = Timer(*sample_delay) if sample_delay else None
 
         unknown = set(disable) - set(MFB_RULES)
         if unknown:
@@ -142,6 +146,8 @@ class MFBProperty:
         clk_re = RisingEdge(self.clock)
         while True:
             await clk_re
+            if self._settle is not None:
+                await self._settle
             await ReadOnly()
             self.check_cycle()
 
