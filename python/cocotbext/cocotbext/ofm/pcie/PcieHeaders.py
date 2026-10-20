@@ -109,6 +109,20 @@ class RQMfbMeta(SerializableHeader):
     ))
 
 
+class CCMfbMeta(SerializableHeader):
+    items = list(zip(
+        ['header', 'prefix'],
+        [96, 32],
+    ))
+
+
+class RCMfbMeta(SerializableHeader):
+    items = list(zip(
+        ['header', 'prefix'],
+        [96, 32],
+    ))
+
+
 class CCUser(SerializableHeader):
     items = list(zip(
         [

@@ -11,8 +11,8 @@ from .PcieRequester import PcieRequester
 
 # Generic device
 from .PcieHeaders import (RQHeader, CQHeader, RCHeader, CCHeader, RQUser, CQUser, CQUser256,
-                          RCUser, CCUser, CQMfbMeta, RQMfbMeta)
+                          RCUser, CCUser, CQMfbMeta, RQMfbMeta, CCMfbMeta, RCMfbMeta)
 
 __all__ = ["Axi4SCompleter", "Axi4SRequester", "AvstCompleter", "AvstRequester", "PcieRequester",
            "RQHeader", "CQHeader", "RCHeader", "CCHeader", "RQUser", "CQUser",
-           "CQUser256", "RCUser", "CCUser", "CQMfbMeta", "RQMfbMeta"]
+           "CQUser256", "RCUser", "CCUser", "CQMfbMeta", "RQMfbMeta", "CCMfbMeta", "RCMfbMeta"]
