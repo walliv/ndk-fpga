@@ -102,6 +102,65 @@ class ThroughputProbeMfbInterface(ThroughputProbeInterface):
         return self._agent._regions * self._agent._region_items
 
 
+class ThroughputProbeAxiInterface(ThroughputProbeInterface):
+    """Throughput probe interface for a cocotbext-axi AxiSlaveWrite or AxiSlaveRead, or a subclass of them. It counts
+    bytes in the slave's own access hook instead of sampling the bus, so an item is a byte."""
+    interface_dict = {
+        "clock"     : "clock",
+        "in_reset"  : None,
+        "items"     : "byte_lanes",
+        "item_width": "byte_size",
+        "item_cnt"  : None
+    }
+
+    def __init__(self, agent, direction: str | None = None):
+        """
+        Args:
+            agent: an AxiSlaveWrite or AxiSlaveRead (or subclass).
+            direction: "write" or "read". Inferred from which access hook the agent has when None.
+        """
+        super().__init__(agent)
+        self._item_cnt = 0
+
+        if direction is None:
+            direction = "write" if hasattr(agent, "_write") else "read"
+
+        if direction == "write":
+            inner_write = agent._write
+
+            # The data of a write holds only the WSTRB-enabled bytes of an accepted W beat, which counting beats would overstate.
+            async def _counting_write(address, data):
+                self._item_cnt += len(data)
+                return await inner_write(address, data)
+
+            # An instance attribute shadows the method, so the slave calls it while the inner hook still runs the class's logic.
+            agent._write = _counting_write
+
+        elif direction == "read":
+            inner_read = agent._read
+
+            # The read channel has no strobe, so a partly consumed last beat counts in full and a byte is credited before the
+            # target's latency, which suits only a window much longer than that latency.
+            async def _counting_read(address, length):
+                self._item_cnt += length
+                return await inner_read(address, length)
+
+            agent._read = _counting_read
+
+        else:
+            raise ValueError(f"Unknown AXI direction '{direction}'. Use 'write' or 'read'.")
+
+    @property
+    def item_cnt(self):
+        """Overrides 'item_cnt' in interface_dict: bytes accepted, accumulated by the access hook."""
+        return self._item_cnt
+
+    @property
+    def in_reset(self):
+        """Overrides 'in_reset' in interface_dict: the reset state cocotbext-axi tracks, False if the agent has none."""
+        return bool(getattr(self._agent, "_reset_state", False))
+
+
 class ThroughputProbe(Probe):
     """
     Probe for measuring and logging throughput and efficiency.
