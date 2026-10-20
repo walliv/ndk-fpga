@@ -6,6 +6,12 @@
 
 array set PARAMS $IP_PARAMS_L
 
+# Global addressing lets every port reach every pseudo-channel (PG276). A design that needs it sets HBM_SWITCH_ENABLE to true in its IP parameters.
+set SWITCH_ENABLE FALSE
+if {[info exists PARAMS(HBM_SWITCH_ENABLE)] && $PARAMS(HBM_SWITCH_ENABLE)} {
+    set SWITCH_ENABLE TRUE
+}
+
 set IP_COMP_NAME $PARAMS(IP_COMP_NAME)
 if {[get_ips -quiet $IP_COMP_NAME] eq ""} {
     if {$PARAMS(IP_GEN_FILES) eq true} {
@@ -20,8 +26,8 @@ set IP [get_ips $IP_COMP_NAME]
 set config_list [list \
     CONFIG.USER_APB_EN {false} \
     CONFIG.USER_HBM_DENSITY {16GB} \
-    CONFIG.USER_SWITCH_ENABLE_00 {FALSE} \
-    CONFIG.USER_SWITCH_ENABLE_01 {FALSE} \
+    CONFIG.USER_SWITCH_ENABLE_00 $SWITCH_ENABLE \
+    CONFIG.USER_SWITCH_ENABLE_01 $SWITCH_ENABLE \
     CONFIG.USER_XSDB_INTF_EN {FALSE} \
 ]
 
