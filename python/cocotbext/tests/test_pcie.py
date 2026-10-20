@@ -10,7 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from cocotbext.ofm.pcie import CCMfbMeta, CCUser, CQMfbMeta, CQUser, CQUser256, RCMfbMeta, RQMfbMeta
+from cocotbext.ofm.pcie import (CCMfbMeta, CCUser, CQMfbMeta, CQUser, CQUser256, PcieReqType, RCMfbMeta,
+                                RQMfbMeta)
 
 META_PACK = Path(__file__).resolve().parents[3] / "comp" / "base" / "pkg" / "pcie_meta_pack.vhd"
 
@@ -73,3 +74,11 @@ def test_cc_user_follows_the_512_bit_tuser_of_pg213():
 
     assert (offsets["sop_ptr0"], offsets["eop0"], offsets["eop_ptr0"], offsets["eop_ptr1"]) == (2, 6, 8, 12)
     assert offsets["parity"] == 17 and len(CCUser()) == 81
+
+
+def test_request_types_match_the_amd_transaction_type_table():
+    assert [PcieReqType(i).name for i in range(16)] == [
+        "MRD", "MWR", "IORD", "IOWR", "MFETCH_AND_ADD", "MSWAP", "MCOMPARE_SWAP", "LOC_RD",
+        "TYPE0_CONF_RD", "TYPE1_CONF_RD", "TYPE0_CONF_WR", "TYPE1_CONF_WR", "ANY_MSG", "VENDOR_MSG",
+        "ATS_MSG", "RSVD",
+    ]
