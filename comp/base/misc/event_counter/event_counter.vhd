@@ -25,7 +25,10 @@ entity EVENT_COUNTER is
         MAX_INTERVAL_CYCLES     : natural := 2**12-1;
         -- Maximum number of event occurences in one CLK cycle
         -- Automatically rounded to the closes higher (2**N-1).
-        MAX_CONCURRENT_EVENTS   : natural := 4
+        MAX_CONCURRENT_EVENTS   : natural := 4;
+        -- AMD only: maps the event accumulator to the P register of a DSP block, other vendors ignore it.
+        -- The accumulator is at most 31 bits wide (integer range of its width formula), so it always fits the 48-bit P register.
+        DSP_ACCUM               : boolean := false
     );
     port (
         -- =====================================================================
@@ -64,11 +67,23 @@ end entity;
 
 architecture FULL of EVENT_COUNTER is
 
+    function dsp_accum_attr_f (en : boolean) return string is
+    begin
+        if (en) then
+            return "yes";
+        end if;
+        return "no";
+    end function;
+
     signal int_cyc_reg     : unsigned(log2(MAX_INTERVAL_CYCLES+1)-1 downto 0);
     signal int_cyc_reg_vld : std_logic;
     signal eve_cnt_reg     : unsigned(log2((MAX_INTERVAL_CYCLES+1)*(MAX_CONCURRENT_EVENTS+1))-1 downto 0);
     signal int_pr_cnt_reg  : unsigned(log2(MAX_INTERVAL_CYCLES+1)-1 downto 0);
     signal int_reached     : std_logic;
+
+    -- Only the accumulator goes to a DSP: the interval counter feeds the comparator that clears both counters, and that loop is slower through a DSP than in fabric.
+    attribute use_dsp : string;
+    attribute use_dsp of eve_cnt_reg : signal is dsp_accum_attr_f(DSP_ACCUM);
 
 begin
 
@@ -97,6 +112,7 @@ begin
     --  Total events counter
     -- =====================================================================
 
+    -- The sync clear and the single enable are what lets the accumulator use the DSP reset and clock enable of the P register.
     eve_cnt_reg_pr : process (CLK)
     begin
         if (rising_edge(CLK)) then

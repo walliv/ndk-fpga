@@ -27,6 +27,13 @@ Architecture
       :width: 100 %
       :alt:
 
+DSP accumulator
+^^^^^^^^^^^^^^^
+
+On AMD devices the generic ``DSP_ACCUM`` places the event accumulator into the P register of a DSP block, which helps the timing of a fast clock.
+The accumulator is at most 31 bits wide, so it always fits the 48-bit register of the DSP block.
+Other vendors ignore the generic.
+
 Capture feature
 ^^^^^^^^^^^^^^^
 
