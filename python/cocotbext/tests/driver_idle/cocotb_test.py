@@ -5,7 +5,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Each driver sends whole words split by scripted idle words while the sink drops DST_RDY at random. Words
 must arrive once, in order and held while waiting, and each gap must last exactly its idle words. The fast MFB driver
-is also checked for byte enables and for the throughput probe, and MFBProperty for its sample delay."""
+is also checked for byte enables, for abort() and for the throughput probe, and MFBProperty for its sample delay."""
 
 import itertools
 import random
@@ -236,6 +236,44 @@ async def run_throughput_probe_elapsed_time_test(dut):
 
     assert drv.item_cnt > 0
     assert probe._get_average_throughput() == pytest.approx(drv.item_cnt / elapsed, rel=1e-3)
+
+
+async def collect_sof_words(dut, words):
+    """Every accepted MFB word as (DATA, SOF)."""
+    while True:
+        await RisingEdge(dut.CLK)
+        await ReadOnly()
+        if int(dut.RX_MFB_SRC_RDY.value) and int(dut.RX_MFB_DST_RDY.value):
+            words.append((int(dut.RX_MFB_DATA.value), int(dut.RX_MFB_SOF.value)))
+
+
+@cocotb.test()
+async def run_fast_mfb_abort_test(dut):
+    """A send cancelled under backpressure leaves the rest of its frame in the driver; after abort() the bus is
+    parked and the next frame arrives whole, from its SOF on."""
+    await start(dut)
+    geo = mfb_geometry(dut)
+    word_bytes = geo.word_width // 8
+    rng = random.Random(random.getrandbits(64))
+    drv = FastMFBDriver(dut, "RX_MFB", dut.CLK, mfb_params=asdict(geo), vld_gen=None)
+    stalled = cocotb.start_soon(drv.send(rng.randbytes(4 * word_bytes)))
+    await ClockCycles(dut.CLK, 4)
+    stalled.cancel()
+    drv.abort()
+    await ReadOnly()
+    assert int(dut.RX_MFB_SRC_RDY.value) == 0, "abort() left SRC_RDY high"
+
+    await RisingEdge(dut.CLK)
+    dut.RX_MFB_DST_RDY.value = 1
+    words = []
+    cocotb.start_soon(collect_sof_words(dut, words))
+    frame = rng.randbytes(2 * word_bytes)
+    await drv.send(frame)
+    await ClockCycles(dut.CLK, 4)
+
+    expected = [(int.from_bytes(frame[:word_bytes], "little"), 1), (int.from_bytes(frame[word_bytes:], "little"), 0)]
+    assert words == expected, f"{len(words)} word(s) after abort(), first as (DATA, SOF): " \
+        f"{(hex(words[0][0]), words[0][1]) if words else None}"
 
 
 async def drive_dst_rdy_after_edge(sig, clk, rng):

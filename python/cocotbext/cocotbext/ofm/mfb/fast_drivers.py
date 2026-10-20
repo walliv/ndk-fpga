@@ -118,6 +118,15 @@ class MFBDriver(ValidatedBusDriver):
         self._eof_pos_int = LogicArray(0, self._regions*max(1, self._eof_pos_w_pr))
         self._src_rdy_int = Logic("0")
 
+    def abort(self):
+        """Drop a half-built frame and park the bus, for a DUT reset mid-frame. A cancelled send()
+        leaves queued words and a partial word that the next send would dispatch as a headless frame."""
+        self._wordQ.clear()
+        self._clr_internal_bus()
+        self._clr_physical_bus()
+        self._last_blk_idx = 0
+        self._last_rgn_idx = 0
+
     async def _wait_ready(self):
         await ReadOnly()
         while not bool(self.bus.dst_rdy.value):
