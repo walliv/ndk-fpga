@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from cocotbext.ofm.pcie import CCUser, CQMfbMeta, CQUser, CQUser256, RQMfbMeta
+from cocotbext.ofm.pcie import CCMfbMeta, CCUser, CQMfbMeta, CQUser, CQUser256, RCMfbMeta, RQMfbMeta
 
 META_PACK = Path(__file__).resolve().parents[3] / "comp" / "base" / "pkg" / "pcie_meta_pack.vhd"
 
@@ -27,6 +27,8 @@ def vhdl_constants():
 LAYOUTS = [
     (CQMfbMeta, "CQ", ["HEADER", "PREFIX", "BAR", "FBE", "LBE", "TPH_PRESENT", "TPH_TYPE", "TPH_ST_TAG", "BE"]),
     (RQMfbMeta, "RQ", ["HEADER", "PREFIX", "FBE", "LBE"]),
+    (CCMfbMeta, "CC", ["HEADER", "PREFIX"]),
+    (RCMfbMeta, "RC", ["HEADER", "PREFIX"]),
 ]
 
 
