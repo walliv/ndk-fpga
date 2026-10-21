@@ -5,8 +5,6 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-import functools
-import inspect
 import math
 import os
 import random
@@ -26,11 +24,7 @@ from iuventus_rw_test import (  # noqa: E402
     IuventusTest, run_read_dispatch, run_write_dispatch, _throughput_point_start, _throughput_point_stop,
 )
 
-# This DevTree has no DMA Iuventus node, so the card-side "fzc is running" guard cannot pass; it
-# checks the card's setup, not the core.
-iuventus_rw_test.assert_fzc_running = lambda _test: None
-
-import nfb_compat  # noqa: F401 (patches cocotb before cocotbext.nfb is imported)
+import nfb_compat  # noqa: E402,F401 (patches cocotb before cocotbext.nfb is imported)
 
 import cocotbext.nfb  # noqa: E402 (must follow the compat shim above)
 from cocotbext.ofm.mi.drivers import MIRequestDriver  # noqa: E402
@@ -44,6 +38,10 @@ from user_core_model import (  # noqa: E402
     ADDR_CNTR_WIDTH, LBA_ALIGN, MAX_REQ_LBAS, TST_LBA_COUNT, SeqAddrModel, RandDrawModel,
 )
 from scoreboard import Scoreboard  # noqa: E402
+
+# This DevTree has no DMA Iuventus node, so the card-side "fzc is running" guard cannot pass; it
+# checks the card's setup, not the core.
+iuventus_rw_test.assert_fzc_running = lambda _test: None
 
 # OP_STAT_CODE encoding on the DMA interface: 00 SUCCESS, 01 FAILURE, 10 LBA out of range.
 OP_STAT_CODE_SUCCESS = 0
@@ -89,7 +87,6 @@ class IuventusUserCoreNfbDevice(cocotbext.nfb.NfbDevice):
                                                exclude=("CORE_RD_MFB", "NVME_RD_MFB"))
         self.mfb_props.update(attach_endpoint_mfb_properties(self._dut, self._dut.DMA_CLK,
                                                              reset=self._dut.DMA_RST))
-
 
     async def _reset(self):
         self._dut.USR_RST.value = 1
@@ -551,7 +548,7 @@ async def _case_throughput_multi_point(dut, dev, test, n_queues, n_points=6):
     """Consecutive '-t' points: start, settle, stop, then the next start. _throughput_point_stop
     does not wait for in-flight reads to retire, so this checks the read path goes quiet between
     points, which a sweep depends on."""
-    lba_ptr = await aget(test, "rd_req_lba_ptr")
+    await aget(test, "rd_req_lba_ptr")
     sizes = [0, 1, 3, 7, 15, 31][:n_points]
     for idx, size in enumerate(sizes):
         await e(_throughput_point_start)(test, "rd", "rand", size)
@@ -1200,7 +1197,6 @@ async def _case_integrity_checker(dut, dev, test):
         dev.dma_model.lba_space_size = None
 
 
-
 async def _case_latency_qd1(dut, dev, test, mode: str = "rd"):
     """Latency mode keeps one command in flight at QD64: LATENCY_METER pairs starts to completions
     positionally, and back-to-back issue can starve the page pool so tst_finished never asserts.
@@ -1239,7 +1235,7 @@ async def _case_latency_qd1(dut, dev, test, mode: str = "rd"):
                     f"wr_src={int(dut.NVME_WR_MFB_SRC_RDY.value)} inframe={int(dut.lat_wr_in_frame_r.value)} "
                     f"wrgate={int(dut.lat_wr_issue_ok.value)} newfr={int(dut.lat_wr_new_frame_s.value)} "
                     f"rdvld={int(dut.NVME_RD_REQ_VLD.value)} mode={int(dut.lat_meas_mode.value)}")
-    mon = cocotb.start_soon(_lat_monitor())
+    cocotb.start_soon(_lat_monitor())
 
     # Read issue is gated by lat_meas_issue_ok, write issue at the frame boundary by
     # lat_wr_issue_ok -- assert on whichever this mode actually drives.
