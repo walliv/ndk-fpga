@@ -18,6 +18,11 @@ ifneq ($(PYTHON_LIBDIR),)
 NVC_RUN_ENV := LD_LIBRARY_PATH=$(PYTHON_LIBDIR):$$LD_LIBRARY_PATH
 endif
 
+# The benches import the shared models and the card-side helper scripts as top-level modules, so
+# both directories go on the simulator's PYTHONPATH (any inherited value stays behind them).
+BENCH_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
+NVC_RUN_ENV += PYTHONPATH=$(BENCH_DIR)/../cocotb_common:$(BENCH_DIR)/../../sw:$$PYTHONPATH
+
 # NUM_QUEUES: USER_CORE's own generic (round-robin QID width across DMA queues). No QUEUE_DEPTH
 # generic exists on USER_CORE (that belongs to DMA_IUVENTUS) so it is not exposed here.
 NUM_QUEUES ?= 1

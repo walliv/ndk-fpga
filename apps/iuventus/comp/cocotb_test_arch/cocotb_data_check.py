@@ -9,27 +9,24 @@ stands in for the DMA and drives; its record of delivered frames predicts every 
 
 import os
 import random
-import sys
 
 import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import Timer, RisingEdge, ReadOnly
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "sw"))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "cocotb_common"))
-import iuventus_rw_test  # noqa: E402
-import iuventus_data_check  # noqa: E402
-from iuventus_rw_test import IuventusTest  # noqa: E402
-from iuventus_data_check import DataCheck, run_fill, run_read_point, pattern_word, SPAN_MARGIN  # noqa: E402
-from user_core_model import RandDrawModel, _LFSR64_SEED, LFSR_LEAP, lfsr64_leap  # noqa: E402
+from cocotbext.ofm.mi.drivers import MIRequestDriver
+from cocotbext.ofm.mfb.properties import attach_mfb_properties
 
-import nfb_compat  # noqa: E402,F401 (patches cocotb before cocotbext.nfb is imported)
-import cocotbext.nfb  # noqa: E402
-from cocotbext.ofm.mi.drivers import MIRequestDriver  # noqa: E402
-from cocotbext.ofm.mfb.properties import attach_mfb_properties  # noqa: E402
+import iuventus_rw_test
+import iuventus_data_check
+import nfb_compat
+from iuventus_rw_test import IuventusTest
+from iuventus_data_check import DataCheck, run_fill, run_read_point, pattern_word, SPAN_MARGIN
+from user_core_model import RandDrawModel, _LFSR64_SEED, LFSR_LEAP, lfsr64_leap
+from dma_iuventus_mq_model import MultiQueueDmaModel, pattern_sector, SECT, BEAT, OP_READ, OP_WRITE
+from endpoint_view import EndpointView
 
-from dma_iuventus_mq_model import MultiQueueDmaModel, pattern_sector, SECT, BEAT, OP_READ, OP_WRITE  # noqa: E402
-from endpoint_view import EndpointView  # noqa: E402
+cocotbext_nfb = nfb_compat.load_cocotbext_nfb()
 
 e = cocotb.external
 
@@ -56,7 +53,7 @@ iuventus_rw_test.assert_fzc_running = lambda _test: None
 iuventus_data_check.assert_fzc_running = lambda _test: None
 
 
-class DcNfbDevice(cocotbext.nfb.NfbDevice):
+class DcNfbDevice(cocotbext_nfb.NfbDevice):
     """USER_CORE as a standalone nfb device, with MultiQueueDmaModel on its DMA-side ports."""
 
     model_kw = {}

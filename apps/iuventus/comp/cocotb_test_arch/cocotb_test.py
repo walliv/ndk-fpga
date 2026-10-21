@@ -8,36 +8,30 @@
 import math
 import os
 import random
-import sys
 
 import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import Timer, RisingEdge, ReadOnly, ClockCycles
 
+from cocotbext.ofm.mi.drivers import MIRequestDriver
+from cocotbext.ofm.mfb.properties import attach_mfb_properties
+
 # Imported as a library (its `__main__` CLI never runs): iuventus_rw_test.py already implements the
 # MI register map used on real hardware.
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "sw"))
-# SimplifiedDmaModel and the scoreboard are shared with the GROUPBY architecture's bench.
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "cocotb_common"))
-import iuventus_rw_test  # noqa: E402
-from iuventus_rw_test import (  # noqa: E402
+import iuventus_rw_test
+import nfb_compat
+from iuventus_rw_test import (
     IuventusTest, run_read_dispatch, run_write_dispatch, _throughput_point_start, _throughput_point_stop,
 )
-
-import nfb_compat  # noqa: E402,F401 (patches cocotb before cocotbext.nfb is imported)
-
-import cocotbext.nfb  # noqa: E402 (must follow the compat shim above)
-from cocotbext.ofm.mi.drivers import MIRequestDriver  # noqa: E402
-from cocotbext.ofm.mfb.properties import attach_mfb_properties  # noqa: E402
-
-from endpoint_view import attach_endpoint_mfb_properties  # noqa: E402
-
-from dma_iuventus_model import QID_W, SQE_LBA_PTR_W, SimplifiedDmaModel  # noqa: E402
-from user_core_model import ReadReqModel, WriteFrameModel, ExpectedReadReq, ExpectedWrFrame  # noqa: E402
-from user_core_model import (  # noqa: E402
+from endpoint_view import attach_endpoint_mfb_properties
+from dma_iuventus_model import QID_W, SQE_LBA_PTR_W, SimplifiedDmaModel
+from user_core_model import ReadReqModel, WriteFrameModel, ExpectedReadReq, ExpectedWrFrame
+from user_core_model import (
     ADDR_CNTR_WIDTH, LBA_ALIGN, MAX_REQ_LBAS, TST_LBA_COUNT, SeqAddrModel, RandDrawModel,
 )
-from scoreboard import Scoreboard  # noqa: E402
+from scoreboard import Scoreboard
+
+cocotbext_nfb = nfb_compat.load_cocotbext_nfb()
 
 # This DevTree has no DMA Iuventus node, so the card-side "fzc is running" guard cannot pass; it
 # checks the card's setup, not the core.
@@ -58,7 +52,7 @@ EVCR_INTERVAL_CYCLES = 200
 NUM_QUEUES = int(os.environ.get("NUM_QUEUES", "1"))
 
 
-class IuventusUserCoreNfbDevice(cocotbext.nfb.NfbDevice):
+class IuventusUserCoreNfbDevice(cocotbext_nfb.NfbDevice):
     """cocotbext.nfb device for a standalone USER_CORE: three clocks and one MI slave. The DevTree
     has no DMA controller nodes, so the base class's QueueManager comes out empty and _init_pcie()
     stays a no-op.

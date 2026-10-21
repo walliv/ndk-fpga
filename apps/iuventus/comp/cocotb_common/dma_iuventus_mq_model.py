@@ -8,9 +8,7 @@
 admitted at a time, per-queue FIFO tag pools freed at the CQE, out-of-order completions, in-order
 per-endpoint drains, DATA_LOST after the frame."""
 
-import os
 import random
-import sys
 from collections import deque
 from dataclasses import dataclass, field
 
@@ -22,9 +20,7 @@ from cocotbext.ofm.mfb.monitors import MFBMonitor
 from cocotbext.ofm.mfb.transaction import MfbTransactionWithMeta
 
 from endpoint_view import EndpointView
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "sw"))
-from iuventus_data_check import pattern_word  # noqa: E402
+from iuventus_data_check import pattern_word
 
 SECT = 512
 BEAT = 64

@@ -5,22 +5,20 @@
 # SPDX-License-Identifier: Apache-2.0
 import os
 import random
-import sys
 from collections import defaultdict
 
 import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import Timer, RisingEdge, ReadOnly
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "cocotb_common"))
-import nfb_compat  # noqa: E402,F401 (patches cocotb before cocotbext.nfb is imported)
-import cocotbext.nfb  # noqa: E402
+from cocotbext.ofm.mi.drivers import MIRequestDriver
+from cocotbext.ofm.mfb.properties import attach_mfb_properties
 
-from cocotbext.ofm.mi.drivers import MIRequestDriver  # noqa: E402
-from cocotbext.ofm.mfb.properties import attach_mfb_properties  # noqa: E402
+import nfb_compat
+from dma_iuventus_model import SimplifiedDmaModel
+from endpoint_view import EndpointView, attach_endpoint_mfb_properties
 
-from dma_iuventus_model import SimplifiedDmaModel  # noqa: E402
-from endpoint_view import EndpointView, attach_endpoint_mfb_properties  # noqa: E402
+cocotbext_nfb = nfb_compat.load_cocotbext_nfb()
 
 e = cocotb.external
 
@@ -57,7 +55,7 @@ STATUS_BUSY, STATUS_DONE, STATUS_ERR = 1 << 0, 1 << 1, 1 << 2
 S_RUN, S_DONE, S_ERR = 4, 7, 8
 
 
-class GroupByNfbDevice(cocotbext.nfb.NfbDevice):
+class GroupByNfbDevice(cocotbext_nfb.NfbDevice):
     """USER_CORE (GROUPBY) as a standalone nfb device with one MI slave and no DMA; its DevTree
     has no netcope,dma_ctrl_ndp_* nodes, so the base class's QueueManager stays empty."""
 
