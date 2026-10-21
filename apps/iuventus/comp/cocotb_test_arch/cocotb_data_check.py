@@ -68,7 +68,7 @@ class DcNfbDevice(cocotbext.nfb.NfbDevice):
         # Seeded from cocotb's own seed, so a failing seed reproduces.
         self.rng = random.Random(random.getrandbits(32))
         self.model = MultiQueueDmaModel(self._dut, self._dut.DMA_CLK, NUM_QUEUES, PCIE_ENDPOINTS,
-                                      self.rng, **self.model_kw)
+                                        self.rng, **self.model_kw)
         self._dut.PCIE_LINK_UP.value = 1
         self._dut.FPGA_ID.value = 0
         self._dut.FPGA_ID_VLD.value = 0
@@ -504,7 +504,7 @@ move no data."""
     res, win = await checked_point(dut, dev, test, dc, "rand", 0, reads, hold=(48, 30), expect_ok=False)
     mon.cancel()
     cocotb.log.info(f"cycles a report waited for its frame / a frame for its report: {seen}")
-    exp = scoreboard(res, win)
+    scoreboard(res, win)
     c = res["counters"]
     assert c["lost_rpt"] == 8 and c["rd_fail"] == 2, c
     assert sum(ep["lost_frames"] for ep in c["ep"]) == 8
