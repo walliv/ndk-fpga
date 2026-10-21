@@ -286,7 +286,7 @@ def main() -> None:
     for ch in channels:
         try:
             ok = scenario_bidir_channel(reader, dev, ch, args.size, args.device)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.error("FAIL channel %d: unexpected exception: %s", ch, exc)
             ok = False
         if not ok:
@@ -296,7 +296,7 @@ def main() -> None:
     if not args.skip_negative:
         try:
             ok = scenario_negative(reader)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.error("FAIL negative test: unexpected exception: %s", exc)
             ok = False
         if not ok:
