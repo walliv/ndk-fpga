@@ -4,8 +4,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-# Import this before cocotbext.nfb. Both USER_CORE architectures' benches need it, so it lives
-# here rather than being copied into each of them.
+# The USER_CORE benches call load_cocotbext_nfb() once after their other imports; it patches cocotb and then imports cocotbext.nfb.
+# It lives here rather than being copied into each bench.
 import functools
 import inspect
 
@@ -38,3 +38,10 @@ def _generator_compat_resume(func):
 if not hasattr(cocotb, "external"):
     cocotb.external = _cocotb_bridge.bridge
     cocotb.function = _generator_compat_resume
+
+
+def load_cocotbext_nfb():
+    """Applies the patch above, then imports and returns cocotbext.nfb."""
+    import importlib
+
+    return importlib.import_module("cocotbext.nfb")
