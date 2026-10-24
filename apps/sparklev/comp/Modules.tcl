@@ -46,6 +46,8 @@ lappend IP_COMPONENTS [list "pcie" "pcie4_uscale_plus" "pcie4_uscale_plus" 0 1]
 if {$ARCHGRP_ARR(PCIE_ENDPOINTS) == 2 && $ARCHGRP_ARR(PCIE_ENDPOINT_MODE) == 1} {
     lappend IP_COMPONENTS [list "pcie" "pcie4_uscale_plus" "pcie4_uscale_plus_1" 0 1]
 }
+# SparkleV relies on the Global Addressing of the HBM IP (PG276), which the IP script leaves off unless asked.
+set ARCHGRP_ARR(HBM_SWITCH_ENABLE) true
 lappend IP_COMPONENTS [list "mem" "hbm_ip" "hbm_ip" 0 1]
 lappend IP_COMPONENTS [list "mem"  "axi_quad_spi"    "axi_quad_spi_0"    0 1]
 
