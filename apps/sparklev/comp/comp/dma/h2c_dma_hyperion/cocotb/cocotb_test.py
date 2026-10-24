@@ -19,6 +19,7 @@ from cocotb_bus.scoreboard import Scoreboard
 from cocotbext.ofm.mi.drivers import MIRequestDriver
 from cocotbext.ofm.dma.hyperion import H2CHyperionMIRegMap, CtrlRegBits
 
+from cocotbext.ofm.base.generators import IdleGenerator
 from cocotbext.ofm.mfb.drivers import MFBDriver
 from cocotbext.ofm.mfb.transaction import MfbTransactionWithMeta
 from cocotbext.ofm.pcie import CQMfbMeta, CQHeader, pcie_byte_count, PcieReqType
@@ -151,7 +152,7 @@ class Testbench:
     def __init__(self, dut, debug=False):
         self.dut = dut
         self.mi_driver = MIRequestDriver(dut, "MI", dut.CLK)
-        self.cq_mfb_driver = MFBDriver(dut, "PCIE_CQ_MFB", dut.CLK, vld_gen=None)
+        self.cq_mfb_driver = MFBDriver(dut, "PCIE_CQ_MFB", dut.CLK, idle_generator=IdleGenerator())
         self.hbm_wr_slave = AxiSlaveWrite(AxiWriteBus.from_prefix(dut, "HBM_AXI"), dut.CLK, dut.RESET)
         region = MemoryRegion(2**self.hbm_wr_slave.address_width)
         self.hbm_wr_slave.target = region

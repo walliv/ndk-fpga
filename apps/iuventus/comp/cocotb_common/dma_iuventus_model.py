@@ -11,6 +11,7 @@ import os
 import cocotb
 from cocotb.triggers import Event, RisingEdge, ReadOnly
 
+from cocotbext.ofm.base.generators import IdleGenerator
 from cocotbext.ofm.mfb.drivers import MFBDriver
 from cocotbext.ofm.mfb.monitors import MFBMonitor
 from cocotbext.ofm.mfb.transaction import MfbTransactionWithMeta
@@ -114,7 +115,8 @@ class SimplifiedDmaModel:
         self._idle_rd_mfb()
         dut.NVME_WR_MFB_DST_RDY.value = 1
 
-        self._rd_mfb_driver = MFBDriver(self._rd, "NVME_RD_MFB", clk, mfb_params=_RD_MFB_PARAMS, vld_gen=None)
+        self._rd_mfb_driver = MFBDriver(self._rd, "NVME_RD_MFB", clk, mfb_params=_RD_MFB_PARAMS,
+                                        idle_generator=IdleGenerator())
         self._wr_mfb_monitor = MFBMonitor(dut, "NVME_WR_MFB", clk, mfb_params=_WR_MFB_PARAMS, trans_type=MfbTransactionWithMeta)
         self._wr_mfb_monitor.add_callback(self._on_wr_frame)
 

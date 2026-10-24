@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 import cocotb
 from cocotb.triggers import RisingEdge, ReadOnly
 
+from cocotbext.ofm.base.generators import IdleGenerator, OnOffIdleGenerator
 from cocotbext.ofm.mfb.drivers import MFBDriver
 from cocotbext.ofm.mfb.monitors import MFBMonitor
 from cocotbext.ofm.mfb.transaction import MfbTransactionWithMeta
@@ -136,10 +137,9 @@ class MultiQueueDmaModel:
         rd_params = dict(geom, meta_width=self.qid_w + CQ_ENTRY_CMD_ID_W)
         wr_params = dict(geom, meta_width=SQE_LBA_PTR_W + self.qid_w)
         self._drivers = [MFBDriver(EndpointView(dut, ep), "NVME_RD_MFB", clk, mfb_params=rd_params,
-                                   vld_gen=self._gap_gen() if drain_gaps else None)
+                                   idle_generator=OnOffIdleGenerator(self._gap_gen()) if drain_gaps else IdleGenerator())
                          for ep in range(endpoints)]
-        self._wr_mon = MFBMonitor(dut, "NVME_WR_MFB", clk, mfb_params=wr_params,
-                                  trans_type=MfbTransactionWithMeta)
+        self._wr_mon = MFBMonitor(dut, "NVME_WR_MFB", clk, mfb_params=wr_params, trans_type=MfbTransactionWithMeta)
         self._wr_mon.add_callback(self._on_wr_frame)
         cocotb.start_soon(self._main_loop())
 
@@ -176,7 +176,7 @@ class MultiQueueDmaModel:
 
     def idle(self) -> bool:
         return (self._issuing is None and not self._completions and self._cqe_staged is None
-                and not any(self._lost) and all(not d._sendQ and not d._sending for d in self._drivers))
+                and not any(self._lost) and all(not d.pending for d in self._drivers))
 
     # -------------------------------------------------------------------------------------------
     def _on_wr_frame(self, trans):
