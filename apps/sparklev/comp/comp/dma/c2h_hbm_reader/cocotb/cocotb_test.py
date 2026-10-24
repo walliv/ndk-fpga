@@ -21,7 +21,7 @@ from cocotb_bus.drivers import BitDriver
 from cocotb_bus.scoreboard import Scoreboard
 
 from cocotbext.ofm.mi.drivers import MIRequestDriver
-from cocotbext.ofm.mfb.monitors import MFBMonitor
+from cocotbext.ofm.mfb.fast_monitors import MFBMonitor
 from cocotbext.ofm.mfb.transaction import MfbTransactionWithMeta
 
 # Patch AXI3 4-bit ARLEN before importing AxiSlaveRead so the width assert passes.

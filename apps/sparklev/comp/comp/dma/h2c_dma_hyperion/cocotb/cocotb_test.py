@@ -19,7 +19,7 @@ from cocotb_bus.scoreboard import Scoreboard
 from cocotbext.ofm.mi.drivers import MIRequestDriver
 from cocotbext.ofm.dma.hyperion import H2CHyperionMIRegMap, CtrlRegBits
 
-from cocotbext.ofm.mfb.drivers import MFBDriver
+from cocotbext.ofm.mfb.fast_drivers import MFBDriver
 from cocotbext.ofm.mfb.transaction import MfbTransactionWithMeta
 from cocotbext.ofm.pcie import CQMfbMeta, CQHeader, pcie_byte_count, PcieReqType
 from cocotbext.ofm.mi.drivers import MIRequestDriver

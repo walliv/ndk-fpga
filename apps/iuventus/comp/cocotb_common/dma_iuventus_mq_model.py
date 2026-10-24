@@ -15,8 +15,8 @@ from dataclasses import dataclass, field
 import cocotb
 from cocotb.triggers import RisingEdge, ReadOnly
 
-from cocotbext.ofm.mfb.drivers import MFBDriver
-from cocotbext.ofm.mfb.monitors import MFBMonitor
+from cocotbext.ofm.mfb.fast_drivers import MFBDriver
+from cocotbext.ofm.mfb.fast_monitors import MFBMonitor
 from cocotbext.ofm.mfb.transaction import MfbTransactionWithMeta
 
 from endpoint_view import EndpointView
