@@ -5,6 +5,15 @@ if {![info exists shell_git_root]} {
     error "The shell_git_root variable is undefined! Initialize it in a calling shell."
 }
 
+proc ip_dir_prepare dir {
+    file mkdir $dir
+}
+proc ip_dir_finish dir {
+    if {![llength [glob -nocomplain -directory $dir *]]} {
+        file delete $dir
+    }
+}
+
 read_xdc ${shell_git_root}/cards/amd/alveo-u55c/constr/pcie_x4.xdc
 read_xdc ${shell_git_root}/apps/sparklev/build/alveo-u55c/src/pblock.xdc
 read_xdc ${shell_git_root}/apps/sparklev/build/alveo-u55c/src/general.xdc
@@ -12,18 +21,27 @@ read_vhdl -library work -vhdl2008 ${shell_git_root}/apps/sparklev/build/alveo-u5
 read_vhdl -library work -vhdl2008 ${shell_git_root}/apps/sparklev/comp/core_logic.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/apps/sparklev/comp/user_core_full_arch.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/apps/sparklev/comp/user_core_ent.vhd
-set IP_PARAMS_L {IP_COMP_TYPE 0 SDM_SYSMON_ARCH USP_IDCOMP CLOCK_GEN_ARCH USP PCIE_GEN 4 IP_GEN_FILES false PCIE_MOD_ARCH USP_PCIE4C PCIE_ENDPOINT_MODE 3 IP_COMP_NAME axi_quad_spi_0 USE_IP_SUBDIRS true IP_MODIFY_BASE @@SHELL_GIT_ROOT@@/cards/amd/alveo-u55c/src/ip/axi_quad_spi DMA_TYPE 6 CORE_BASE @@SHELL_GIT_ROOT@@/core PCIE_ENDPOINTS 1 IP_BUILD_DIR @@SHELL_GIT_ROOT@@/apps/sparklev/build/alveo-u55c/src/ipcfg_8c41bb16 USR_CORE_ARCH FULL}
+set IP_PARAMS_L {IP_COMP_TYPE 0 SDM_SYSMON_ARCH USP_IDCOMP CLOCK_GEN_ARCH USP PCIE_GEN 4 IP_GEN_FILES false PCIE_MOD_ARCH USP_PCIE4C PCIE_ENDPOINT_MODE 3 IP_COMP_NAME axi_quad_spi_0 USE_IP_SUBDIRS true IP_MODIFY_BASE @@SHELL_GIT_ROOT@@/cards/amd/alveo-u55c/src/ip/axi_quad_spi DMA_TYPE 6 CORE_BASE @@SHELL_GIT_ROOT@@/core PCIE_ENDPOINTS 1 HBM_SWITCH_ENABLE true IP_BUILD_DIR @@SHELL_GIT_ROOT@@/apps/sparklev/build/alveo-u55c/src/ipcfg_6aacae30 USR_CORE_ARCH FULL}
 set IP_PARAMS_L [string map [list @@SHELL_GIT_ROOT@@ $shell_git_root] $IP_PARAMS_L]
-file mkdir [dict get $IP_PARAMS_L IP_BUILD_DIR]
+set filelist_ip_dir @@SHELL_GIT_ROOT@@/apps/sparklev/build/alveo-u55c/src/ipcfg_6aacae30
+set filelist_ip_dir [string map [list @@SHELL_GIT_ROOT@@ $shell_git_root] $filelist_ip_dir]
+ip_dir_prepare $filelist_ip_dir
 source ${shell_git_root}/cards/amd/alveo-u55c/src/ip/axi_quad_spi/axi_quad_spi.ip.tcl
-set IP_PARAMS_L {IP_COMP_TYPE 0 SDM_SYSMON_ARCH USP_IDCOMP CLOCK_GEN_ARCH USP PCIE_GEN 4 IP_GEN_FILES false PCIE_MOD_ARCH USP_PCIE4C PCIE_ENDPOINT_MODE 3 IP_COMP_NAME hbm_ip USE_IP_SUBDIRS true IP_MODIFY_BASE @@SHELL_GIT_ROOT@@/cards/amd/alveo-u55c/src/ip/hbm_ip DMA_TYPE 6 CORE_BASE @@SHELL_GIT_ROOT@@/core PCIE_ENDPOINTS 1 IP_BUILD_DIR @@SHELL_GIT_ROOT@@/apps/sparklev/build/alveo-u55c/src/ipcfg_efb6e66a USR_CORE_ARCH FULL}
+ip_dir_finish $filelist_ip_dir
+set IP_PARAMS_L {IP_COMP_TYPE 0 SDM_SYSMON_ARCH USP_IDCOMP CLOCK_GEN_ARCH USP PCIE_GEN 4 IP_GEN_FILES false PCIE_MOD_ARCH USP_PCIE4C PCIE_ENDPOINT_MODE 3 IP_COMP_NAME hbm_ip USE_IP_SUBDIRS true IP_MODIFY_BASE @@SHELL_GIT_ROOT@@/cards/amd/alveo-u55c/src/ip/hbm_ip DMA_TYPE 6 CORE_BASE @@SHELL_GIT_ROOT@@/core PCIE_ENDPOINTS 1 HBM_SWITCH_ENABLE true IP_BUILD_DIR @@SHELL_GIT_ROOT@@/apps/sparklev/build/alveo-u55c/src/ipcfg_2ab2f64a USR_CORE_ARCH FULL}
 set IP_PARAMS_L [string map [list @@SHELL_GIT_ROOT@@ $shell_git_root] $IP_PARAMS_L]
-file mkdir [dict get $IP_PARAMS_L IP_BUILD_DIR]
+set filelist_ip_dir @@SHELL_GIT_ROOT@@/apps/sparklev/build/alveo-u55c/src/ipcfg_2ab2f64a
+set filelist_ip_dir [string map [list @@SHELL_GIT_ROOT@@ $shell_git_root] $filelist_ip_dir]
+ip_dir_prepare $filelist_ip_dir
 source ${shell_git_root}/cards/amd/alveo-u55c/src/ip/hbm_ip/hbm_ip.ip.tcl
-set IP_PARAMS_L {IP_COMP_TYPE 0 SDM_SYSMON_ARCH USP_IDCOMP CLOCK_GEN_ARCH USP PCIE_GEN 4 IP_GEN_FILES false PCIE_MOD_ARCH USP_PCIE4C PCIE_ENDPOINT_MODE 3 IP_COMP_NAME pcie4_uscale_plus USE_IP_SUBDIRS true IP_MODIFY_BASE @@SHELL_GIT_ROOT@@/cards/amd/alveo-u55c/src/ip/pcie4_uscale_plus DMA_TYPE 6 CORE_BASE @@SHELL_GIT_ROOT@@/core PCIE_ENDPOINTS 1 IP_BUILD_DIR @@SHELL_GIT_ROOT@@/apps/sparklev/build/alveo-u55c/src/ipcfg_db350ede USR_CORE_ARCH FULL}
+ip_dir_finish $filelist_ip_dir
+set IP_PARAMS_L {IP_COMP_TYPE 0 SDM_SYSMON_ARCH USP_IDCOMP CLOCK_GEN_ARCH USP PCIE_GEN 4 IP_GEN_FILES false PCIE_MOD_ARCH USP_PCIE4C PCIE_ENDPOINT_MODE 3 IP_COMP_NAME pcie4_uscale_plus USE_IP_SUBDIRS true IP_MODIFY_BASE @@SHELL_GIT_ROOT@@/cards/amd/alveo-u55c/src/ip/pcie4_uscale_plus DMA_TYPE 6 CORE_BASE @@SHELL_GIT_ROOT@@/core PCIE_ENDPOINTS 1 HBM_SWITCH_ENABLE true IP_BUILD_DIR @@SHELL_GIT_ROOT@@/apps/sparklev/build/alveo-u55c/src/ipcfg_64ed4629 USR_CORE_ARCH FULL}
 set IP_PARAMS_L [string map [list @@SHELL_GIT_ROOT@@ $shell_git_root] $IP_PARAMS_L]
-file mkdir [dict get $IP_PARAMS_L IP_BUILD_DIR]
+set filelist_ip_dir @@SHELL_GIT_ROOT@@/apps/sparklev/build/alveo-u55c/src/ipcfg_64ed4629
+set filelist_ip_dir [string map [list @@SHELL_GIT_ROOT@@ $shell_git_root] $filelist_ip_dir]
+ip_dir_prepare $filelist_ip_dir
 source ${shell_git_root}/cards/amd/alveo-u55c/src/ip/pcie4_uscale_plus/pcie4_uscale_plus.ip.tcl
+ip_dir_finish $filelist_ip_dir
 read_vhdl -library work -vhdl2008 ${shell_git_root}/cards/silicom/fb2cghh/src/comp/axi_quad_flash_controller/axi_quad_flash_controller.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/cards/silicom/fb2cghh/src/comp/axi_quad_flash_controller/comp/axi4_lite_mi_bridge/axi4_lite_mi_bridge.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/core/comp/misc/boot_ctrl/boot_ctrl.vhd
@@ -33,8 +51,6 @@ read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/dma/dma_calypte/comp/rx
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/debug/data_logger/data_logger.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/debug/histogramer/histogramer.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/base/mem/mem_clear/mem_clear.vhd
-read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/base/mem/dp_bram/dp_bram_behav.vhd
-set_property -quiet FILE_TYPE VHDL [get_files dp_bram_behav.vhd]
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/base/logic/cnt/cnt.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/base/logic/cnt/cnt_types.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/mfb_tools/logic/frame_lng_check/frame_lng_check.vhd
@@ -50,6 +66,7 @@ read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/base/logic/cmp/comp/cmp
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/base/logic/cmp/comp/cmp_dsp/cmp48.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/base/logic/cmp/comp/cmp_dsp/cmp_decode.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/base/logic/cmp/comp/cmp_dsp/cmp_dsp_ent.vhd
+read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/base/mem/np_lutram/np_lutram.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/dma/dma_calypte/comp/rx/comp/input_buffer/rx_dma_calypte_input_buffer.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/dma/dma_calypte/comp/rx/comp/trans_buffer/rx_dma_calypte_trans_buffer.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/base/fifo/reg_fifo/reg_fifo.vhd
@@ -79,14 +96,27 @@ read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/base/misc/id32/sysmon_e
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/base/misc/interrupt_manager/interrupt_manager.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/base/logic/edge_detect/edge_detect.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/mi_tools/test_space/mi_test_space.vhd
+read_vhdl -library work -vhdl2008 ${shell_git_root}/core/comp/pcie/pcie_mod/pcie_top.vhd
+read_vhdl -library work -vhdl2008 ${shell_git_root}/core/comp/pcie/pcie_mod/pcie_pkg.vhd
+read_vhdl -library work -vhdl2008 ${shell_git_root}/core/comp/pcie/pcie_telemetry/pcie_telemetry_mi.vhd
+read_vhdl -library work -vhdl2008 ${shell_git_root}/core/comp/pcie/pcie_telemetry/comp/pcie_telemetry_acc.vhd
+read_vhdl -library work -vhdl2008 ${shell_git_root}/core/comp/pcie/pcie_telemetry/comp/pcie_telemetry_probe.vhd
+read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/base/mem/dp_bram/dp_bram_behav.vhd
+set_property -quiet FILE_TYPE VHDL [get_files dp_bram_behav.vhd]
+read_xdc ${shell_git_root}/comp/base/async/bus_handshake/bus_handshake.xdc
+set_property SCOPED_TO_REF ASYNC_BUS_HANDSHAKE [get_files bus_handshake.xdc]
+set_property PROCESSING_ORDER LATE [get_files bus_handshake.xdc]
+read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/base/async/bus_handshake/bus_handshake.vhd
+read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/base/async/bus_handshake/sync_pgen.vhd
+read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/base/async/bus_handshake/bus_handshake_fsm.vhd
 read_xdc ${shell_git_root}/comp/base/async/open_loop/open_loop.xdc
 set_property SCOPED_TO_REF ASYNC_OPEN_LOOP [get_files open_loop.xdc]
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/base/async/open_loop/open_loop.vhd
-read_vhdl -library work -vhdl2008 ${shell_git_root}/core/comp/pcie/pcie_mod/pcie_top.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/core/comp/pcie/pcie_mod/comp/pcie_ctrl/pcie_ctrl.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/pcie/ptc/ptc_wrapper.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/pcie/ptc/ptc_full.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/pcie/ptc/ptc_ent.vhd
+read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/pcie/ptc/ptc_pkg.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/mfb_tools/flow/cutter_simple/mfb_cutter_simple.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/pcie/ptc/comp/storage_fifo/ptc_storage_fifo.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/pcie/ptc/comp/frame_eraser_upto96bits/ptc_frame_eraser_upto96bits.vhd
@@ -99,9 +129,6 @@ set_property SCOPED_TO_REF FIFO_BRAM_XILINX [get_files fifo_bram_xilinx.xdc]
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/base/fifo/fifo_bram_xilinx/fifo_bram_xilinx.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/base/fifo/fifo_bram_xilinx/fifo_bram_xilinx_ent.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/pcie/ptc/comp/tag_manager/ptc_tag_manager.vhd
-read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/base/logic/n_loop_op/n_loop_op.vhd
-read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/base/mem/gen_reg_array/gen_reg_array.vhd
-read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/base/mem/np_lutram/np_lutram.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/pcie/ptc/comp/hdr_data_merge/ptc_hdr_data_merge.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/pcie/ptc/comp/hdr_data_merge/ptc_hdr_data_merge_dins.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/pcie/ptc/comp/hdr_data_merge/ptc_hdr_data_merge_hpai.vhd
@@ -111,12 +138,13 @@ read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/pcie/ptc/comp/dma2pcie_
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/base/logic/pipe_tree_adder/pipe_tree_adder.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/pcie/ptc/comp/mfb_asfifo_256to512/mfb_asfifo_256to512.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/pcie/ptc/comp/mfb_asfifo_512to256/mfb_asfifo_512to256.vhd
-read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/mfb_tools/flow/splitter/mfb_splitter_gen.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/mfb_tools/flow/splitter/mfb_splitter.vhd
+read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/mfb_tools/flow/splitter/mfb_splitter_gen.vhd
+read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/mfb_tools/flow/splitter/mfb_splitter_flat.vhd
+read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/mfb_tools/flow/compactor/mfb_compactor.vhd
+read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/mfb_tools/flow/merger/mfb_merger.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/mfb_tools/flow/merger/mfb_merger_gen.vhd
-read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/mfb_tools/flow/merger/mfb_merger_full.vhd
-read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/mfb_tools/flow/merger/mfb_merger_old.vhd
-read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/mfb_tools/flow/merger/mfb_merger_ent.vhd
+read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/mfb_tools/flow/merger/mfb_merger_flat.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/mvb_tools/flow/merge_streams/merge_streams.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/mfb_tools/logic/auxiliary_signals/mfb_auxiliary_signals.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/base/logic/bin2hot/bin2hot.vhd
@@ -145,10 +173,10 @@ set_property PROCESSING_ORDER LATE [get_files open_loop_smd.xdc]
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/base/async/open_loop_smd/open_loop_smd.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/mi_tools/splitter_plus_gen/ver/mi_splitter_plus_gen_wrapper.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/mi_tools/splitter_plus_gen/mi_splitter_plus_gen.vhd
-read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/mi_tools/pipe/mi_pipe_arch.vhd
-read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/mi_tools/pipe/mi_pipe.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/mi_tools/splitter_plus_gen/ab_init_pack.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/ver/vhdl_ver_tools/basics/basics_test_pkg.vhd
+read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/mi_tools/pipe/mi_pipe_arch.vhd
+read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/mi_tools/pipe/mi_pipe.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/base/misc/event_counter/event_counter_mi_wrapper.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/base/misc/event_counter/event_counter.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/debug/streaming_debug/streaming_debug_master.vhd
@@ -160,15 +188,14 @@ read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/pcie/ptc/comp/mfb2pcie_
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/pcie/ptc/comp/pcie_axi2mfb/ptc_pcie_axi2mfb.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/pcie/convertors/cc_mfb2axi/pcie_mfb2axi.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/pcie/convertors/cq_axi2mfb/pcie_axi2mfb.vhd
-read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/base/pkg/pcie_axi_meta_pack.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/pcie/others/connection_block/connection_block.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/pcie/others/connection_block/crdt_down.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/pcie/others/connection_block/crdt_up.vhd
-read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/mfb_tools/storage/fifox/mfb_fifox.vhd
-read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/mfb_tools/flow/splitter_simple/mfb_splitter_simple_gen.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/mfb_tools/flow/splitter_simple/mfb_splitter_simple.vhd
+read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/mfb_tools/flow/splitter_simple/mfb_splitter_simple_gen.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/mfb_tools/flow/merger_simple/mfb_merger_simple_gen.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/mfb_tools/flow/merger_simple/mfb_merger_simple.vhd
+read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/mfb_tools/storage/fifox/mfb_fifox.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/pcie/others/axicc2mfb/pcie_axicc2mfb.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/mfb_tools/flow/pipe/mfb_pipe.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/pcie/others/mfb2axicq/pcie_mfb2axicq.vhd
@@ -234,8 +261,11 @@ read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/base/mem/sdp_bram/sdp_b
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/base/mem/sdp_bram/sdp_bram_intel/sdp_bram_intel_empty.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/base/mem/sdp_bram/sdp_bram_intel/sdp_bram_intel_ent.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/pcie/common/pci_ext_cap.vhd
-read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/base/pkg/pcie_meta_pack.vhd
+read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/base/pkg/pcie_axi_meta_pack.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/base/pkg/dma_bus_pack.vhd
+read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/mvb_tools/pkg/mvb_pkg.vhd
+read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/mfb_tools/pkg/mfb_pkg.vhd
+read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/base/pkg/pcie_meta_pack.vhd
 read_vhdl -library work -vhdl2008 ${shell_git_root}/comp/base/misc/reset_tree_gen/reset_tree_gen.vhd
 read_xdc ${shell_git_root}/comp/base/async/reset/async_reset.xdc
 set_property SCOPED_TO_REF ASYNC_RESET [get_files async_reset.xdc]
