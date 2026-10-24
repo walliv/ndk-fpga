@@ -7,6 +7,9 @@
 
 TOP_LEVEL_ENT=h2c_dma_hyperion
 TARGET=nvc-sim
+# The nvc flow makes the PSL checks and the abort on an error opt-in; these benches rely on both.
+NVC_PSL ?= 1
+NVC_EXIT_SEVERITY ?= error
 
 WAVEFORM_FILE=h2c_dma_hyperion.fst
 # RAND_SEED=19057233987
