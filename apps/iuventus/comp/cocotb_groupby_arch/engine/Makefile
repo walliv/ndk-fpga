@@ -8,6 +8,9 @@ TOP_LEVEL_ENT=IUVENTUS_GROUPBY_ENGINE
 TOP_LEVEL_PATH=.
 TARGET=nvc-sim
 NVC_PLATFORM_TAGS := xilinx
+# The nvc flow makes the PSL checks and the abort on an error opt-in; these benches rely on both.
+NVC_PSL ?= 1
+NVC_EXIT_SEVERITY ?= error
 
 # A 128-slot table keeps a full clear plus a full result sweep inside a few thousand cycles, so a
 # test can run the engine end to end. The shipping build uses 4096.

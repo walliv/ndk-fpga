@@ -10,6 +10,9 @@ TOP_LEVEL_ENT=USER_CORE
 TOP_LEVEL_PATH=.
 TARGET=nvc-sim
 NVC_PLATFORM_TAGS := xilinx
+# The nvc flow makes the PSL checks and the abort on an error opt-in; these benches rely on both.
+NVC_PSL ?= 1
+NVC_EXIT_SEVERITY ?= error
 
 # nvc needs libpython to load the cocotb VHPI bridge (see comp/dma/dma_iuventus/cocotb/Makefile
 # for the same trick).
