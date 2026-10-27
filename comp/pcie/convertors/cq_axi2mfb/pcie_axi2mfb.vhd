@@ -11,6 +11,7 @@ use IEEE.numeric_std.all;
 
 use work.math_pack.all;
 use work.type_pack.all;
+use work.pcie_axi_meta_pack.all;
 
 -- The Purpose of this component is to convert AXI to MFB bus.
 -- Supported are 512b and 256b with and without straddling, but
@@ -38,7 +39,7 @@ entity PCIE_CQ_AXI2MFB is
         -- CQ_USER_WIDTH = 85  for Gen3x8 PCIe - without straddling!
         -- =======================================================================
 
-        AXI_CQUSER_WIDTH  : natural := 183;
+        AXI_CQUSER_WIDTH  : natural := AXI_CQ512_USER_W;
         AXI_DATA_WIDTH    : natural := MFB_REGIONS*MFB_REGION_WIDTH;
         -- Straddling is permited only for CQ_USER_WIDTH = 183
         STRADDLING        : boolean := false;
@@ -150,9 +151,9 @@ architecture FULL of PCIE_CQ_AXI2MFB is
     ---------------------------------------------------------------------------
 
 begin
-    assert ((MFB_REGIONS = 1 and (AXI_CQUSER_WIDTH = 85 or AXI_CQUSER_WIDTH = 88) and not STRADDLING)
-            or (MFB_REGIONS = 2 and AXI_CQUSER_WIDTH = 183 and STRADDLING)
-            or (MFB_REGIONS = 2 and AXI_CQUSER_WIDTH = 183 and not STRADDLING))
+    assert ((MFB_REGIONS = 1 and (AXI_CQUSER_WIDTH = 85 or AXI_CQUSER_WIDTH = AXI_CQ256_USER_W) and not STRADDLING)
+            or (MFB_REGIONS = 2 and AXI_CQUSER_WIDTH = AXI_CQ512_USER_W and STRADDLING)
+            or (MFB_REGIONS = 2 and AXI_CQUSER_WIDTH = AXI_CQ512_USER_W and not STRADDLING))
         report "PCIE_CQ_AXI2MFB: Unsupported AXI CQ USER port width, the supported are: 85 (MFB_REGIONS = 1), 88 (MFB_REGIONS = 1), 183 (MFB_REGIONS = 2)"
         severity FAILURE;
 
@@ -162,10 +163,10 @@ begin
     -- Has not been tested
     -- =========================================================================
 
-    axi_256b_g: if (AXI_CQUSER_WIDTH = 88 or AXI_CQUSER_WIDTH = 85) generate
-        cq_axi_user_sop(0)     <= CQ_AXI_USER(40);
-        cq_axi_user_fbe        <= CQ_AXI_USER(4-1 downto 0);
-        cq_axi_user_lbe        <= CQ_AXI_USER(8-1 downto 4);
+    axi_256b_g: if (AXI_CQUSER_WIDTH = AXI_CQ256_USER_W or AXI_CQUSER_WIDTH = 85) generate
+        cq_axi_user_sop(0)     <= CQ_AXI_USER(AXI_CQ256_SOP_O);
+        cq_axi_user_fbe        <= CQ_AXI_USER(AXI_CQ256_FBE);
+        cq_axi_user_lbe        <= CQ_AXI_USER(AXI_CQ256_LBE);
 
         conv_256_pr : process (all)
             variable eof_pos   : unsigned(3-1 downto 0) := (others => '0');
@@ -178,9 +179,9 @@ begin
             CQ_MFB_EOF_POS <= (others => '0');
 
             if (cq_axi_user_sop(0) = '1') then
-                CQ_TPH_PRESENT(0) <= CQ_AXI_USER(42);
-                CQ_TPH_TYPE       <= CQ_AXI_USER(44 downto 43);
-                CQ_TPH_ST_TAG     <= CQ_AXI_USER(52 downto 45);
+                CQ_TPH_PRESENT(0) <= CQ_AXI_USER(AXI_CQ256_TPH_PRESENT_O);
+                CQ_TPH_TYPE       <= CQ_AXI_USER(AXI_CQ256_TPH_TYPE);
+                CQ_TPH_ST_TAG     <= CQ_AXI_USER(AXI_CQ256_TPH_ST_TAG);
             end if;
 
             if (CQ_AXI_LAST = '1') then
@@ -204,13 +205,13 @@ begin
     -- Conversion AXI to MFB for ULTRASCALE 512b variant with straddling
     -- =========================================================================
 
-    axi_512b_g: if (AXI_CQUSER_WIDTH = 183 and STRADDLING) generate
-        cq_axi_user_sop         <= CQ_AXI_USER(81 downto 80);
-        cq_axi_user_sop_ptr(0)  <= CQ_AXI_USER(83 downto 82);
-        cq_axi_user_sop_ptr(1)  <= CQ_AXI_USER(85 downto 84);
-        cq_axi_user_eop         <= CQ_AXI_USER(87 downto 86);
-        cq_axi_user_eop_ptr(0)  <= CQ_AXI_USER(91 downto 88);
-        cq_axi_user_eop_ptr(1)  <= CQ_AXI_USER(95 downto 92);
+    axi_512b_g: if (AXI_CQUSER_WIDTH = AXI_CQ512_USER_W and STRADDLING) generate
+        cq_axi_user_sop         <= CQ_AXI_USER(AXI_CQ512_SOP);
+        cq_axi_user_sop_ptr(0)  <= CQ_AXI_USER(AXI_CQ512_SOP_POS_0);
+        cq_axi_user_sop_ptr(1)  <= CQ_AXI_USER(AXI_CQ512_SOP_POS_1);
+        cq_axi_user_eop         <= CQ_AXI_USER(AXI_CQ512_EOP);
+        cq_axi_user_eop_ptr(0)  <= CQ_AXI_USER(AXI_CQ512_EOP_POS_0);
+        cq_axi_user_eop_ptr(1)  <= CQ_AXI_USER(AXI_CQ512_EOP_POS_1);
 
         -- conversion process
         sop_eop_sof_eof_conv_pr : process (all)
@@ -220,9 +221,9 @@ begin
             CQ_MFB_EOF_POS <= (others => '0');
             CQ_MFB_SOF     <= (others => '0');
             CQ_MFB_EOF     <= (others => '0');
-            CQ_TPH_PRESENT <= CQ_AXI_USER(98 downto 97);
-            CQ_TPH_TYPE    <= CQ_AXI_USER(102 downto 99);
-            CQ_TPH_ST_TAG  <= CQ_AXI_USER(118 downto 103);
+            CQ_TPH_PRESENT <= CQ_AXI_USER(AXI_CQ512_TPH_PRESENT);
+            CQ_TPH_TYPE    <= CQ_AXI_USER(AXI_CQ512_TPH_TYPE);
+            CQ_TPH_ST_TAG  <= CQ_AXI_USER(AXI_CQ512_TPH_ST_TAG);
 
             -- There is only one TLP in this beat
             if (cq_axi_user_sop = "01") then
@@ -230,16 +231,16 @@ begin
                 if (cq_axi_user_sop_ptr(0) = "10") then
                     CQ_MFB_SOF <= "10";
 
-                    CQ_TPH_PRESENT <= CQ_AXI_USER(97) & "0";
-                    CQ_TPH_TYPE    <= CQ_AXI_USER(100 downto 99) & "00";
-                    CQ_TPH_ST_TAG  <= CQ_AXI_USER(110 downto 103) & "00000000";
+                    CQ_TPH_PRESENT <= CQ_AXI_USER(AXI_CQ512_TPH_PRESENT_O) & "0";
+                    CQ_TPH_TYPE    <= CQ_AXI_USER(AXI_CQ512_TPH_TYPE_O+2-1 downto AXI_CQ512_TPH_TYPE_O) & "00";
+                    CQ_TPH_ST_TAG  <= CQ_AXI_USER(AXI_CQ512_TPH_ST_TAG_O+8-1 downto AXI_CQ512_TPH_ST_TAG_O) & "00000000";
                 -- TLP Present in the first region
                 else
                     CQ_MFB_SOF <= "01";
 
-                    CQ_TPH_PRESENT <= "0" & CQ_AXI_USER(97);
-                    CQ_TPH_TYPE    <= "00" & CQ_AXI_USER(100 downto 99);
-                    CQ_TPH_ST_TAG  <= "00000000" & CQ_AXI_USER(110 downto 103);
+                    CQ_TPH_PRESENT <= "0" & CQ_AXI_USER(AXI_CQ512_TPH_PRESENT_O);
+                    CQ_TPH_TYPE    <= "00" & CQ_AXI_USER(AXI_CQ512_TPH_TYPE_O+2-1 downto AXI_CQ512_TPH_TYPE_O);
+                    CQ_TPH_ST_TAG  <= "00000000" & CQ_AXI_USER(AXI_CQ512_TPH_ST_TAG_O+8-1 downto AXI_CQ512_TPH_ST_TAG_O);
                 end if;
 
             -- THere are 2 TLPs in this beat
@@ -272,16 +273,16 @@ begin
     -- Conversion AXI to MFB for ULTRASCALE 512b variant
     -- =========================================================================
 
-    axi_512b_no_straddling_g: if (AXI_CQUSER_WIDTH = 183 and not STRADDLING) generate
-        cq_axi_user_tph_present <= CQ_AXI_USER(99-1 downto 97);
-        cq_axi_user_tph_type    <= CQ_AXI_USER(103-1 downto 99);
-        cq_axi_user_tph_st_tag  <= CQ_AXI_USER(119-1 downto 103);
-        cq_axi_user_sop(0)      <= CQ_AXI_USER(80);
+    axi_512b_no_straddling_g: if (AXI_CQUSER_WIDTH = AXI_CQ512_USER_W and not STRADDLING) generate
+        cq_axi_user_tph_present <= CQ_AXI_USER(AXI_CQ512_TPH_PRESENT);
+        cq_axi_user_tph_type    <= CQ_AXI_USER(AXI_CQ512_TPH_TYPE);
+        cq_axi_user_tph_st_tag  <= CQ_AXI_USER(AXI_CQ512_TPH_ST_TAG);
+        cq_axi_user_sop(0)      <= CQ_AXI_USER(AXI_CQ512_SOP_O);
         cq_axi_user_sop(1)      <= '0';
         CQ_MFB_SOF              <= cq_axi_user_sop;
         CQ_MFB_SOF_POS          <= (others => '0');
-        cq_axi_user_fbe         <= "0000" & CQ_AXI_USER(4-1 downto 0);
-        cq_axi_user_lbe         <= "0000" & CQ_AXI_USER(12-1 downto 8);
+        cq_axi_user_fbe         <= "0000" & CQ_AXI_USER(AXI_CQ512_FBE_O+4-1 downto AXI_CQ512_FBE_O);
+        cq_axi_user_lbe         <= "0000" & CQ_AXI_USER(AXI_CQ512_LBE_O+4-1 downto AXI_CQ512_LBE_O);
 
         conv_pr : process (all)
             variable eof_pos : unsigned(3-1 downto 0) := (others => '0');
@@ -295,7 +296,7 @@ begin
             CQ_MFB_EOF     <= (others => '0');
             CQ_MFB_EOF_POS <= (others => '0');
 
-            if (CQ_AXI_USER(80) = '1') then
+            if (cq_axi_user_sop(0) = '1') then
                 CQ_TPH_PRESENT <= cq_axi_user_tph_present;
                 CQ_TPH_TYPE    <= cq_axi_user_tph_type;
                 CQ_TPH_ST_TAG  <= cq_axi_user_tph_st_tag;
@@ -342,15 +343,15 @@ begin
             CQ_LBE <= (others => '0');
 
             if (cq_axi_user_sop = "11") then
-                CQ_FBE <= CQ_AXI_USER(8-1 downto 0);
-                CQ_LBE <= CQ_AXI_USER(16-1 downto 8);
+                CQ_FBE <= CQ_AXI_USER(AXI_CQ512_FBE);
+                CQ_LBE <= CQ_AXI_USER(AXI_CQ512_LBE);
             elsif (cq_axi_user_sop = "01") then
                 if (cq_axi_user_sop_ptr(0) = "10") then
-                    CQ_FBE <= CQ_AXI_USER(4-1 downto 0) & "0000";
-                    CQ_LBE <= CQ_AXI_USER(12-1 downto 8) & "0000";
+                    CQ_FBE <= CQ_AXI_USER(AXI_CQ512_FBE_O+4-1 downto AXI_CQ512_FBE_O) & "0000";
+                    CQ_LBE <= CQ_AXI_USER(AXI_CQ512_LBE_O+4-1 downto AXI_CQ512_LBE_O) & "0000";
                 else
-                    CQ_FBE <= "0000" & CQ_AXI_USER(4-1 downto 0);
-                    CQ_LBE <= "0000" & CQ_AXI_USER(12-1 downto 8);
+                    CQ_FBE <= "0000" & CQ_AXI_USER(AXI_CQ512_FBE_O+4-1 downto AXI_CQ512_FBE_O);
+                    CQ_LBE <= "0000" & CQ_AXI_USER(AXI_CQ512_LBE_O+4-1 downto AXI_CQ512_LBE_O);
                 end if;
             end if;
         end process;
