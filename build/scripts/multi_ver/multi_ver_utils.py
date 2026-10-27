@@ -46,3 +46,34 @@ def create_setting_from_combination(settings, combination):
             else:
                 s[i] = settings[c][i]
     return s
+
+
+# Combinations of a SETTINGS dictionary, by name; removes the "_combinations_*" entries from it
+def expand_combinations(settings, run_percentage=None):
+    combinations = dict()
+
+    if "_combinations_" in settings.keys():
+        # User defined combinations
+        if type(settings["_combinations_"]) is dict:
+            combinations = settings["_combinations_"]
+        if type(settings["_combinations_"]) is tuple:
+            for it, comb in enumerate(settings["_combinations_"]):
+                combinations[f"test_name_{it}"] = comb
+
+        del settings["_combinations_"]
+
+    else:
+        # Default combinations
+        for key in settings.keys():
+            combinations[key] = (key, )
+
+    if run_percentage:
+        # Randomly reduce number of combinations based on command argument
+        combinations = reduce_combinations(combinations, int(run_percentage))
+        del settings["_combinations_run_percentage_"]
+    elif "_combinations_run_percentage_" in settings.keys():
+        # Randomly reduce number of combinations based on SETTINGS
+        combinations = reduce_combinations(combinations, settings["_combinations_run_percentage_"])
+        del settings["_combinations_run_percentage_"]
+
+    return combinations
