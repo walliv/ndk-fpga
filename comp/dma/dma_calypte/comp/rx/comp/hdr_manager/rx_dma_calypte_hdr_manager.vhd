@@ -536,8 +536,10 @@ begin
                     channel_status_new(to_integer(unsigned(stop_req_q_chan))) <= '0';
 
                     -- If the channel the request was sent on does not have a packet processed on
-                    -- it, acknowledge the stop immediately and do not wait for anything.
-                    if (pkt_chan_reg /= stop_req_q_chan or pkt_process_pst /= S_PACKET_PROCESS) then
+                    -- it, acknowledge the stop immediately and do not wait for anything. A header of
+                    -- this channel decided in this same cycle still sees the old status.
+                    if ((pkt_chan_reg /= stop_req_q_chan or pkt_process_pst /= S_PACKET_PROCESS) and
+                        not (pkt_process_pst = S_IDLE and input_fifo_empty = '0' and input_channel = stop_req_q_chan)) then
                         stop_req_done_int <= '1';
                     else
                         -- If the channel to be stopped is processing a packet, do not
