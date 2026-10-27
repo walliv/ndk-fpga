@@ -74,6 +74,43 @@ test. Select a subset with ``COCOTB_TEST_FILTER``, a single regular expression m
 .. note:: The older ``COCOTB_TESTCASE`` variable (comma-separated exact test names) still works but is deprecated by
     cocotb in favor of ``COCOTB_TEST_FILTER``.
 
+Running Configurations in Parallel
+==================================
+
+``build/scripts/multi_ver/nvc_suite.mk`` runs the configurations of a bench in nvc, each (configuration, test) as
+one shard of a ``pytest-xdist`` session. A configuration is elaborated once; each shard runs in a private copy of it
+with its own random seed, which its log under ``shards/`` and the line it appends to ``shards/summary.jsonl`` name.
+A bench with a ``ver_settings.py`` gets the combinations that ``multi_ver_cocotb.py`` runs by including the file
+after its default goal:
+
+.. code-block:: make
+
+    .PHONY: all
+    all: comp
+
+    include ../../../build/scripts/multi_ver/nvc_suite.mk
+
+    include ../../../build/Makefile
+
+.. code-block:: bash
+
+    make suite                          # every combination times every @cocotb.test
+    make suite SUITE_WORKERS=4 SUITE_REPEAT=10
+    make suite-run CONFIG=test_name_1 TEST=random_tlps RANDOM_SEED=42   # after a suite or suite-analyse
+
+``make`` alone keeps running the bench's own target, the Questa run of ``TARGET=cocotb`` that Jenkins and
+``multi_ver_cocotb.py`` start, or the nvc run with ``SIM=nvc``. ``SUITE_WORKERS`` (8) sets the parallel shards, ``SUITE_REPEAT`` runs every shard that many times and
+``WALL_CAP_S`` (600) stops a shard that runs longer. A bench that needs more than the defaults sets ``SUITE_FILE``
+to a pytest file that builds an ``nvc_suite.Suite`` from its ``ver_settings.py``, see the DMA Calypte, MFB_MERGER_SIMPLE
+and transaction buffer benches.
+
+A bench that also includes ``build/scripts/multi_ver/ver_settings.mk`` before ``build/Makefile`` runs the ``"default"``
+setting of its ``ver_settings.py`` on a plain ``make``; ``GENERICS`` given to make, as by ``multi_ver_cocotb.py``,
+win. Two ``__cocotb_params__`` keys select what a combination runs, in both ``multi_ver_cocotb.py`` and the suite:
+``TEST_FILTER`` becomes ``COCOTB_TEST_FILTER``, a regular expression cocotb searches in ``<module>.<test>``, and
+``TEST_MODULES`` becomes ``COCOTB_TEST_MODULES``. Jenkins takes the ``ver_settings.py`` of the bench directory when it
+has one.
+
 Optional Signals on MFB/MVB/AXI4-Stream Interfaces
 ==================================================
 

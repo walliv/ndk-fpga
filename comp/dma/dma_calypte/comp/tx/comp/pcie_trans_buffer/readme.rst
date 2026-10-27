@@ -79,6 +79,7 @@ holds the combinations of generics the bench runs; with ``MEM_PARTITIONING`` fal
 flat address space::
 
     cd cocotb
+    make suite                                    # every combination in parallel nvc runs
     make                                          # the "default" combination, AUTO -> banked URAM
     make GENERICS='-gRAM_TYPE="BRAM"'             # other generics: per-byte, two memory arrays
     python3 ../../../../../../../../build/scripts/multi_ver/multi_ver_cocotb.py ver_settings.py -n lat3_bram -c  # one combination
