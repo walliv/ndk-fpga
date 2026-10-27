@@ -105,6 +105,18 @@ package pcie_meta_pack is
     subtype PCIE_CQ_META_TPH_PRESENT is natural range PCIE_CQ_META_TPH_PRESENT_O + PCIE_META_TPH_PRESENT_W -1 downto PCIE_CQ_META_TPH_PRESENT_O;
     subtype PCIE_CQ_META_TPH_TYPE    is natural range PCIE_CQ_META_TPH_TYPE_O    + PCIE_META_TPH_TYPE_W    -1 downto PCIE_CQ_META_TPH_TYPE_O;
     subtype PCIE_CQ_META_TPH_ST_TAG  is natural range PCIE_CQ_META_TPH_ST_TAG_O  + PCIE_META_TPH_ST_TAG_W  -1 downto PCIE_CQ_META_TPH_ST_TAG_O;
+    -- The fields from FBE up, which PCIE_CQ_AXI2MFB gives on AMD devices
+    subtype PCIE_CQ_META_AXI_USER    is natural range PCIE_CQ_META_WIDTH                                -1 downto PCIE_CQ_META_FBE_O;
+
+    -- Places the outputs of PCIE_CQ_AXI2MFB for region i into the PCIE_CQ_META_AXI_USER fields; each argument holds every region.
+    function pcie_cq_meta_axi_user_f (
+        i           : natural;
+        fbe         : std_logic_vector;
+        lbe         : std_logic_vector;
+        tph_present : std_logic_vector;
+        tph_type    : std_logic_vector;
+        tph_st_tag  : std_logic_vector
+    ) return std_logic_vector;
 
     constant PCIE_CC_META_HEADER_O : natural := 0;
     constant PCIE_CC_META_PREFIX_O : natural := PCIE_CC_META_HEADER_O + PCIE_META_CPL_HDR_W;
@@ -121,5 +133,23 @@ end package;
 -- -----------------------------------------------------------------------------
 
 package body pcie_meta_pack is
+
+    function pcie_cq_meta_axi_user_f (
+        i           : natural;
+        fbe         : std_logic_vector;
+        lbe         : std_logic_vector;
+        tph_present : std_logic_vector;
+        tph_type    : std_logic_vector;
+        tph_st_tag  : std_logic_vector
+    ) return std_logic_vector is
+        variable meta : std_logic_vector(PCIE_CQ_META_WIDTH -1 downto 0) := (others => '0');
+    begin
+        meta(PCIE_CQ_META_FBE)           := fbe((i+1)*PCIE_META_FBE_W-1 downto i*PCIE_META_FBE_W);
+        meta(PCIE_CQ_META_LBE)           := lbe((i+1)*PCIE_META_LBE_W-1 downto i*PCIE_META_LBE_W);
+        meta(PCIE_CQ_META_TPH_PRESENT_O) := tph_present(i);
+        meta(PCIE_CQ_META_TPH_TYPE)      := tph_type((i+1)*PCIE_META_TPH_TYPE_W-1 downto i*PCIE_META_TPH_TYPE_W);
+        meta(PCIE_CQ_META_TPH_ST_TAG)    := tph_st_tag((i+1)*PCIE_META_TPH_ST_TAG_W-1 downto i*PCIE_META_TPH_ST_TAG_W);
+        return meta(PCIE_CQ_META_AXI_USER);
+    end function;
 
 end package body;
