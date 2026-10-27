@@ -78,3 +78,12 @@ def test_pipelined_requests_follow_each_other_at_ardy(monkeypatch):
     assert accepted == ops
     assert drv.bus.addr.written[-2:] == [0x10, 0x18] and drv.bus.be.written[-1] == (1 << DATA_BYTES) - 1
     assert drv.bus.wr.written[-3:] == [1, 0, 0] and drv.bus.rd.written[-3:] == [0, 1, 0]
+
+
+def test_word_writes_put_the_value_on_the_bus_little_endian(driver):
+    asyncio.run(driver.write32(0x104, 0x11223344))
+    asyncio.run(driver.write64(0x108, 0x0102030405060708))
+
+    writes = [(a, d, be) for a, d, be, wr in zip(driver.bus.addr.written, driver.bus.dwr.written, driver.bus.be.written,
+                                                 driver.bus.wr.written) if wr]
+    assert writes == [(0x100, 0x11223344 << 32, 0xF0), (0x108, 0x0102030405060708, 0xFF)]
