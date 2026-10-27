@@ -338,11 +338,7 @@ begin
             cq_mfb_meta_arr(i)(PCIE_CQ_META_HEADER)        <= (others => '0');
             cq_mfb_meta_arr(i)(PCIE_CQ_META_PREFIX)        <= (others => '0');
             cq_mfb_meta_arr(i)(PCIE_CQ_META_BAR)           <= (others => '0');
-            cq_mfb_meta_arr(i)(PCIE_CQ_META_FBE)           <= cq_fbe((i+1)*PCIE_META_FBE_W-1 downto i*PCIE_META_FBE_W);
-            cq_mfb_meta_arr(i)(PCIE_CQ_META_LBE)           <= cq_lbe((i+1)*PCIE_META_LBE_W-1 downto i*PCIE_META_LBE_W);
-            cq_mfb_meta_arr(i)(PCIE_CQ_META_TPH_PRESENT_O) <= cq_tph_present(i);
-            cq_mfb_meta_arr(i)(PCIE_CQ_META_TPH_TYPE)      <= cq_tph_type((i+1)*PCIE_META_TPH_TYPE_W-1 downto i*PCIE_META_TPH_TYPE_W);
-            cq_mfb_meta_arr(i)(PCIE_CQ_META_TPH_ST_TAG)    <= cq_tph_st_tag((i+1)*PCIE_META_TPH_ST_TAG_W-1 downto i*PCIE_META_TPH_ST_TAG_W);
+            cq_mfb_meta_arr(i)(PCIE_CQ_META_AXI_USER)      <= pcie_cq_meta_axi_user_f(i, cq_fbe, cq_lbe, cq_tph_present, cq_tph_type, cq_tph_st_tag);
         end generate;
 
         CQ_MFB_META <= slv_array_ser(cq_mfb_meta_arr);
@@ -557,11 +553,7 @@ begin
             cq_mfb_meta_arr(i)(PCIE_CQ_META_HEADER)        <= cblk_cq_mfb_meta_arr(i)(PCIE_CQ_META_HEADER);
             cq_mfb_meta_arr(i)(PCIE_CQ_META_PREFIX)        <= cblk_cq_mfb_meta_arr(i)(PCIE_CQ_META_PREFIX);
             cq_mfb_meta_arr(i)(PCIE_CQ_META_BAR)           <= cblk_cq_mfb_meta_arr(i)(PCIE_CQ_META_BAR);
-            cq_mfb_meta_arr(i)(PCIE_CQ_META_FBE)           <= (others => '0');
-            cq_mfb_meta_arr(i)(PCIE_CQ_META_LBE)           <= (others => '0');
-            cq_mfb_meta_arr(i)(PCIE_CQ_META_TPH_PRESENT_O) <= '0';
-            cq_mfb_meta_arr(i)(PCIE_CQ_META_TPH_TYPE)      <= (others => '0');
-            cq_mfb_meta_arr(i)(PCIE_CQ_META_TPH_ST_TAG)    <= (others => '0');
+            cq_mfb_meta_arr(i)(PCIE_CQ_META_AXI_USER)      <= (others => '0');
         end generate;
 
         rc_mfb_meta_g: for i in 0 to RC_MFB_REGIONS-1 generate

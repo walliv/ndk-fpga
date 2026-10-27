@@ -324,11 +324,7 @@ begin
         cq_mfb_meta_new_arr(i)(PCIE_CQ_META_HEADER)        <= cq_mfb_meta_arr(i)(127 downto 0);
         cq_mfb_meta_new_arr(i)(PCIE_CQ_META_PREFIX)        <= cq_mfb_meta_arr(i)(159 downto 128);
         cq_mfb_meta_new_arr(i)(PCIE_CQ_META_BAR)           <= cq_mfb_meta_arr(i)(162 downto 160);
-        cq_mfb_meta_new_arr(i)(PCIE_CQ_META_FBE)           <= cq_user_fbe((i+1)*PCIE_META_FBE_W-1 downto i*PCIE_META_FBE_W);
-        cq_mfb_meta_new_arr(i)(PCIE_CQ_META_LBE)           <= cq_user_lbe((i+1)*PCIE_META_LBE_W-1 downto i*PCIE_META_LBE_W);
-        cq_mfb_meta_new_arr(i)(PCIE_CQ_META_TPH_PRESENT_O) <= cq_user_tph_present(i);
-        cq_mfb_meta_new_arr(i)(PCIE_CQ_META_TPH_TYPE)      <= cq_user_tph_type((i+1)*PCIE_META_TPH_TYPE_W-1 downto i*PCIE_META_TPH_TYPE_W);
-        cq_mfb_meta_new_arr(i)(PCIE_CQ_META_TPH_ST_TAG)    <= cq_user_tph_st_tag((i+1)*PCIE_META_TPH_ST_TAG_W-1 downto i*PCIE_META_TPH_ST_TAG_W);
+        cq_mfb_meta_new_arr(i)(PCIE_CQ_META_AXI_USER)      <= pcie_cq_meta_axi_user_f(i, cq_user_fbe, cq_user_lbe, cq_user_tph_present, cq_user_tph_type, cq_user_tph_st_tag);
     end generate;
 
     mtc_i : entity work.MTC
