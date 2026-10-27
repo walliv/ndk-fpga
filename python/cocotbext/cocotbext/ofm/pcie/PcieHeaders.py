@@ -84,10 +84,21 @@ class RCUser(SerializableHeader):
     ))
 
 
+class CQUser256(SerializableHeader):
+    """TUSER of the 256-bit CQ interface; its 88-bit variant leaves the 3 bits above the parity at 0."""
+    items = list(zip(
+        [
+            'first_be', 'last_be', 'byte_en', 'sop', 'discontinue', 'tph_present', 'tph_type', 'tph_st_tag',
+            'parity'
+        ],
+        [4, 4, 32, 1, 1, 1, 2, 8, 32],
+    ))
+
+
 class CQMfbMeta(SerializableHeader):
     items = list(zip(
-        ['header', 'prefix', 'bar', 'firstBe', 'lastBe', 'tph_present', 'tph_type', 'tph_st_tag'],
-        [128, 32, 3, 4, 4, 1, 2, 8],
+        ['header', 'prefix', 'bar', 'firstBe', 'lastBe', 'tph_present', 'tph_type', 'tph_st_tag', 'be'],
+        [128, 32, 3, 4, 4, 1, 2, 8, 32],
     ))
 
 

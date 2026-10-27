@@ -8,7 +8,7 @@ import pytest
 from cocotb.types import LogicArray
 
 from cocotbext.ofm.utils.signals import (align_read_request, align_request, align_write_request,
-                                         binstr_bit, binstr_resolvable, binstr_resolved,
+                                         binstr_bit, binstr_resolvable, binstr_resolved, generic_bool,
                                          get_signal_value_in_bytes, signal_binstr, signal_int)
 from stubs import StubSignal
 
@@ -28,6 +28,11 @@ def test_bit_string_predicates():
     assert binstr_bit("0110", 1) and binstr_bit("0110", 2) and not binstr_bit("0110", 0)
     assert binstr_resolvable("01LH") and not binstr_resolvable("0X1")
     assert binstr_resolved("0110") and not binstr_resolved("01H0")
+
+
+@pytest.mark.parametrize("value, expected", [("TRUE", True), ("false", False), (1, True), (0, False)])
+def test_generic_bool_takes_a_name_or_a_number(value, expected):
+    assert generic_bool(StubSignal(1, value)) is expected
 
 
 def test_signal_value_is_little_endian_by_default():

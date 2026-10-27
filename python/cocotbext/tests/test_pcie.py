@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from cocotbext.ofm.pcie import CQMfbMeta, CQUser, RQMfbMeta
+from cocotbext.ofm.pcie import CQMfbMeta, CQUser, CQUser256, RQMfbMeta
 
 META_PACK = Path(__file__).resolve().parents[3] / "comp" / "base" / "pkg" / "pcie_meta_pack.vhd"
 
@@ -25,7 +25,7 @@ def vhdl_constants():
 
 # layout class, VHDL prefix, VHDL name of every field in layout order
 LAYOUTS = [
-    (CQMfbMeta, "CQ", ["HEADER", "PREFIX", "BAR", "FBE", "LBE", "TPH_PRESENT", "TPH_TYPE", "TPH_ST_TAG"]),
+    (CQMfbMeta, "CQ", ["HEADER", "PREFIX", "BAR", "FBE", "LBE", "TPH_PRESENT", "TPH_TYPE", "TPH_ST_TAG", "BE"]),
     (RQMfbMeta, "RQ", ["HEADER", "PREFIX", "FBE", "LBE"]),
 ]
 
@@ -57,3 +57,10 @@ def test_cq_user_follows_the_512_bit_tuser_of_pg213():
     assert (offsets["byte_en"], offsets["sop0"], offsets["eop0"], offsets["discontiune"]) == (16, 80, 86, 96)
     assert (offsets["tph_present"], offsets["tph_type"], offsets["tph_sh_tag"], offsets["parity"]) == (97, 99, 103, 119)
     assert len(CQUser()) == 183
+
+
+def test_cq_user_256_follows_the_256_bit_tuser_of_pg213():
+    offsets = CQUser256.offsets()
+
+    assert (offsets["byte_en"], offsets["sop"], offsets["tph_present"], offsets["tph_st_tag"]) == (8, 40, 42, 45)
+    assert offsets["parity"] == 53 and len(CQUser256()) == 85

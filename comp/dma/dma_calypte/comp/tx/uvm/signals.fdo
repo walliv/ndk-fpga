@@ -96,8 +96,8 @@ proc top_input {PATH META_CHAN_NUM_W BUFF_ADDR_W REGIONS DEVICE PCIE_META_W} {
         add_wave "-noupdate -label \"PCIE_CQ_MFB_FBE 0\" -bin" $PATH/PCIE_CQ_MFB_META(166\ downto\ 163)
         add_wave "-noupdate -label \"PCIE_CQ_MFB_LBE 0\" -bin" $PATH/PCIE_CQ_MFB_META(170\ downto\ 167)
         if {$REGIONS == 2} {
-            add_wave "-noupdate -label \"PCIE_CQ_MFB_FBE 1\" -bin" $PATH/PCIE_CQ_MFB_META([expr 166 + 182]\ downto\ [expr 163 + 182])
-            add_wave "-noupdate -label \"PCIE_CQ_MFB_LBE 1\" -bin" $PATH/PCIE_CQ_MFB_META([expr 170 + 182]\ downto\ [expr 167 + 182])
+            add_wave "-noupdate -label \"PCIE_CQ_MFB_FBE 1\" -bin" $PATH/PCIE_CQ_MFB_META([expr 166 + $PCIE_META_W]\ downto\ [expr 163 + $PCIE_META_W])
+            add_wave "-noupdate -label \"PCIE_CQ_MFB_LBE 1\" -bin" $PATH/PCIE_CQ_MFB_META([expr 170 + $PCIE_META_W]\ downto\ [expr 167 + $PCIE_META_W])
         }
     } else {
         pcie_hdr_deparse $PATH/PCIE_CQ_MFB_META $META_CHAN_NUM_W $BUFF_ADDR_W $DEVICE 0 ""

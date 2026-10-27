@@ -19,7 +19,7 @@ set REGIONS 2
 set DEVICE "ULTRASCALE"
 
 # Constant parameters
-set PCIE_META_W 182
+set PCIE_META_W 214
 set META_IS_DMA_HDR_W 1
 set META_PCIE_ADDR_W 62
 

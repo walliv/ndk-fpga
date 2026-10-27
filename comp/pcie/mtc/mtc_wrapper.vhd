@@ -223,6 +223,7 @@ architecture FULL of MTC_WRAPPER is
     signal cq_user_tph_st_tag     : std_logic_vector(MFB_REGIONS*8-1 downto 0);
     signal cq_user_fbe            : std_logic_vector(MFB_REGIONS*4-1 downto 0);
     signal cq_user_lbe            : std_logic_vector(MFB_REGIONS*4-1 downto 0);
+    signal cq_user_be             : std_logic_vector(MFB_REGIONS*PCIE_META_BE_W-1 downto 0);
 
     signal cc_mfb_dst_rdy_out     : std_logic;
 
@@ -269,7 +270,8 @@ begin
             CQ_TPH_TYPE    => cq_user_tph_type,
             CQ_TPH_ST_TAG  => cq_user_tph_st_tag,
             CQ_FBE         => cq_user_fbe,
-            CQ_LBE         => cq_user_lbe
+            CQ_LBE         => cq_user_lbe,
+            CQ_BE          => cq_user_be
         );
 
         mfb_cc2axi_i : entity work.PCIE_CC_MFB2AXI
@@ -316,6 +318,7 @@ begin
         cq_user_tph_st_tag  <= (others => '0');
         cq_user_fbe         <= (others => '0');
         cq_user_lbe         <= (others => '0');
+        cq_user_be          <= (others => '0');
     end generate;
 
     cq_mfb_meta_arr <= slv_array_deser(CQ_MFB_META,MFB_REGIONS);
@@ -324,7 +327,7 @@ begin
         cq_mfb_meta_new_arr(i)(PCIE_CQ_META_HEADER)        <= cq_mfb_meta_arr(i)(127 downto 0);
         cq_mfb_meta_new_arr(i)(PCIE_CQ_META_PREFIX)        <= cq_mfb_meta_arr(i)(159 downto 128);
         cq_mfb_meta_new_arr(i)(PCIE_CQ_META_BAR)           <= cq_mfb_meta_arr(i)(162 downto 160);
-        cq_mfb_meta_new_arr(i)(PCIE_CQ_META_AXI_USER)      <= pcie_cq_meta_axi_user_f(i, cq_user_fbe, cq_user_lbe, cq_user_tph_present, cq_user_tph_type, cq_user_tph_st_tag);
+        cq_mfb_meta_new_arr(i)(PCIE_CQ_META_AXI_USER)      <= pcie_cq_meta_axi_user_f(i, cq_user_fbe, cq_user_lbe, cq_user_be, cq_user_tph_present, cq_user_tph_type, cq_user_tph_st_tag);
     end generate;
 
     mtc_i : entity work.MTC

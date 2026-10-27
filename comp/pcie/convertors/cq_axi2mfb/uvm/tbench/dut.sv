@@ -50,7 +50,8 @@ module dut (
         .CQ_TPH_TYPE       (),
         .CQ_TPH_ST_TAG     (),
         .CQ_FBE            (),
-        .CQ_LBE            ()
+        .CQ_LBE            (),
+        .CQ_BE             ()
     );
 
 
