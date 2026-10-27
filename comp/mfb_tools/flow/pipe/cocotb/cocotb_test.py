@@ -65,7 +65,11 @@ async def run_test(dut, pkt_count=10000, frame_size_min=60, frame_size_max=512):
     await tb.reset()
     #That's not really a random number, is it?
     # tb.backpressure.start((1, i % 5) for i in itertools.count())
-    tb.backpressure.start((1, random.randint(0, 5)) for i in itertools.count())
+    # Without USE_DST_RDY the pipe ignores TX_DST_RDY, so its sink has to be always ready.
+    if str(dut.USE_DST_RDY.value).lower() in ("1", "true"):
+        tb.backpressure.start((1, random.randint(0, 5)) for i in itertools.count())
+    else:
+        dut.TX_DST_RDY.value = 1
 
     # calculating number of bytes in an item
     item_bytes = tb.dut.ITEM_WIDTH.value // 8
