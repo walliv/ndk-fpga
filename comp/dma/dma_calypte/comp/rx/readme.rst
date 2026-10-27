@@ -210,16 +210,17 @@ Stop sequence
 
 If a stop of a channel is requested, the ``0b0`` value is written to its Control
 register. The controller completes the dispatch of a currently processed packet
-(if there is any for this channel) and waits for the software to process all of
-the packets on this channel. This is indicated by an update of SDP and SHP
-registers to newer values which are now equal to the HDP and HHP registers. The
-stop completes only once no address request of the channel is queued or waiting
-in the header manager, and only on a comparison of the pointers that already
-reflects their last writes. This signifies the successful stop sequence and the
-controller indicates this by setting the Status register of the stopped channel
-to ``0b0``. The stopped channel does not forward any incoming data and drops them
-(however, every other enabled channel can still send its data to the host
-memory).
+(if there is any for this channel), sends HDP and HHP to the update buffer and
+waits for the software to process all of the packets on this channel. This is
+indicated by an update of SDP and SHP registers to newer values which are now
+equal to the HDP and HHP registers. The stop completes only once no address
+request of the channel is queued or waiting in the header manager, and only on a
+comparison of the pointers that already reflects their last writes; if HDP or HHP
+moved after they were sent, they are sent again at once. This signifies the
+successful stop sequence and the controller indicates this by setting the Status
+register of the stopped channel to ``0b0``. The stopped channel does not forward
+any incoming data and drops them (however, every other enabled channel can still
+send its data to the host memory).
 
 .. NOTE:: Although many channels can be deactivated at once from the software,
    the controller deactivates them sequentially. This also applies to the
