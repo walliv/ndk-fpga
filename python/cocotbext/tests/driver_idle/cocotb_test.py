@@ -574,6 +574,7 @@ async def run_mfb_send_test(dut):
     rng = random.Random(random.getrandbits(64))
     cocotb.start_soon(apply_backpressure(dut.RX_MFB_DST_RDY, dut.CLK, BackpressureConfig(1, 4, 0.5), rng))
     drv = MFBDriver(dut, "RX_MFB", dut.CLK, generics_prefix="MFB")
+    assert drv.log.name == "cocotb.MFBDriver.RX_MFB"
     eofs = [0]
     cocotb.start_soon(count_eofs(dut, eofs))
 

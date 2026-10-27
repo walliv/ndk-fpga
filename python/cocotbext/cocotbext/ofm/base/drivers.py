@@ -5,6 +5,7 @@
 #            Ondřej Schwarz <ondrejschwarz@cesnet.cz>
 #            Vladislav Valek <vladislav.valek@stud.uni-heidelberg.de>
 
+import logging
 from typing import Optional
 from copy import copy
 
@@ -155,6 +156,7 @@ if cocotb.__version__ >= "2.0.0":
 
             self.clock     : LogicObject   = clock
             self.array_idx : Optional[int] = array_idx
+            self.log = logging.getLogger(f"cocotb.{type(self).__qualname__}.{name}")
 
             self._clk_re: RisingEdge = RisingEdge(clock)
             self._send_queue: Queue  = Queue()
