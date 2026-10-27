@@ -222,6 +222,37 @@ async def collect_sof_words(dut, words):
             words.append((int(dut.RX_MFB_DATA.value), int(dut.RX_MFB_SOF.value)))
 
 
+@cocotb.test()
+async def run_mfb_abort_test(dut):
+    """A send cancelled under backpressure leaves the rest of its frame in the driver; after abort() the bus is
+    parked and the next frame arrives whole, from its SOF on."""
+    await start(dut)
+    geo = mfb_geometry(dut)
+    word_bytes = geo.word_width // 8
+    rng = random.Random(random.getrandbits(64))
+    drv = MFBDriver(dut, "RX_MFB", dut.CLK, generics_prefix="MFB", idle_generator=IdleGenerator())
+    stalled = cocotb.start_soon(drv.send(MfbTransaction(data=rng.randbytes(4 * word_bytes))))
+    drv.append(MfbTransaction(data=rng.randbytes(word_bytes)))
+    await ClockCycles(dut.CLK, 4)
+    stalled.cancel()
+    drv.abort()
+    assert drv.pending == 0, f"{drv.pending} frame(s) pending after abort()"
+    await ReadOnly()
+    assert int(dut.RX_MFB_SRC_RDY.value) == 0, "abort() left SRC_RDY high"
+
+    await RisingEdge(dut.CLK)
+    dut.RX_MFB_DST_RDY.value = 1
+    words = []
+    cocotb.start_soon(collect_sof_words(dut, words))
+    frame = rng.randbytes(2 * word_bytes)
+    await drv.send(MfbTransaction(data=frame))
+    await ClockCycles(dut.CLK, 4)
+
+    expected = [(int.from_bytes(frame[:word_bytes], "little"), 1), (int.from_bytes(frame[word_bytes:], "little"), 0)]
+    assert words == expected, f"{len(words)} word(s) after abort(), first as (DATA, SOF): " \
+        f"{(hex(words[0][0]), words[0][1]) if words else None}"
+
+
 async def count_eofs(dut, eofs):
     """The count of accepted EOFs in eofs[0], sampled at ReadOnly before the edge that accepts them."""
     while True:

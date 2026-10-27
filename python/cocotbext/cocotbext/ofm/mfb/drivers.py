@@ -21,6 +21,10 @@ from cocotbext.ofm.mfb.protocol import MfbProtocol
 from cocotbext.ofm.mfb.transaction import MfbTransaction
 
 
+class _Aborted(Exception):
+    """Unwinds the driving loop after abort() has dropped the word and the frame it was working on."""
+
+
 class MFBDriver(ModularBusDriver):
     """Driver of an MFB bus built on the signals of an :class:`MfbProtocol`.
 
@@ -87,6 +91,23 @@ class MFBDriver(ModularBusDriver):
         self.append(transaction, event=accepted)
         await accepted.wait()
 
+    def abort(self):
+        """Drop the queued frames and the one being sent and park the bus, e.g. for a DUT reset mid-frame. A send()
+        awaiting a dropped frame never returns, so its task is to be cancelled."""
+        self._queue.clear()
+        self._waiters.clear()
+        self._appended = self._frame_cnt
+        self._cursor = 0
+        self._run = None
+        self._clear_word()
+        self._epoch += 1
+
+        self._last.clear()
+        self._write_word(0)
+
+        if self._sleeping:
+            self._wake.set()
+
     def _init_state(self):
         self.state: MFBDriver.State = MFBDriver.State()
 
@@ -110,6 +131,7 @@ class MFBDriver(ModularBusDriver):
         self._wake     : Event = Event()
         self._sleeping : bool  = False
         self._period   : int   = 0
+        self._epoch    : int   = 0
         self._cursor   : int   = 0
         self._appended : int   = 0
         # (frame count at which it is accepted, frame, callback, event) of each frame someone waits for
@@ -221,7 +243,7 @@ class MFBDriver(ModularBusDriver):
             self._release()
 
     def _release(self):
-        """Wake the senders of the accepted frames."""
+        """Wake the senders of the accepted frames; raises _Aborted if one of their callbacks called abort()."""
         waiters = self._waiters
 
         while waiters and waiters[0][0] <= self._frame_cnt:
@@ -231,14 +253,20 @@ class MFBDriver(ModularBusDriver):
             if callback is not None:
                 callback(transaction)
 
+        if self._epoch != self._loop_epoch:
+            raise _Aborted()
+
     async def _idle_word(self):
         """One clock of SRC_RDY low, whatever DST_RDY is."""
         self._write_word(0)
         await self._edge()
 
     async def _edge(self):
-        """Wait for the next rising edge."""
+        """Wait for the next rising edge; raises _Aborted if abort() was called meanwhile."""
         await self._clk_re
+
+        if self._epoch != self._loop_epoch:
+            raise _Aborted()
 
     async def _close_word(self):
         """End the staged word: send it if it holds data, otherwise spend its clock idle."""
@@ -263,6 +291,9 @@ class MFBDriver(ModularBusDriver):
         await self._wake.wait()
         self._sleeping = False
 
+        if self._epoch != self._loop_epoch:
+            raise _Aborted()
+
         await self._edge()
 
         if self._period:
@@ -271,6 +302,15 @@ class MFBDriver(ModularBusDriver):
                 self._idle_gen.put(IdleTransaction(), items=words * self._word_items, end=True)
 
     async def _main_loop(self):
+        while True:
+            self._loop_epoch = self._epoch
+
+            try:
+                await self._drive()
+            except _Aborted:
+                pass
+
+    async def _drive(self):
         queue = self._queue
 
         while True:
