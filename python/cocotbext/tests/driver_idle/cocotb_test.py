@@ -12,6 +12,7 @@ import random
 import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import ClockCycles, Event, ReadOnly, RisingEdge
+from cocotb.types import LogicArray
 
 from cocotbext.ofm.base.generators import IdleGenerator, OnOffIdleGenerator
 from cocotbext.ofm.base.transaction import IdleTransactionFactory
@@ -195,6 +196,55 @@ async def run_mfb_frame_gap_blocks_test(dut):
         f"{next(((k, b, e) for k, (b, e) in enumerate(zip(blocks, expected)) if b != e), None)}"
 
 
+async def collect_words(dut, words):
+    """Every accepted MFB word as (DATA, BE), from the word on the bus in the timestep it is started in."""
+    while True:
+        await ReadOnly()
+        if int(dut.RX_MFB_SRC_RDY.value) and int(dut.RX_MFB_DST_RDY.value):
+            words.append((int(dut.RX_MFB_DATA.value), int(dut.RX_MFB_BE.value)))
+        await RisingEdge(dut.CLK)
+
+
+@cocotb.test()
+async def run_mfb_byte_enable_test(dut):
+    """BE follows the frame's be, given as an int or a LogicArray, enables every payload byte without it and no byte
+    outside a frame."""
+    await start(dut)
+    geo = mfb_geometry(dut)
+    word_bytes = geo.word_width // 8
+    dut.RX_MFB_DST_RDY.value = 1
+    rng = random.Random(random.getrandbits(64))
+    drv = MFBDriver(dut, "RX_MFB", dut.CLK, generics_prefix="MFB", idle_generator=IdleGenerator())
+    words = []
+    cocotb.start_soon(collect_words(dut, words))
+
+    cases = []
+    for be_form in (int, LogicArray, None):
+        data = rng.randbytes(2 * word_bytes)
+        be = rng.getrandbits(2 * word_bytes)
+        trans = MfbTransaction(data=data)
+        if be_form is not None:
+            trans.be = be if be_form is int else LogicArray.from_unsigned(be, 2 * word_bytes)
+        else:
+            be = (1 << (2 * word_bytes)) - 1
+        cases.append((trans, 2, int.from_bytes(data, "little"), be))
+    short = rng.randbytes(12)
+    cases.append((MfbTransaction(data=short), 1, int.from_bytes(short, "little"), (1 << 12) - 1))
+    for trans, _, _, _ in cases:
+        await drv.send(trans)
+    await ClockCycles(dut.CLK, 4)
+
+    expected = []
+    for _, n_words, data, be_value in cases:
+        for w in range(n_words):
+            expected.append(((data >> (w * word_bytes * 8)) & ((1 << (word_bytes * 8)) - 1),
+                             (be_value >> (w * word_bytes)) & ((1 << word_bytes) - 1)))
+    assert words == expected, f"{len(words)} words sent, expected {len(expected)}; first difference at " \
+        f"{next((k for k, (a, b) in enumerate(zip(words, expected)) if a != b), min(len(words), len(expected)))}"
+    await ReadOnly()
+    assert int(dut.RX_MFB_BE.value) == 0, "BE left set on the parked bus"
+
+
 @cocotb.test()
 async def run_mvb_idle_words_test(dut):
     """Words of MVB_ITEMS items; the idle generator puts the scripted idle words before each word's first item."""
@@ -214,12 +264,12 @@ async def run_mvb_idle_words_test(dut):
 
 
 async def collect_sof_words(dut, words):
-    """Every accepted MFB word as (DATA, SOF)."""
+    """Every accepted MFB word as (DATA, SOF), from the word on the bus in the timestep it is started in."""
     while True:
-        await RisingEdge(dut.CLK)
         await ReadOnly()
         if int(dut.RX_MFB_SRC_RDY.value) and int(dut.RX_MFB_DST_RDY.value):
             words.append((int(dut.RX_MFB_DATA.value), int(dut.RX_MFB_SOF.value)))
+        await RisingEdge(dut.CLK)
 
 
 @cocotb.test()

@@ -33,6 +33,9 @@ class MFBDriver(ModularBusDriver):
 
     An idle generator with frame_gaps set, e.g. OnOffIdleGenerator, counts blocks: its gap before a frame leaves blocks
     empty, inside a frame it is asked before each later word for whole idle words. Others put idle transactions first.
+
+    BE, where the bus has it, enables the bytes in the frame's `be`, an int or a LogicArray with a bit per payload byte,
+    or every payload byte without it; bytes outside a frame are disabled.
     """
 
     bus: MfbProtocol
@@ -155,7 +158,7 @@ class MFBDriver(ModularBusDriver):
         self._word_signals = []
 
         for name, descriptor in bus.signals.items():
-            if name == "DST_RDY":
+            if name in ("DST_RDY", "BE"):
                 continue
 
             self._write[name] = descriptor.writer(bus)
@@ -169,6 +172,11 @@ class MFBDriver(ModularBusDriver):
                 self._word_signals.append((name, put_with, "X" * len(descriptor.target(bus))))
 
         self._region_names = tuple(s[0] for s in self._region_signals)
+
+        # a BE of another width, e.g. the first and last byte enables of PCIe, is not this one and is left alone
+        self._has_be = "BE" in bus.signals and len(bus.signals["BE"].target(bus)) == self._word_bytes
+        if self._has_be:
+            self._write["BE"] = bus.signals["BE"].writer(bus)
         self._clear_word()
 
     def _reader(self, name):
@@ -188,6 +196,7 @@ class MFBDriver(ModularBusDriver):
         """Empty the staged word; the cursor is kept."""
         regions = self._regions
         self._w_data     : int  = 0
+        self._w_be       : int  = 0
         self._w_sof      : int  = 0
         self._w_eof      : int  = 0
         self._w_items    : int  = 0
@@ -221,6 +230,9 @@ class MFBDriver(ModularBusDriver):
 
         for name, _, x_value in self._word_signals:
             put(name, self._w_words.get(name, x_value))
+
+        if self._has_be:
+            put("BE", self._w_be)
 
         put("SRC_RDY", src_rdy)
 
@@ -416,6 +428,13 @@ class MFBDriver(ModularBusDriver):
                     await self._send_word()
                     cur = 0
 
+        if self._has_be:
+            be = getattr(transaction, "be", None)
+            if be is None:
+                be = (1 << length) - 1
+            elif isinstance(be, LogicArray):
+                be = be.to_unsigned()
+
         region = cur // region_bytes
         self._w_sof |= 1 << region
         if "SOF_POS" in self._w_regions:
@@ -428,6 +447,8 @@ class MFBDriver(ModularBusDriver):
             self._w_data |= int.from_bytes(data[pos:pos + take], byteorder="little") << (cur * 8)
             self._w_items += take // item_bytes
             self._w_has_data = True
+            if self._has_be:
+                self._w_be |= (be >> pos & (1 << take) - 1) << cur
             for name, _, _ in self._word_signals:
                 value = getattr(transaction, name.lower(), None)
                 if value is not None:

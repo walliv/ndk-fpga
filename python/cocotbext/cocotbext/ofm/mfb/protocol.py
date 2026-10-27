@@ -109,3 +109,6 @@ class MfbProtocol(BusProtocol):
     @META.write(put_with="SOF")
     def META(self, signal, value: LogicArray2D | LogicArray | str | int) -> None:
         signal.value = _serialized(value)
+
+    # one bit per byte of DATA, set where the byte is valid
+    BE      : LogicArray = optional_signal()
