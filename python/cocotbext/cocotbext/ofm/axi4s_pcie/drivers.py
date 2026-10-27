@@ -118,6 +118,7 @@ class Axi4sPcieDriverMaster(BusDriver):
         remaining_data = data_bytes[first_word_data_bytes:]
         if len(remaining_data) == 0:
             cq_user.eop0 = 1
+            cq_user.eop_ptr0 = first_word_dwords - 1
 
         word = {
             "DATA": tdata & bitmask(bus_width),
@@ -141,8 +142,10 @@ class Axi4sPcieDriverMaster(BusDriver):
             # Set EOP if this is the last word
             if len(remaining_bytes) <= word_data_bytes:
                 cq_user.eop0 = 1
+                cq_user.eop_ptr0 = word_dwords - 1
             else:
                 cq_user.eop0 = 0
+                cq_user.eop_ptr0 = 0
 
             word = {
                 "DATA": tdata & bitmask(bus_width),
