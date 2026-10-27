@@ -56,8 +56,6 @@ architecture BYTE of TX_DMA_PCIE_TRANS_BUFFER_IMPL is
     constant BUFFER_DEPTH    : natural := trbuf_buffer_depth_f(POINTER_WIDTH, MFB_LENGTH);
     -- Number of registers between the barrel shifters and the BRAMs
     constant BRAM_REG_NUM    : natural := 2;
-    -- Number of input registers
-    constant INP_REG_NUM     : natural := 1;
     constant IS_INTEL_DEV    : boolean := (DEVICE = "STRATIX10" or DEVICE = "AGILEX");
     -- a maximum depth of a BRAM block (in 1B items) depends on a vendor
     constant MAX_BRAM_DEPTH  : natural := tsel(IS_INTEL_DEV, TRBUF_DEPTH_M20K, TRBUF_DEPTH_BRAM);

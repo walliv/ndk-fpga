@@ -31,7 +31,8 @@ entity TX_DMA_PCIE_TRANS_BUFFER_TB_WRAPPER is
 
         RAM_TYPE         : string  := "AUTO";
         MEM_PARTITIONING : boolean := TRUE;
-        READ_LATENCY     : natural := 1
+        READ_LATENCY     : natural := 1;
+        INP_REG_NUM      : natural := 1
     );
     port (
         CLK   : in std_logic;
@@ -85,7 +86,8 @@ begin
 
         RAM_TYPE         => RAM_TYPE,
         MEM_PARTITIONING => MEM_PARTITIONING,
-        READ_LATENCY     => READ_LATENCY
+        READ_LATENCY     => READ_LATENCY,
+        INP_REG_NUM      => INP_REG_NUM
     )
     port map (
         CLK   => CLK,
