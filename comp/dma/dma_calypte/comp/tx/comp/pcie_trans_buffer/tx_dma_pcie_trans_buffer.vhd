@@ -258,11 +258,13 @@ begin
     -- Assertions for verification
     -- =============================================================================================
 
+    -- psl default clock is rising_edge(CLK);
+
     captured_dma_hdr_assert_g : for it in 0 to (MFB_REGIONS -1) generate
     begin
         -- psl assert_captured_dma_header :
         --      assert always ((not (PCIE_MFB_SRC_RDY = '1' or PCIE_MFB_META(it)(META_BE) /= (META_BE_W -1 downto 0 => '0'))) or
-        --              (PCIE_MFB_META(it)(META_IS_DMA_HDR) = "0")) abort(RESET) @rising_edge(CLK)
+        --              (PCIE_MFB_META(it)(META_IS_DMA_HDR) = "0")) abort(RESET)
         --      report "TX_DMA_PCIE_TRANS_BUFFER: captured DMA header on a region. Danger of data overwrite!";
     end generate;
 
@@ -818,13 +820,13 @@ begin
         -- Both regions of one word address the same byte of the same memory array. The BRAM keeps
         -- only one of the two values and the data of the other write are lost.
         -- psl assert_wr_addr_collision :
-        --      assert always (wr_addr_collision = '0') abort (RESET) @rising_edge(CLK)
+        --      assert always (wr_addr_collision = '0') abort (RESET)
         --      report "TX_DMA_PCIE_TRANS_BUFFER: Two regions write to one address, data are lost!";
 
         -- A read and a write use one BRAM port in the same clock cycle. The read enable is masked
         -- by the write in rd_en_ch_g, so this can only appear when that priority changes.
         -- psl assert_rdwr_collision :
-        --      assert always (rdwr_collision = '0') abort (RESET) @rising_edge(CLK)
+        --      assert always (rdwr_collision = '0') abort (RESET)
         --      report "TX_DMA_PCIE_TRANS_BUFFER: A read and a write use one BRAM port at once!";
     end generate;
 
