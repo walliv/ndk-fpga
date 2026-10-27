@@ -14,10 +14,12 @@ import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import ClockCycles, Event, ReadOnly, RisingEdge
 from cocotb.types import LogicArray
+from cocotb.utils import get_sim_time
 
 from cocotbext.ofm.base.generators import IdleGenerator, OnOffIdleGenerator
 from cocotbext.ofm.base.transaction import IdleTransactionFactory
 from cocotbext.ofm.mfb.drivers import MFBDriver
+from cocotbext.ofm.mfb.monitors import MFBMonitor
 from cocotbext.ofm.mfb.protocol import MfbParams
 from cocotbext.ofm.mfb.transaction import MfbTransaction, MfbWord
 from cocotbext.ofm.mvb.drivers import MVBDriver
@@ -437,6 +439,35 @@ async def run_mfb_word_test(dut):
     assert words == expected, f"words as (DATA, SOF, EOF, SOF_POS, EOF_POS, BE): {words}"
     assert drv.frame_cnt == 2
     assert drv.item_cnt == 3 + (geo.regions * region_items - geo.block_size) + (geo.regions - 1) * region_items + 6
+
+
+@cocotb.test()
+async def run_mfb_monitor_read_only_test(dut):
+    """A monitor sampling at ReadOnly receives the frames of one sampling at the edge a clock earlier, as the word an
+    edge accepts settles after the edge before; started with the driver, it reads the word the first edge takes."""
+    await start(dut)
+    geo = mfb_geometry(dut)
+    rng = random.Random(random.getrandbits(64))
+    dut.RX_MFB_DST_RDY.value = 1
+    drv = MFBDriver(dut, "RX_MFB", dut.CLK, generics_prefix="MFB", idle_generator=IdleGenerator())
+    received = {}
+    for read_only in (False, True):
+        mon = MFBMonitor(dut, "RX_MFB", dut.CLK, mfb_params=asdict(geo), read_only=read_only)
+        received[read_only] = []
+        mon.add_callback(lambda tr, got=received[read_only]: got.append((get_sim_time("ns"), tr)))
+
+    frames = [rng.randbytes(rng.randint(1, 3 * geo.word_width // 8)) for _ in range(50)]
+    for frame in frames:
+        drv.append(MfbTransaction(data=frame))
+    await RisingEdge(dut.CLK)
+    cocotb.start_soon(apply_backpressure(dut.RX_MFB_DST_RDY, dut.CLK, BackpressureConfig(1, 4, 0.5), rng))
+    while drv.pending:
+        await ClockCycles(dut.CLK, 10)
+    await ClockCycles(dut.CLK, 2)
+
+    assert [tr for _, tr in received[False]] == frames
+    assert [tr for _, tr in received[True]] == frames
+    assert all(edge - read_only == CLK_NS for (edge, _), (read_only, _) in zip(received[False], received[True]))
 
 
 @cocotb.test()

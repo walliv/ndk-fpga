@@ -5,7 +5,7 @@
 #            Ondrej Schwarz <ondrejschwarz@cesnet.cz>
 #            Vladislav Valek <vladislav.valek@stud.uni-heidelberg.de>
 
-from cocotb.triggers import RisingEdge
+from cocotb.triggers import ReadOnly, RisingEdge
 from cocotbext.ofm.base.monitors import BusMonitor
 from cocotbext.ofm.mfb.utils import get_mfb_params, region_frame_event
 from cocotbext.ofm.mfb.transaction import MfbTransaction
@@ -32,6 +32,10 @@ class MFBMonitor(BusMonitor):
         start: Whether the monitor samples the bus in a task of its own. With False, the bench calls
                `monitor_cycle()` once per clock instead, e.g. from one task that samples many monitors.
 
+        read_only: Sample at ReadOnly after each edge and at start; callbacks must not write signals then. Only where
+                   a bus signal can change in the edge's timestep before the edge read: a clock deltas behind the bus
+                   registers, a write outside the scheduler.
+
     An optional signal is captured into the transaction field of its name where the transaction has one.
     """
 
@@ -39,11 +43,12 @@ class MFBMonitor(BusMonitor):
     _optional_signals = ["meta"]
 
     def __init__(self, entity, name, clock, array_idx=None, mfb_params=None, trans_type: MfbTransaction | bytes = bytes,
-                 start: bool = True, meta_vld_with: str | None = None):
+                 start: bool = True, meta_vld_with: str | None = None, read_only: bool = False):
         super().__init__(entity, name, clock, array_idx=array_idx)
         if not start:
             self._thread.cancel()
             self._thread = None
+        self._read_only = read_only
 
         self._regions, self._region_size, self._block_size, self._item_width, self._meta_width, self._os_vld_with = get_mfb_params(
             self.bus, mfb_params
@@ -167,6 +172,14 @@ class MFBMonitor(BusMonitor):
     async def _monitor_recv(self):
         clk_re = RisingEdge(self.clock)
         self._in_frame = False
+
+        if self._read_only:
+            # the first sample is the word on the bus when the monitor starts, which the next edge transfers
+            read_only = ReadOnly()
+            while True:
+                await read_only
+                self.monitor_cycle()
+                await clk_re
 
         while True:
             await clk_re

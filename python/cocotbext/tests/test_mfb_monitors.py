@@ -11,6 +11,7 @@ import cocotb
 import pytest
 from cocotb.types import LogicArray
 
+from cocotbext.ofm.mfb import monitors
 from cocotbext.ofm.mfb.monitors import MFBMonitor
 from cocotbext.ofm.mfb.transaction import MfbTransaction, MfbTransactionWithMeta
 from stubs import mfb_widths
@@ -144,3 +145,35 @@ def test_bytes_and_other_optional_signals():
     word(entity, mon, data, sof="01", eof="01", sof_pos=fields(w=2, r0=0), eof_pos=fields(w=3, r0=3),
          meta=fields(w=4, r0=2), id=fields(w=3, r0=5))
     assert [(bytes(f.data), f.meta, f.id) for f in frames] == [(data, 2, 5)]
+
+
+class Trigger:
+    """A stand-in trigger, whose await hands its name to the test that steps the coroutine."""
+
+    def __init__(self, name):
+        self.name = name
+
+    def __await__(self):
+        yield self.name
+
+
+def sampling_order(monkeypatch, steps=4, **kwargs):
+    """The triggers the monitor's task awaits in its first `steps` steps and the samples it takes between them."""
+    monkeypatch.setattr(monitors, "RisingEdge", lambda clock: Trigger("edge"))
+    monkeypatch.setattr(monitors, "ReadOnly", lambda: Trigger("read_only"))
+    _, mon, _ = make(**kwargs)
+    order = []
+    mon.monitor_cycle = lambda: order.append("sample")
+    task = mon._monitor_recv()
+    for _ in range(steps):
+        order.append(task.send(None))
+    task.close()
+    return order
+
+
+def test_samples_at_the_edge_by_default(monkeypatch):
+    assert sampling_order(monkeypatch) == ["edge", "sample", "edge", "sample", "edge", "sample", "edge"]
+
+
+def test_samples_at_read_only_with_read_only(monkeypatch):
+    assert sampling_order(monkeypatch, read_only=True) == ["read_only", "sample", "edge", "read_only", "sample", "edge"]
