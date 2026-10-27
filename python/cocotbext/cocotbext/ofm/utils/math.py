@@ -33,3 +33,10 @@ def bitmask(bits):
     Returns a bitmask as an integer of a specified length.
     """
     return (2**bits) - 1
+
+
+def log2ceil(n):
+    """
+    Bits needed to index n items, 0 for a single item (log2 of math_pack.vhd).
+    """
+    return (n - 1).bit_length()
