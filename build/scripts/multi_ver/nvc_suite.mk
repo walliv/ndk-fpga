@@ -4,9 +4,11 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-# A bench sets SUITE_FILE (its pytest file) and SUITE_PREFIX (of its <PREFIX>_* knobs), then includes this file after
-# its default goal and before build/Makefile.
+# A bench includes this file after its default goal and before build/Makefile. SUITE_FILE is its pytest file and
+# SUITE_PREFIX names its <PREFIX>_* knobs; the defaults run the combinations of ver_settings.py.
 NVC_SUITE_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
+SUITE_FILE ?= $(NVC_SUITE_DIR)/ver_settings_suite.py
+SUITE_PREFIX ?= SUITE
 
 # Always `$(PYTHON) -m pytest`: a bare `pytest` may resolve to an interpreter without xdist or cocotb.
 PYTHON ?= python3
@@ -21,8 +23,9 @@ WALL_CAP_S ?= 600
 # Only the suite's recipes get these, so that the other targets of the bench, e.g. the Questa run, keep their
 # environment. The cocotbext and ofm of this repository go first, ahead of any editable install pointing elsewhere.
 SUITE_ENV = PYTHONPATH=$(OFM_PYTHONPATH):$(CURDIR):$(NVC_SUITE_DIR):$(PYTHONPATH) \
-	SUITE_REPEAT=$(SUITE_REPEAT) WALL_CAP_S=$(WALL_CAP_S) $(SUITE_PREFIX)_SUMMARY=$(SHARD_ROOT)/summary.jsonl \
-	WAVES=$(WAVES) NVC_EXIT_SEVERITY=$(NVC_EXIT_SEVERITY) RANDOM_SEED=$(RANDOM_SEED)
+	SUITE_TOP=$(TOP_LEVEL_ENT) SUITE_PREFIX=$(SUITE_PREFIX) SUITE_REPEAT=$(SUITE_REPEAT) WALL_CAP_S=$(WALL_CAP_S) \
+	$(SUITE_PREFIX)_SUMMARY=$(SHARD_ROOT)/summary.jsonl WAVES=$(WAVES) NVC_EXIT_SEVERITY=$(NVC_EXIT_SEVERITY) \
+	RANDOM_SEED=$(RANDOM_SEED)
 
 CLEAN_DEPENDS += clean_suite
 
