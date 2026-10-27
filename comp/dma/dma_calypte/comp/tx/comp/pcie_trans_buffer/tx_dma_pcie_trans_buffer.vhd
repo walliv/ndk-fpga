@@ -14,7 +14,7 @@ use work.type_pack.all;
 use work.tx_dma_pcie_trans_buffer_pkg.all;
 
 -- Buffers the PCIe writes of every channel at byte alignment in a per-byte BRAM array. On AMD
--- devices, URAM selects two even/odd row banks of XPM memories instead.
+-- devices, URAM or flat addressing select two even/odd row banks of XPM memories instead.
 entity TX_DMA_PCIE_TRANS_BUFFER is
     generic (
         DEVICE : string := "ULTRASCALE";
@@ -41,7 +41,12 @@ entity TX_DMA_PCIE_TRANS_BUFFER is
 
         -- Memory primitive: AUTO resolves to URAM for 2 regions on UltraScale+/Versal when a bank
         -- holds at least 2048 rows, else BRAM. URAM needs an AMD DEVICE.
-        RAM_TYPE : string := "AUTO"
+        RAM_TYPE : string := "AUTO";
+
+        -- TRUE (default): each channel owns a 2**POINTER_WIDTH-byte region. FALSE: one flat
+        -- CHANNELS*2**POINTER_WIDTH-byte space addressed only by the address field; RD_ADDR_*
+        -- widens by log2(CHANNELS) bits.
+        MEM_PARTITIONING : boolean := TRUE
     );
     port (
         CLK   : in std_logic;
@@ -58,14 +63,14 @@ entity TX_DMA_PCIE_TRANS_BUFFER is
         -- Output reading interface for port A of the TDP or the single read port of the SDP
         RD_CHAN_A     : in  std_logic_vector(log2(CHANNELS) -1 downto 0);
         RD_DATA_A     : out std_logic_vector(MFB_REGIONS*MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH-1 downto 0);
-        RD_ADDR_A     : in  std_logic_vector(POINTER_WIDTH -1 downto 0);
+        RD_ADDR_A     : in  std_logic_vector(POINTER_WIDTH + tsel(MEM_PARTITIONING, 0, log2(CHANNELS)) -1 downto 0);
         RD_EN_A       : in  std_logic;
         RD_DATA_VLD_A : out std_logic;
 
         -- Output reading interface for port B. Unused if SPLIT_READ_PORTS=FALSE or MFB configuration is (1,1,8,32).
         RD_CHAN_B     : in  std_logic_vector(log2(CHANNELS) -1 downto 0);
         RD_DATA_B     : out std_logic_vector(MFB_REGIONS*MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH-1 downto 0) := (others => '0');
-        RD_ADDR_B     : in  std_logic_vector(POINTER_WIDTH -1 downto 0);
+        RD_ADDR_B     : in  std_logic_vector(POINTER_WIDTH + tsel(MEM_PARTITIONING, 0, log2(CHANNELS)) -1 downto 0);
         RD_EN_B       : in  std_logic;
         RD_DATA_VLD_B : out std_logic := '0'
     );
@@ -84,14 +89,15 @@ architecture FULL of TX_DMA_PCIE_TRANS_BUFFER is
         (RAM_TYPE = "URAM") or (RAM_TYPE = "AUTO" and IS_XILINX_URAM_DEV and MFB_REGIONS = 2 and BANK_ITEMS_URAM_C >= 2048),
         "URAM", "BRAM");
     -- The banked buffer only where the per-byte one cannot serve the generics.
-    constant USE_BANKED        : boolean := (not IS_INTEL_DEV) and (RES_RAM_TYPE = "URAM");
+    constant USE_BANKED        : boolean := (not IS_INTEL_DEV) and
+        (RES_RAM_TYPE = "URAM" or (not MEM_PARTITIONING));
 
 begin
 
     impl_g : if (not USE_BANKED) generate
 
-        assert (RAM_TYPE = "AUTO" or RAM_TYPE = "BRAM")
-            report "TX_DMA_PCIE_TRANS_BUFFER: on an Intel DEVICE, RAM_TYPE must be AUTO or BRAM!"
+        assert ((RAM_TYPE = "AUTO" or RAM_TYPE = "BRAM") and MEM_PARTITIONING)
+            report "TX_DMA_PCIE_TRANS_BUFFER: on an Intel DEVICE, RAM_TYPE must be AUTO or BRAM and MEM_PARTITIONING must keep its default!"
             severity FAILURE;
 
         trans_buffer_i : entity work.TX_DMA_PCIE_TRANS_BUFFER_IMPL(BYTE)
@@ -109,7 +115,8 @@ begin
             SPLIT_READ_PORTS       => SPLIT_READ_PORTS,
             READ_BARREL_SHIFTER_EN => READ_BARREL_SHIFTER_EN,
 
-            RAM_TYPE => RES_RAM_TYPE
+            RAM_TYPE         => RES_RAM_TYPE,
+            MEM_PARTITIONING => MEM_PARTITIONING
         )
         port map (
             CLK   => CLK,
@@ -150,7 +157,8 @@ begin
             SPLIT_READ_PORTS       => SPLIT_READ_PORTS,
             READ_BARREL_SHIFTER_EN => READ_BARREL_SHIFTER_EN,
 
-            RAM_TYPE => RES_RAM_TYPE
+            RAM_TYPE         => RES_RAM_TYPE,
+            MEM_PARTITIONING => MEM_PARTITIONING
         )
         port map (
             CLK   => CLK,
