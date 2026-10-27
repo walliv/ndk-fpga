@@ -367,6 +367,7 @@ architecture FULL of PCIE_CTRL is
     signal pcie_cq_mfb_meta_arr   : slv_array_t(CQ_MFB_REGIONS-1 downto 0)(PCIE_CQ_META_WIDTH-1 downto 0);
     signal pcie_cq_mfb_data_arr   : slv_array_t(CQ_MFB_REGIONS-1 downto 0)(CQ_MFB_REGION_SIZE*CQ_MFB_BLOCK_SIZE*CQ_MFB_ITEM_WIDTH-1 downto 0);
     signal pcie_cq_mfb_bar        : slv_array_t(CQ_MFB_REGIONS-1 downto 0)(PCIE_META_BAR_W-1 downto 0);
+    signal pcie_cq_mfb_func_id    : slv_array_t(CQ_MFB_REGIONS-1 downto 0)(8-1 downto 0);
     signal pcie_cq_mfb_sel        : std_logic_vector(CQ_MFB_REGIONS-1 downto 0);
 
     signal pcie_rq_mfb_meta_arr   : slv_array_t(RQ_MFB_REGIONS-1 downto 0)(PCIE_RQ_META_WIDTH-1 downto 0);
@@ -613,8 +614,8 @@ begin
     -- =========================================================================
 
     dma_bar_g: if DMA_BAR_ENABLE generate
-        -- first 64b BAR (BAR0) is for MI access (MTC)
-        -- second 64b BAR (BAR2) is for special DMA access (DMA Calypte)
+        -- BAR0 of function 0 is for MI access (MTC)
+        -- all other BARs and functions (e.g. BAR2 for DMA Calypte) go to the DMA-BAR port
 
         pcie_cq_mfb_meta_arr <= slv_array_deser(PCIE_CQ_MFB_META,CQ_MFB_REGIONS);
         pcie_cq_mfb_data_arr <= slv_array_deser(PCIE_CQ_MFB_DATA,CQ_MFB_REGIONS);
@@ -622,11 +623,14 @@ begin
         cq_mfb_sel_g: for i in 0 to CQ_MFB_REGIONS-1 generate
             bar_index_g: if (DEVICE = "ULTRASCALE" or DEVICE = "VERSAL") generate
                 -- BAR index is in AXI header
-                pcie_cq_mfb_bar(i) <= pcie_cq_mfb_data_arr(i)(114 downto 112);
+                pcie_cq_mfb_bar(i)     <= pcie_cq_mfb_data_arr(i)(114 downto 112);
+                pcie_cq_mfb_func_id(i) <= pcie_cq_mfb_data_arr(i)(111 downto 104);
             else generate -- Intel FPGA (R-Tile, P-Tile)
-                pcie_cq_mfb_bar(i) <= pcie_cq_mfb_meta_arr(i)(PCIE_CQ_META_BAR);
+                pcie_cq_mfb_bar(i)     <= pcie_cq_mfb_meta_arr(i)(PCIE_CQ_META_BAR);
+                -- The Intel CQ meta carries no target function number
+                pcie_cq_mfb_func_id(i) <= (others => '0');
             end generate;
-            pcie_cq_mfb_sel(i) <= '1' when (unsigned(pcie_cq_mfb_bar(i)) = 2) else '0';
+            pcie_cq_mfb_sel(i) <= '0' when (unsigned(pcie_cq_mfb_bar(i)) = 0 and unsigned(pcie_cq_mfb_func_id(i)) = 0) else '1';
         end generate;
 
         cq_splitter_i : entity work.MFB_SPLITTER_SIMPLE

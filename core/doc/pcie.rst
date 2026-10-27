@@ -43,7 +43,7 @@ A list of the supported PCIe Hard IPs is below. You can select the target archit
 The PCIe Control unit (PCIE_CTRL)
 *********************************
 
-The PCIe Control unit always includes the :ref:`MI Transaction Controller (MTC) <mtc>`, which transforms the associated PCIe memory transactions into read or write requests on the MI bus. In the case of a read request, the MI response is also transformed back into a PCIe completition transaction and sent back to the host PC. PCIe transactions from the BAR0 address space are allocated to the MTC module. If the NDK uses a DMA controller that requires its own BAR, the PCIe transactions from the DMA-BAR address space (BAR2) are routed directly to the DMA module. This functionality must be enabled via the ``DMA_BAR_ENABLE`` parameter.
+The PCIe Control unit always includes the :ref:`MI Transaction Controller (MTC) <mtc>`, which transforms the associated PCIe memory transactions into read or write requests on the MI bus. In the case of a read request, the MI response is also transformed back into a PCIe completition transaction and sent back to the host PC. PCIe transactions from the BAR0 address space of the first PCIe function are allocated to the MTC module. If the NDK uses a DMA controller that requires its own BAR, the PCIe transactions from all other BARs and PCIe functions (the DMA-BAR address space is BAR2) are routed directly to the DMA module. This functionality must be enabled via the ``DMA_BAR_ENABLE`` parameter.
 
 .. NOTE::
     We assume that 64-bit PCIe BARs are used, meaning that half of them are available at most (BAR0, BAR2, and BAR4). You can find more information in the PCIe specification.
