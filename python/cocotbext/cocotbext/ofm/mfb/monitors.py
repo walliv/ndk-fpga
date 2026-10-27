@@ -28,6 +28,8 @@ class MFBMonitor(BusMonitor):
 
         start: Whether the monitor samples the bus in a task of its own. With False, the bench calls
                `monitor_cycle()` once per clock instead, e.g. from one task that samples many monitors.
+
+    An optional signal is captured into the transaction field of its name where the transaction has one.
     """
 
     _signals = ["data", "sof_pos", "eof_pos", "sof", "eof", "src_rdy", "dst_rdy"]
@@ -139,7 +141,7 @@ class MFBMonitor(BusMonitor):
         if vld_with is not None and vld_with != self._os_vld_with:
             return
         for s in self._os:
-            if self._os_widths[s] > 0:
+            if self._os_widths[s] > 0 and hasattr(self._transaction, s):
                 setattr(self._transaction, s, self._field(self._os_data[s], r, self._os_widths[s]))
 
     def _recv_trans(self):

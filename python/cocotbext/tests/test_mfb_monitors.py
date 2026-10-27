@@ -12,7 +12,7 @@ import pytest
 from cocotb.types import LogicArray
 
 from cocotbext.ofm.mfb.monitors import MFBMonitor
-from cocotbext.ofm.mfb.transaction import MfbTransactionWithMeta
+from cocotbext.ofm.mfb.transaction import MfbTransaction, MfbTransactionWithMeta
 from stubs import mfb_widths
 
 # 2 regions of 4 blocks, each block holding 2 items of 8 bits; META of 4 bits and ID of 3 bits per region
@@ -113,6 +113,15 @@ def test_x_outside_the_fields_in_use_spares_the_frame():
          meta=fields(w=4, r0=3))
 
     assert [(bytes(f.data), f.meta) for f in frames] == [(data, 3)]
+
+
+def test_a_transaction_without_meta_ignores_it():
+    entity, mon, frames = make(trans_type=MfbTransaction)
+    data = bytes(range(4))
+    word(entity, mon, data, sof="01", eof="01", sof_pos=fields(w=2, r0=0), eof_pos=fields(w=3, r0=3))
+
+    assert [bytes(f.data) for f in frames] == [data]
+    assert not hasattr(frames[0], "meta")
 
 
 def test_bytes_and_other_optional_signals():
