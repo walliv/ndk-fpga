@@ -82,6 +82,11 @@ class MFBDriver(ModularBusDriver):
         """Frames appended and not yet accepted by the sink."""
         return self._appended - self._done
 
+    @property
+    def queued(self) -> int:
+        """Transactions appended that the driver has not started yet, e.g. for a source that keeps one in reserve."""
+        return len(self._queue)
+
     def append(self, transaction: MfbTransaction | IdleTransaction, callback=None, event: Event | None = None):
         """Queue a frame, an MfbTransaction or plain bytes or LogicArray, or an IdleTransaction for a gap of its length
         in bytes. Once the sink accepts the frame, `event` is set and `callback` is called with the frame."""

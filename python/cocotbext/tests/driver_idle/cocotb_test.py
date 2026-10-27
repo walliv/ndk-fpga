@@ -540,7 +540,7 @@ async def count_eofs(dut, eofs):
 @cocotb.test()
 async def run_mfb_send_test(dut):
     """send() returns once the sink has accepted the frame, whatever DST_RDY does, and the events given to append()
-    are set then; pending counts the frames not yet accepted."""
+    are set then; pending counts the frames not yet accepted and queued the ones not yet started."""
     await start(dut)
     geo = mfb_geometry(dut)
     rng = random.Random(random.getrandbits(64))
@@ -557,7 +557,9 @@ async def run_mfb_send_test(dut):
     events = [Event() for _ in range(20)]
     for ev in events:
         drv.append(MfbTransaction(data=rng.randbytes(rng.randint(1, 100))), event=ev)
-    assert drv.pending == len(events)
+    assert drv.pending == drv.queued == len(events)
+    await ClockCycles(dut.CLK, 2)
+    assert drv.queued < len(events), "the driver took up no frame"
     for k, ev in enumerate(events):
         await ev.wait()
         assert eofs[0] >= 41 + k, f"the event of frame {k} was set before the sink accepted it"
