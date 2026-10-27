@@ -829,10 +829,10 @@ begin
     ------------------------------------
 
     -- HDP register --------------------
-    -- Reset after DMA Channel Start
+    -- Reset on the DMA Channel start request, before the header manager accepts any packet of the channel
     -- Update by Header manager module
     reg_di   (R_HDP)(0) <= (others => '0');
-    reg_we   (R_HDP)(0) <= start_acked;
+    reg_we   (R_HDP)(0) <= START_REQ_VLD;
     reg_addra(R_HDP)(0) <= active_chan_reg;
 
     reg_di   (R_HDP)(1) <= std_logic_vector(resize_left(unsigned(HDP_WR_DATA),MI_WIDTH));
@@ -841,10 +841,10 @@ begin
     ------------------------------------
 
     -- HHP register --------------------
-    -- Reset after DMA Channel Start
+    -- Reset on the DMA Channel start request, before the header manager accepts any packet of the channel
     -- Update by Header Manager module
     reg_di   (R_HHP)(0) <= (others => '0');
-    reg_we   (R_HHP)(0) <= start_acked;
+    reg_we   (R_HHP)(0) <= START_REQ_VLD;
     reg_addra(R_HHP)(0) <= active_chan_reg;
 
     reg_di   (R_HHP)(1) <= std_logic_vector(resize_left(unsigned(HHP_WR_DATA),MI_WIDTH));
