@@ -567,7 +567,9 @@ begin
             -- Wait for the packet to be processed/dropped.
             when S_WAIT_FOR_PKT_END =>
 
-                if (MFB_EOF = "1" and MFB_SRC_RDY = '1' and MFB_DST_RDY = '1') then
+                -- The packet FSM leaves PROCESS/DISCARD only through that packet's EOF, so S_IDLE here means the EOF
+                -- passed in the cycle the request was taken; the next EOF may never come.
+                if ((MFB_EOF = "1" and MFB_SRC_RDY = '1' and MFB_DST_RDY = '1') or pkt_process_pst = S_IDLE) then
                     chan_state_change_nst <= S_IDLE;
 
                     if (is_start_req_pending_reg = '1') then
