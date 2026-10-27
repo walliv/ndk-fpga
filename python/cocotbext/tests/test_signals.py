@@ -9,7 +9,8 @@ from cocotb.types import LogicArray
 
 from cocotbext.ofm.utils.signals import (align_read_request, align_request, align_write_request,
                                          binstr_bit, binstr_resolvable, binstr_resolved, generic_bool,
-                                         get_signal_value_in_bytes, signal_binstr, signal_int)
+                                         get_signal_value_in_bytes, signal_binstr, signal_handshake,
+                                         signal_int)
 from stubs import StubSignal
 
 
@@ -22,6 +23,16 @@ def test_signal_is_read_as_the_bit_string_of_the_simulator():
     sig.binstr = "0010X101"
     with pytest.raises(ValueError):
         signal_int(sig)
+
+
+def test_handshake_needs_both_signals_at_1():
+    src, dst = StubSignal(1), StubSignal(1)
+    src.binstr = "1"
+    assert not signal_handshake(src, dst)
+    dst.binstr = "1"
+    assert signal_handshake(src, dst)
+    dst.binstr = "X"
+    assert not signal_handshake(src, dst)
 
 
 def test_bit_string_predicates():
