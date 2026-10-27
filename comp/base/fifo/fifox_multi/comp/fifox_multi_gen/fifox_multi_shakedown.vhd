@@ -85,6 +85,8 @@ architecture SHAKEDOWN of FIFOX_MULTI_GEN is
         return true;
     end function;
 
+    -- psl default clock is rising_edge(CLK);
+
 begin
 
     -- -------------------------------------------------------------------------
@@ -92,11 +94,11 @@ begin
     -- -------------------------------------------------------------------------
 
     -- psl assert_safe_read :
-    --      assert always (SAFE_READ_MODE=true or (RD and EMPTY) = (READ_PORTS-1 downto 0 => '0')) abort (RESET) @rising_edge(CLK)
+    --      assert always (SAFE_READ_MODE=true or (RD and EMPTY) = (READ_PORTS-1 downto 0 => '0')) abort (RESET)
     --      report "ERROR: FIFOX Multi: Non-safe Read Mode condition violated! Reading from port is forbidden when is EMPTY!";
 
     -- psl assert_read_condition :
-    --      assert always (rd_check(RD, EMPTY)) abort (RESET) @rising_edge(CLK)
+    --      assert always (rd_check(RD, EMPTY)) abort (RESET)
     --      report "ERROR: FIFOX Multi: Aligned read condition viloated! Reading from non-empty port which and dont read from lower nonempty port is forbidden!";
 
 
