@@ -12,6 +12,26 @@ proc get_ip_filename {ip_name {synth "QUARTUS"}} {
     }
 }
 
+# Key for an IP's output directory: every parameter its modification script can read, plus the
+# script itself. Two IPs or configurations never share a directory, so reusing one cannot hand back
+# another core or one customised for different generics.
+proc get_ip_dir_key {ip_params_l script_path} {
+    array set p $ip_params_l
+    # IP_BUILD_DIR is the value being keyed and IP_MODIFY_BASE moves with it, so including either
+    # would make the key depend on itself.
+    foreach k {IP_BUILD_DIR IP_MODIFY_BASE} { array unset p $k }
+    set acc ""
+    foreach k [lsort [array names p]] { append acc $k "=" $p($k) "|" }
+    if {[file exists $script_path]} {
+        set fh [open $script_path r]
+        append acc [read $fh]
+        close $fh
+    }
+    # Bare tclsh lacks tcllib's sha256 while Vivado's Tcl has it, so one build keyed the same IP two
+    # ways; CRC32 is built into every Tcl 8.6.
+    return [format %08x [zlib crc32 $acc]]
+}
+
 proc get_ip_mod_files {ip_components_l ip_params_l} {
     array set ip_params $ip_params_l
     set ip_files_l [list]
@@ -55,8 +75,21 @@ proc get_ip_mod_files {ip_components_l ip_params_l} {
             }
         }
 
-        # prevent regeneration of IP files if present (and generated correctly)
-        # (Quartus only, TODO: add similar logic for Vivado (does not use .xci files generation by default))
+        # provide additional IP parameters
+        set ip_params_mod(IP_COMP_NAME) $comp
+        set ip_params_mod(IP_COMP_TYPE) $type
+
+        # Give each IP and configuration its own output directory. Without a key, a second create_ip -dir into an
+        # occupied directory uniquifies to <name>_N and leaves a copy of the IP behind per build.
+        set ip_dir_keyed [expr {!$use_quartus}]
+        if {$ip_dir_keyed} {
+            set ip_dir_key [get_ip_dir_key [array get ip_params_mod] \
+                                $ip_params_mod(IP_MODIFY_BASE)/$script.ip.tcl]
+            set ip_params_mod(IP_BUILD_DIR) $ip_params_mod(IP_BUILD_DIR)/ipcfg_$ip_dir_key
+        }
+
+        # Skip regenerating an IP already generated. Quartus only: the Vivado path runs create_ip
+        # plus the modification script into its keyed directory, which the flow empties first.
         set ip_file $ip_params_mod(IP_BUILD_DIR)/[get_ip_filename $comp]
         if {[file exists $ip_file]} {
             if {$use_quartus && ![file exists $ip_params_mod(IP_MODIFY_BASE)/$script\_ip.qpf]} {
@@ -64,10 +97,6 @@ proc get_ip_mod_files {ip_components_l ip_params_l} {
                 continue
             }
         }
-
-        # provide additional IP parameters
-        set ip_params_mod(IP_COMP_NAME) $comp
-        set ip_params_mod(IP_COMP_TYPE) $type
 
         set script_type [expr {$use_quartus? "QUARTUS_TCL" : "VIVADO_TCL"}]
         # add IP template script (Quartus only)
@@ -88,6 +117,7 @@ proc get_ip_mod_files {ip_components_l ip_params_l} {
                 TYPE $script_type                                       \
                 PHASE { "ADD_FILES" "IP_MODIFY" }                       \
                 IP_BUILD_DIR $ip_params_mod(IP_BUILD_DIR)               \
+                IP_DIR_KEYED $ip_dir_keyed                              \
                 VARS [list IP_PARAMS_L [array get ip_params_mod]]       \
             ]
         }
