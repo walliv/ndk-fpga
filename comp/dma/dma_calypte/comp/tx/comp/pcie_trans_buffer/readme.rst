@@ -14,14 +14,15 @@ The entity selects one of two implementations:
   byte lane of the MFB word
   (``SDP_BRAM_BE`` for 1 region, ``DP_BRAM_BEHAV`` for 2 regions), serves every Intel device and
   every AMD instance that needs none of the features below. On Intel, :vhdl:genconstant:`RAM_TYPE`
-  must be ``"AUTO"`` or ``"BRAM"`` and :vhdl:genconstant:`MEM_PARTITIONING` must keep its default;
-  an elaboration assertion rejects anything else.
+  must be ``"AUTO"`` or ``"BRAM"`` and :vhdl:genconstant:`MEM_PARTITIONING` and
+  :vhdl:genconstant:`READ_LATENCY` must keep their defaults; an elaboration assertion rejects
+  anything else.
 * the ``BANKED`` architecture of ``TX_DMA_PCIE_TRANS_BUFFER_IMPL``, two even/odd row banks of
   XPM memories, serves an AMD
   instance (7SERIES, ULTRASCALE, VERSAL) when the resolved primitive is URAM (``RAM_TYPE => "URAM"``,
-  or ``"AUTO"`` as described below) or ``MEM_PARTITIONING => FALSE``. Its architecture instantiates
-  XPM macros, so ``Modules.tcl`` adds it only with the ``xilinx`` PLATFORM_TAG and an empty
-  architecture otherwise; an Intel build never analyses XPM.
+  or ``"AUTO"`` as described below), ``MEM_PARTITIONING => FALSE`` or ``READ_LATENCY`` is not 1.
+  Its architecture instantiates XPM macros, so ``Modules.tcl`` adds it only with the ``xilinx``
+  PLATFORM_TAG and an empty architecture otherwise; an Intel build never analyses XPM.
 
 Even/odd row banking (AMD)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^

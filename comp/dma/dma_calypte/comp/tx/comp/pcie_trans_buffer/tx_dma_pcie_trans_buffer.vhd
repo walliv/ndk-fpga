@@ -14,7 +14,8 @@ use work.type_pack.all;
 use work.tx_dma_pcie_trans_buffer_pkg.all;
 
 -- Buffers the PCIe writes of every channel at byte alignment in a per-byte BRAM array. On AMD
--- devices, URAM or flat addressing select two even/odd row banks of XPM memories instead.
+-- devices, URAM, flat addressing or READ_LATENCY > 1 select two even/odd row banks of XPM memories
+-- instead.
 entity TX_DMA_PCIE_TRANS_BUFFER is
     generic (
         DEVICE : string := "ULTRASCALE";
@@ -46,7 +47,11 @@ entity TX_DMA_PCIE_TRANS_BUFFER is
         -- TRUE (default): each channel owns a 2**POINTER_WIDTH-byte region. FALSE: one flat
         -- CHANNELS*2**POINTER_WIDTH-byte space addressed only by the address field; RD_ADDR_*
         -- widens by log2(CHANNELS) bits.
-        MEM_PARTITIONING : boolean := TRUE
+        MEM_PARTITIONING : boolean := TRUE;
+
+        -- Cycles from RD_EN_* to RD_DATA_VLD_*: 1 (default); 2 adds XPM's output register, on the TDP
+        -- (2-region) read path only.
+        READ_LATENCY : natural := 1
     );
     port (
         CLK   : in std_logic;
@@ -90,14 +95,14 @@ architecture FULL of TX_DMA_PCIE_TRANS_BUFFER is
         "URAM", "BRAM");
     -- The banked buffer only where the per-byte one cannot serve the generics.
     constant USE_BANKED        : boolean := (not IS_INTEL_DEV) and
-        (RES_RAM_TYPE = "URAM" or (not MEM_PARTITIONING));
+        (RES_RAM_TYPE = "URAM" or (not MEM_PARTITIONING) or READ_LATENCY /= 1);
 
 begin
 
     impl_g : if (not USE_BANKED) generate
 
-        assert ((RAM_TYPE = "AUTO" or RAM_TYPE = "BRAM") and MEM_PARTITIONING)
-            report "TX_DMA_PCIE_TRANS_BUFFER: on an Intel DEVICE, RAM_TYPE must be AUTO or BRAM and MEM_PARTITIONING must keep its default!"
+        assert ((RAM_TYPE = "AUTO" or RAM_TYPE = "BRAM") and MEM_PARTITIONING and READ_LATENCY = 1)
+            report "TX_DMA_PCIE_TRANS_BUFFER: on an Intel DEVICE, RAM_TYPE must be AUTO or BRAM and MEM_PARTITIONING and READ_LATENCY must keep their defaults!"
             severity FAILURE;
 
         trans_buffer_i : entity work.TX_DMA_PCIE_TRANS_BUFFER_IMPL(BYTE)
@@ -116,7 +121,8 @@ begin
             READ_BARREL_SHIFTER_EN => READ_BARREL_SHIFTER_EN,
 
             RAM_TYPE         => RES_RAM_TYPE,
-            MEM_PARTITIONING => MEM_PARTITIONING
+            MEM_PARTITIONING => MEM_PARTITIONING,
+            READ_LATENCY     => READ_LATENCY
         )
         port map (
             CLK   => CLK,
@@ -158,7 +164,8 @@ begin
             READ_BARREL_SHIFTER_EN => READ_BARREL_SHIFTER_EN,
 
             RAM_TYPE         => RES_RAM_TYPE,
-            MEM_PARTITIONING => MEM_PARTITIONING
+            MEM_PARTITIONING => MEM_PARTITIONING,
+            READ_LATENCY     => READ_LATENCY
         )
         port map (
             CLK   => CLK,

@@ -49,6 +49,8 @@ class TransBufferTestbench:
         self.channels = model.channels
         self.chan_width = log2ceil(self.channels)
         self.buf_size = model.buf_size
+        # RD_DATA_VLD_A comes READ_LATENCY cycles after RD_EN_A; every sampling point waits the cycles beyond the first.
+        self.rd_lat = int(dut.READ_LATENCY.value)
 
     @classmethod
     async def setup(cls, dut, seed_offset: int):
@@ -123,6 +125,10 @@ class TransBufferTestbench:
         await self.drive_word(self.row_word(chan, addr_byte, data))
         self.release_bus()
 
+    async def read_latency_wait(self):
+        for _ in range(self.rd_lat - 1):
+            await RisingEdge(self.dut.CLK)
+
     def set_read(self, chan: int, addr: int):
         self.dut.RD_EN_A.value = 1
         self.dut.RD_CHAN_A.value = chan
@@ -180,6 +186,7 @@ async def _collision_probe_one(tb, chan: int, addr_byte: int, p_old: bytes, p_ne
         tb.set_read(chan, addr_byte)
         await RisingEdge(dut.CLK)  # the read's own capturing edge
         dut.RD_EN_A.value = 0
+        await tb.read_latency_wait()
         await tb.read_sample_point()
         result["vld"], result["data"] = tb.sample_read()
         await RisingEdge(dut.CLK)  # leave the ReadOnly phase cleanly before this task ends

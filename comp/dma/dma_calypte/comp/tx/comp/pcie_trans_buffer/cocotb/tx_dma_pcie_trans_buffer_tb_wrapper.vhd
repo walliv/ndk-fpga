@@ -30,7 +30,8 @@ entity TX_DMA_PCIE_TRANS_BUFFER_TB_WRAPPER is
         READ_BARREL_SHIFTER_MASK : natural := 3;
 
         RAM_TYPE         : string  := "AUTO";
-        MEM_PARTITIONING : boolean := TRUE
+        MEM_PARTITIONING : boolean := TRUE;
+        READ_LATENCY     : natural := 1
     );
     port (
         CLK   : in std_logic;
@@ -83,7 +84,8 @@ begin
         READ_BARREL_SHIFTER_EN => mask_to_b_array_f(READ_BARREL_SHIFTER_MASK, MFB_REGIONS),
 
         RAM_TYPE         => RAM_TYPE,
-        MEM_PARTITIONING => MEM_PARTITIONING
+        MEM_PARTITIONING => MEM_PARTITIONING,
+        READ_LATENCY     => READ_LATENCY
     )
     port map (
         CLK   => CLK,
