@@ -299,3 +299,9 @@ def test_libpython_dir(bench, target, expected):
 def test_run_env_follows_libpython(bench):
     env, _ = step(dry_run(bench, "TARGET=nvc-sim", "NVC_RUN_ENV=LD_LIBRARY_PATH=/opt/lib"), "nvc", "-r")
     assert env["LD_LIBRARY_PATH"] == "/opt/lib"
+
+
+def test_ofm_pythonpath(bench):
+    result = make(bench, "--no-print-directory", "--eval=print: ; @echo $(OFM_PYTHONPATH)", "print")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == f"{REPO}/python/cocotbext:{REPO}/python/ofm"
