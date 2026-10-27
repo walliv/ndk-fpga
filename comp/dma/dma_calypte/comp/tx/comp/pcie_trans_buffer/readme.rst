@@ -8,35 +8,85 @@ Transaction buffer
 Implementation notes
 --------------------
 
-There has been an attempt by a fellow creator of this component to replace the internal RAM array
-with URAM for AMD devices. Using URAMs provides a significant resource saving with RAM block
-consumption reduced by the factor of 8. This means using 8 URAMs or 4 URAMs for 2-region and
-1-region variant of the component respectively instead of the 64 or 32 BRAMs . This is because both
-the URAM blocks are actually dual-port (Not as *true* dual-port since the ports do not support
-independent clocking or different data width, but suitable for a use in this entity) and can be used
-for the 2-region variant as well, and the port has a fixed width of 8 bytes. Secondly, although
-URAMs have fixed data width for each port, they still provide byte enable feature for writing that
-allows byte level writes which conforms to the present FirstBE and LastBE signals used by the PCIe.
+The entity selects one of two implementations:
 
-Inspite the biggest saving in resources, one major flaw remains of this approach renders this
-implementation unusable. The elementary unit addressable by the PCIe is one DWord and there can be a
-situation where two DWords next to each other (This counts first DWord of a bus beat and the last
-one as the neighboring. This is because the barrel shifter is used internally which, by rotation,
-causes these two DWs appear next to each other.) need to be addressed to different locations. This
-is shown in figure ":ref:`uram_impl_note`". The internal buffer is organized as an array of RAM
-blocks that form a buffer able to write data on line rate from both regions of the MFB bus beat. The
-problem with two neighboring DWords addressed to two different locations appears in the URAM-based
-buffer when these two appear on one port (one URAM port has a fixed width of 8 bytes without
-parity). One URAM port cannot handle this situation and with current address handling, the
-conflicting DWord (meaning the one that should be located on a higher address) overwrites previously
-stored data. This problem does not appear with the BRAM-based array that uses BRAMs with 1-byte ports
-and therefore allows for fine grained addressing of each individual byte.
+* the ``BYTE`` architecture of ``TX_DMA_PCIE_TRANS_BUFFER_IMPL``, an array of one BRAM per
+  byte lane of the MFB word
+  (``SDP_BRAM_BE`` for 1 region, ``DP_BRAM_BEHAV`` for 2 regions), serves every Intel device and
+  every AMD instance that needs none of the features below. On Intel, :vhdl:genconstant:`RAM_TYPE`
+  must be ``"BRAM"``; an elaboration assertion rejects anything else.
+* the ``BANKED`` architecture of ``TX_DMA_PCIE_TRANS_BUFFER_IMPL``, two even/odd row banks of
+  XPM memories, serves an AMD
+  instance (7SERIES, ULTRASCALE, VERSAL) with ``RAM_TYPE => "URAM"``. Its architecture instantiates
+  XPM macros, so ``Modules.tcl`` adds it only with the ``xilinx`` PLATFORM_TAG and an empty
+  architecture otherwise; an Intel build never analyses XPM.
+
+Even/odd row banking (AMD)
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Rows with an even index live in bank 0, rows with an odd index in bank 1. A barrel-rotated write or
+read of one MFB word spans at most two neighbouring rows, ``row`` and ``row + 1``, which always fall
+into different banks, so each bank needs a single address per access plus per-byte write enables.
+A 2-region instance uses one ``XPM_MEMORY_TDPRAM`` per bank (region 0 on port A, region 1 on port B;
+a write stalls a read on the same port), a 1-region instance one ``XPM_MEMORY_SDPRAM`` per bank (a
+read never stalls). Both banks receive the same rotated write data; on a read both are fetched and
+recombined byte by byte before the optional read barrel shifter.
+
+The banking is what makes URAM legal here. PCIe addresses DWords, and because of the internal barrel
+shifter one bus word can hold the first DWord of a row and the last DWord of the previous row, which
+must go to two different addresses. One 8 B URAM port cannot serve two rows in one cycle, so a
+single-bank URAM array overwrites data; with banking the two DWords always fall into different banks.
 
 .. figure:: doc/uram_impl_note.svg
    :width: 100%
    :align: center
 
-   Depiction of a write conflict when using URAM-based buffer
+   The write conflict of a single-bank URAM array, which the banking removes
+
+:vhdl:genconstant:`RAM_TYPE` selects the primitive: ``"URAM"`` puts each bank into URAM, ``"BRAM"``,
+the default, keeps the per-byte buffer. URAM banks hold up to 16384 rows, BRAM arrays 4096, which
+sets how many channels share one memory array.
+
+PCIe never addresses a lone byte: a sub-DWord access is expressed by FirstBE/LastBE, and the write
+barrel shifters rotate by whole DWords, so a byte's row and bank follow from its DWord lane and its
+enable bit carries the rest. Two transactions packed into one bus word may touch the same DWord with
+disjoint byte enables, which both primitives handle. If both ports write the same byte in one cycle,
+URAM keeps region 1 (port B executes after port A), BRAM leaves the byte undefined; the simulation-only
+collision checks flag that case.
+
+Verification
+^^^^^^^^^^^^
+
+``cocotb/`` holds a cocotb bench (nvc) with a byte-accurate reference model
+(``trans_buffer_model.py``). It covers aligned and unaligned writes at every DWord offset with
+FirstBE/LastBE patterns, two frames in one bus word to the same or different channels and memory
+arrays, channel buffer wraparound, randomized traffic with reads racing the writes, where a no-op word
+follows a transaction at random, and a 1 B write followed without a gap by a 64 B write to the next
+byte. ``TB_COLLISION_PROBE=1`` adds a report-only sweep of a read against a write to the same row.
+The log names the implementation under test and, for the banked one, counts the cycles in which a
+read colliding with the other region's write was withheld. Every test reseeds from
+``COCOTB_RANDOM_SEED``. The toplevel is a test-only wrapper that takes
+:vhdl:genconstant:`READ_BARREL_SHIFTER_EN` as the bit mask ``READ_BARREL_SHIFTER_MASK`` (bit ``p`` is
+element ``p``), since nvc cannot set an array generic from the command line::
+
+    cd cocotb
+    make                                                    # defaults: per-byte, two memory arrays
+    make NVC_ELAB_ARGS="-gRAM_TYPE=URAM"                    # banked URAM
+    make NVC_ELAB_ARGS="-gREAD_BARREL_SHIFTER_MASK=1 -gCHANNELS=16 -gPOINTER_WIDTH=13"  # as TX_DMA_CALYPTE: per-byte
+    make NVC_ELAB_ARGS="-gREAD_BARREL_SHIFTER_MASK=1 -gCHANNELS=32 -gPOINTER_WIDTH=13 -gRAM_TYPE=URAM"  # as TX_DMA_CALYPTE with 32 channels: banked URAM
+    make NVC_ELAB_ARGS="-gDEVICE=AGILEX"                    # per-byte on Intel, 2 regions
+
+``cocotb_test.py`` drives the 2-region geometry only. ``cocotb_1region_smoke.py`` checks a 1-region
+instance: data integrity of aligned, unaligned and wrapping writes, a read latency of one cycle for
+both :vhdl:genconstant:`RAM_TYPE` values, and that a read racing a write to the same address drops
+``RD_DATA_VLD_A`` in exactly the colliding cycle with the banked buffer and returns the old data with
+the per-byte one::
+
+    make COCOTB_TEST_MODULES=cocotb_1region_smoke NVC_ELAB_ARGS="-gMFB_REGIONS=1 \
+        -gREAD_BARREL_SHIFTER_MASK=1 -gCHANNELS=16 -gPOINTER_WIDTH=13 -gRAM_TYPE=URAM"
+
+On Intel the 1-region per-byte buffer uses ``altera_syncram``, which exists only as a SystemVerilog
+model, so it elaborates in nvc but does not simulate there.
 
 General subcomponents
 ---------------------

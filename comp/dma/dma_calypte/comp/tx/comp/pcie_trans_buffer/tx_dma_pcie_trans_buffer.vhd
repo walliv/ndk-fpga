@@ -13,7 +13,8 @@ use work.math_pack.all;
 use work.type_pack.all;
 use work.tx_dma_pcie_trans_buffer_pkg.all;
 
--- Buffers the PCIe writes of every channel at byte alignment in a per-byte BRAM array.
+-- Buffers the PCIe writes of every channel at byte alignment in a per-byte BRAM array. On AMD
+-- devices, URAM selects two even/odd row banks of XPM memories instead.
 entity TX_DMA_PCIE_TRANS_BUFFER is
     generic (
         DEVICE : string := "ULTRASCALE";
@@ -36,7 +37,10 @@ entity TX_DMA_PCIE_TRANS_BUFFER is
         -- Per read port (A = 0, B = 1): TRUE shifts the read data to the address low-bit offset, FALSE
         -- returns the plain MFB-word-aligned row. Index 1 applies only with SPLIT_READ_PORTS; otherwise
         -- port A serves every read and index 0 is used.
-        READ_BARREL_SHIFTER_EN : b_array_t(MFB_REGIONS -1 downto 0) := (others => TRUE)
+        READ_BARREL_SHIFTER_EN : b_array_t(MFB_REGIONS -1 downto 0) := (others => TRUE);
+
+        -- Memory primitive: BRAM (default) or URAM. URAM needs an AMD DEVICE.
+        RAM_TYPE : string := "BRAM"
     );
     port (
         CLK   : in std_logic;
@@ -68,44 +72,98 @@ end entity;
 
 architecture FULL of TX_DMA_PCIE_TRANS_BUFFER is
 
+    constant IS_INTEL_DEV : boolean := (DEVICE = "STRATIX10" or DEVICE = "AGILEX");
+    -- The banked buffer only where the per-byte one cannot serve the generics.
+    constant USE_BANKED   : boolean := (not IS_INTEL_DEV) and (RAM_TYPE = "URAM");
 
 begin
 
-    trans_buffer_i : entity work.TX_DMA_PCIE_TRANS_BUFFER_IMPL(BYTE)
-    generic map (
-        DEVICE => DEVICE,
+    impl_g : if (not USE_BANKED) generate
 
-        CHANNELS => CHANNELS,
+        assert (RAM_TYPE = "BRAM")
+            report "TX_DMA_PCIE_TRANS_BUFFER: on an Intel DEVICE, RAM_TYPE must be BRAM!"
+            severity FAILURE;
 
-        MFB_REGIONS     => MFB_REGIONS,
-        MFB_REGION_SIZE => MFB_REGION_SIZE,
-        MFB_BLOCK_SIZE  => MFB_BLOCK_SIZE,
-        MFB_ITEM_WIDTH  => MFB_ITEM_WIDTH,
+        trans_buffer_i : entity work.TX_DMA_PCIE_TRANS_BUFFER_IMPL(BYTE)
+        generic map (
+            DEVICE => DEVICE,
 
-        POINTER_WIDTH          => POINTER_WIDTH,
-        SPLIT_READ_PORTS       => SPLIT_READ_PORTS,
-        READ_BARREL_SHIFTER_EN => READ_BARREL_SHIFTER_EN
-    )
-    port map (
-        CLK   => CLK,
-        RESET => RESET,
+            CHANNELS => CHANNELS,
 
-        PCIE_MFB_DATA    => PCIE_MFB_DATA,
-        PCIE_MFB_META    => PCIE_MFB_META,
-        PCIE_MFB_SOF     => PCIE_MFB_SOF,
-        PCIE_MFB_SRC_RDY => PCIE_MFB_SRC_RDY,
+            MFB_REGIONS     => MFB_REGIONS,
+            MFB_REGION_SIZE => MFB_REGION_SIZE,
+            MFB_BLOCK_SIZE  => MFB_BLOCK_SIZE,
+            MFB_ITEM_WIDTH  => MFB_ITEM_WIDTH,
 
-        RD_CHAN_A     => RD_CHAN_A,
-        RD_DATA_A     => RD_DATA_A,
-        RD_ADDR_A     => RD_ADDR_A,
-        RD_EN_A       => RD_EN_A,
-        RD_DATA_VLD_A => RD_DATA_VLD_A,
+            POINTER_WIDTH          => POINTER_WIDTH,
+            SPLIT_READ_PORTS       => SPLIT_READ_PORTS,
+            READ_BARREL_SHIFTER_EN => READ_BARREL_SHIFTER_EN,
 
-        RD_CHAN_B     => RD_CHAN_B,
-        RD_DATA_B     => RD_DATA_B,
-        RD_ADDR_B     => RD_ADDR_B,
-        RD_EN_B       => RD_EN_B,
-        RD_DATA_VLD_B => RD_DATA_VLD_B
-    );
+            RAM_TYPE => RAM_TYPE
+        )
+        port map (
+            CLK   => CLK,
+            RESET => RESET,
+
+            PCIE_MFB_DATA    => PCIE_MFB_DATA,
+            PCIE_MFB_META    => PCIE_MFB_META,
+            PCIE_MFB_SOF     => PCIE_MFB_SOF,
+            PCIE_MFB_SRC_RDY => PCIE_MFB_SRC_RDY,
+
+            RD_CHAN_A     => RD_CHAN_A,
+            RD_DATA_A     => RD_DATA_A,
+            RD_ADDR_A     => RD_ADDR_A,
+            RD_EN_A       => RD_EN_A,
+            RD_DATA_VLD_A => RD_DATA_VLD_A,
+
+            RD_CHAN_B     => RD_CHAN_B,
+            RD_DATA_B     => RD_DATA_B,
+            RD_ADDR_B     => RD_ADDR_B,
+            RD_EN_B       => RD_EN_B,
+            RD_DATA_VLD_B => RD_DATA_VLD_B
+        );
+
+    else generate
+
+        trans_buffer_i : entity work.TX_DMA_PCIE_TRANS_BUFFER_IMPL(BANKED)
+        generic map (
+            DEVICE => DEVICE,
+
+            CHANNELS => CHANNELS,
+
+            MFB_REGIONS     => MFB_REGIONS,
+            MFB_REGION_SIZE => MFB_REGION_SIZE,
+            MFB_BLOCK_SIZE  => MFB_BLOCK_SIZE,
+            MFB_ITEM_WIDTH  => MFB_ITEM_WIDTH,
+
+            POINTER_WIDTH          => POINTER_WIDTH,
+            SPLIT_READ_PORTS       => SPLIT_READ_PORTS,
+            READ_BARREL_SHIFTER_EN => READ_BARREL_SHIFTER_EN,
+
+            RAM_TYPE => RAM_TYPE
+        )
+        port map (
+            CLK   => CLK,
+            RESET => RESET,
+
+            PCIE_MFB_DATA    => PCIE_MFB_DATA,
+            PCIE_MFB_META    => PCIE_MFB_META,
+            PCIE_MFB_SOF     => PCIE_MFB_SOF,
+            PCIE_MFB_SRC_RDY => PCIE_MFB_SRC_RDY,
+
+            RD_CHAN_A     => RD_CHAN_A,
+            RD_DATA_A     => RD_DATA_A,
+            RD_ADDR_A     => RD_ADDR_A,
+            RD_EN_A       => RD_EN_A,
+            RD_DATA_VLD_A => RD_DATA_VLD_A,
+
+            RD_CHAN_B     => RD_CHAN_B,
+            RD_DATA_B     => RD_DATA_B,
+            RD_ADDR_B     => RD_ADDR_B,
+            RD_EN_B       => RD_EN_B,
+            RD_DATA_VLD_B => RD_DATA_VLD_B
+        );
+
+    end generate;
 
 end architecture;

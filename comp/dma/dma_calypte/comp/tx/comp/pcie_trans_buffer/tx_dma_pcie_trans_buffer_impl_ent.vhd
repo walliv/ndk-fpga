@@ -39,7 +39,10 @@ entity TX_DMA_PCIE_TRANS_BUFFER_IMPL is
         -- Per read port (A = 0, B = 1): TRUE shifts the read data to the address low-bit offset, FALSE
         -- returns the plain MFB-word-aligned row. Index 1 applies only with SPLIT_READ_PORTS; otherwise
         -- port A serves every read and index 0 is used.
-        READ_BARREL_SHIFTER_EN : b_array_t(MFB_REGIONS -1 downto 0) := (others => TRUE)
+        READ_BARREL_SHIFTER_EN : b_array_t(MFB_REGIONS -1 downto 0) := (others => TRUE);
+
+        -- XPM memory primitive: URAM or BRAM.
+        RAM_TYPE : string := "BRAM"
     );
     port (
         CLK   : in std_logic;

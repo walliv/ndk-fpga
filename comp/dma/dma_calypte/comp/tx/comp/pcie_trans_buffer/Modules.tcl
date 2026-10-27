@@ -24,4 +24,10 @@ lappend COMPONENTS [ list "BARREL_SHIFTER_GEN"  $BARREL_SHIFTER_BASE    "FULL" ]
 lappend MOD "$ENTITY_BASE/tx_dma_pcie_trans_buffer_wr_front.vhd"
 lappend MOD "$ENTITY_BASE/tx_dma_pcie_trans_buffer_impl_ent.vhd"
 lappend MOD "$ENTITY_BASE/tx_dma_pcie_trans_buffer_byte.vhd"
+# The AMD implementation is built from XPM macros, which an Intel build must not analyse.
+if {"xilinx" in $PLATFORM_TAGS} {
+    lappend MOD "$ENTITY_BASE/tx_dma_pcie_trans_buffer_banked.vhd"
+} else {
+    lappend MOD "$ENTITY_BASE/tx_dma_pcie_trans_buffer_banked_empty.vhd"
+}
 lappend MOD "$ENTITY_BASE/tx_dma_pcie_trans_buffer.vhd"
