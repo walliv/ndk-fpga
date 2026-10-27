@@ -1136,8 +1136,9 @@ begin
                 if (unsigned(reg_dob_opt(R_UPDATE_TIMEOUT)(1)) /= UPD_TIMEOUT_CNTR_NULL_VAL) then
                     if (upd_timeout_cntr_reg /= UPD_TIMEOUT_CNTR_NULL_VAL) then
                         upd_timeout_cntr_next <= upd_timeout_cntr_reg - 1;
-                    else
-                        -- If timeout runs out, do the pointer update one more time
+                    elsif (stop_ptr_ok = '0') then
+                        -- If timeout runs out, do the pointer update one more time. Matching pointers wait here for
+                        -- the channel's slot: a dispatch period dividing CHANNELS could keep the slot on the dispatch.
                         stop_fsm_nst <= WAIT_FOR_PTR_UPDATE_DISPATCH;
                     end if;
                 end if;
