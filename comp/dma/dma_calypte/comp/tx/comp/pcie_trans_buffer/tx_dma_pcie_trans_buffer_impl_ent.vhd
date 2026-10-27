@@ -35,8 +35,10 @@ entity TX_DMA_PCIE_TRANS_BUFFER_IMPL is
         -- If true, each port of the TDPs (used by the 2,1,8,32 MFB configuration) is controlled by
         -- separate interfaces
         SPLIT_READ_PORTS       : boolean := FALSE;
-        -- If true, the read data are aligned according to the lower bits of the RD_ADDR input
-        READ_BARREL_SHIFTER_EN : b_array_t(1 downto 0) := (TRUE, TRUE)
+        -- Per read port (A = 0, B = 1): TRUE shifts the read data to the address low-bit offset, FALSE
+        -- returns the plain MFB-word-aligned row. Index 1 applies only with SPLIT_READ_PORTS; otherwise
+        -- port A serves every read and index 0 is used.
+        READ_BARREL_SHIFTER_EN : b_array_t(MFB_REGIONS -1 downto 0) := (others => TRUE)
     );
     port (
         CLK   : in std_logic;

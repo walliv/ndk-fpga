@@ -149,6 +149,9 @@ architecture BYTE of TX_DMA_PCIE_TRANS_BUFFER_IMPL is
     signal rd_addr_a_reg : std_logic_vector(RD_ADDR_A'range);
     signal rd_addr_b_reg : std_logic_vector(RD_ADDR_B'range);
 
+    -- Shifter enable of read port B, which needs split read ports and so 2 regions
+    constant READ_BARREL_SHIFTER_EN_B : boolean := READ_BARREL_SHIFTER_EN(MFB_REGIONS -1);
+
     -- =============================================================================================
     -- DEBUG signals (verification or ILA)
     -- =============================================================================================
@@ -846,7 +849,7 @@ begin
             end process;
         end generate;
 
-        rd_barrel_shifter_b_g : if (READ_BARREL_SHIFTER_EN(1)) generate
+        rd_barrel_shifter_b_g : if (READ_BARREL_SHIFTER_EN_B) generate
             rd_data_barrel_shifter_b_i : entity work.BARREL_SHIFTER_GEN
             generic map (
                 -- The Reading side is addressable by bytes so the number of blocks is 4 times more than on the
