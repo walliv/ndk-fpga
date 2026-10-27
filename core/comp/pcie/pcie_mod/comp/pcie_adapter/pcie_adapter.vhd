@@ -267,6 +267,7 @@ architecture FULL of PCIE_ADAPTER is
     signal cq_tph_st_tag        : std_logic_vector(CQ_MFB_REGIONS*8-1 downto 0);
     signal cq_fbe               : std_logic_vector(CQ_MFB_REGIONS*4-1 downto 0);
     signal cq_lbe               : std_logic_vector(CQ_MFB_REGIONS*4-1 downto 0);
+    signal cq_be                : std_logic_vector(CQ_MFB_REGIONS*PCIE_META_BE_W-1 downto 0);
     signal rq_mfb_be_arr        : slv_array_t(RQ_MFB_REGIONS-1 downto 0)(8-1 downto 0);
 
     signal cq_mfb_meta_arr      : slv_array_t(CQ_MFB_REGIONS-1 downto 0)(PCIE_CQ_META_WIDTH-1 downto 0);
@@ -331,14 +332,15 @@ begin
             CQ_TPH_TYPE    => cq_tph_type,
             CQ_TPH_ST_TAG  => cq_tph_st_tag,
             CQ_FBE         => cq_fbe,
-            CQ_LBE         => cq_lbe
+            CQ_LBE         => cq_lbe,
+            CQ_BE          => cq_be
         );
 
         cq_mfb_meta_g: for i in 0 to CQ_MFB_REGIONS-1 generate
             cq_mfb_meta_arr(i)(PCIE_CQ_META_HEADER)        <= (others => '0');
             cq_mfb_meta_arr(i)(PCIE_CQ_META_PREFIX)        <= (others => '0');
             cq_mfb_meta_arr(i)(PCIE_CQ_META_BAR)           <= (others => '0');
-            cq_mfb_meta_arr(i)(PCIE_CQ_META_AXI_USER)      <= pcie_cq_meta_axi_user_f(i, cq_fbe, cq_lbe, cq_tph_present, cq_tph_type, cq_tph_st_tag);
+            cq_mfb_meta_arr(i)(PCIE_CQ_META_AXI_USER)      <= pcie_cq_meta_axi_user_f(i, cq_fbe, cq_lbe, cq_be, cq_tph_present, cq_tph_type, cq_tph_st_tag);
         end generate;
 
         CQ_MFB_META <= slv_array_ser(cq_mfb_meta_arr);

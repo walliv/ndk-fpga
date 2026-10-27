@@ -21,6 +21,7 @@
 // 171 to 171     TPH_PRESENT  Transaction Processing Hint (TPH) present flag - Xilinx FPGA only
 // 172 to 173     TPH_TYPE     The PH field associated with the hint - Xilinx FPGA only
 // 174 to 181     TPH_ST_TAG   The Steering Tag associated with the hint - Xilinx FPGA only
+// 182 to 213     BE           Byte enables of the 32 bytes of the region where the frame starts - Xilinx FPGA only
 // ============== ============ =================================================
 //
 // **PCIe CC MFB Meta items description:**
@@ -62,6 +63,7 @@ package sv_pcie_meta_pack;
     parameter PCIE_META_TPH_PRESENT_W = 1;
     parameter PCIE_META_TPH_TYPE_W    = 2;
     parameter PCIE_META_TPH_ST_TAG_W  = 8;
+    parameter PCIE_META_BE_W          = 32;
 
     parameter PCIE_RC_META_HEADER_O = 0;
     parameter PCIE_RC_META_PREFIX_O = PCIE_RC_META_HEADER_O + PCIE_META_CPL_HDR_W;
@@ -83,8 +85,9 @@ package sv_pcie_meta_pack;
     parameter PCIE_CQ_META_TPH_PRESENT_O = PCIE_CQ_META_LBE_O         + PCIE_META_LBE_W;
     parameter PCIE_CQ_META_TPH_TYPE_O    = PCIE_CQ_META_TPH_PRESENT_O + PCIE_META_TPH_PRESENT_W;
     parameter PCIE_CQ_META_TPH_ST_TAG_O  = PCIE_CQ_META_TPH_TYPE_O    + PCIE_META_TPH_TYPE_W;
+    parameter PCIE_CQ_META_BE_O          = PCIE_CQ_META_TPH_ST_TAG_O  + PCIE_META_TPH_ST_TAG_W;
 
-    parameter PCIE_CQ_META_WIDTH         = PCIE_CQ_META_TPH_ST_TAG_O + PCIE_META_TPH_ST_TAG_W;
+    parameter PCIE_CQ_META_WIDTH         = PCIE_CQ_META_BE_O + PCIE_META_BE_W;
 
     parameter PCIE_CC_META_HEADER_O = 0;
     parameter PCIE_CC_META_PREFIX_O = PCIE_CC_META_HEADER_O + PCIE_META_CPL_HDR_W;

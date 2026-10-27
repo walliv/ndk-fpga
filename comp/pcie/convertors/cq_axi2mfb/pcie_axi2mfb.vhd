@@ -107,7 +107,9 @@ entity PCIE_CQ_AXI2MFB is
         -- Byte enables for the first DWORD
         CQ_FBE            : out std_logic_vector(MFB_REGIONS*4-1 downto 0);
         -- Byte enables for the last DWORD
-        CQ_LBE            : out std_logic_vector(MFB_REGIONS*4-1 downto 0)
+        CQ_LBE            : out std_logic_vector(MFB_REGIONS*4-1 downto 0);
+        -- Byte enables of the 32 bytes of the region where the frame starts
+        CQ_BE             : out std_logic_vector(MFB_REGIONS*32-1 downto 0)
 
     );
 end entity;
@@ -167,6 +169,7 @@ begin
         cq_axi_user_sop(0)     <= CQ_AXI_USER(AXI_CQ256_SOP_O);
         cq_axi_user_fbe        <= CQ_AXI_USER(AXI_CQ256_FBE);
         cq_axi_user_lbe        <= CQ_AXI_USER(AXI_CQ256_LBE);
+        CQ_BE                  <= CQ_AXI_USER(AXI_CQ256_BE);
 
         conv_256_pr : process (all)
             variable eof_pos   : unsigned(3-1 downto 0) := (others => '0');
@@ -212,6 +215,7 @@ begin
         cq_axi_user_eop         <= CQ_AXI_USER(AXI_CQ512_EOP);
         cq_axi_user_eop_ptr(0)  <= CQ_AXI_USER(AXI_CQ512_EOP_POS_0);
         cq_axi_user_eop_ptr(1)  <= CQ_AXI_USER(AXI_CQ512_EOP_POS_1);
+        CQ_BE                   <= CQ_AXI_USER(AXI_CQ512_BE);
 
         -- conversion process
         sop_eop_sof_eof_conv_pr : process (all)
@@ -283,6 +287,7 @@ begin
         CQ_MFB_SOF_POS          <= (others => '0');
         cq_axi_user_fbe         <= "0000" & CQ_AXI_USER(AXI_CQ512_FBE_O+4-1 downto AXI_CQ512_FBE_O);
         cq_axi_user_lbe         <= "0000" & CQ_AXI_USER(AXI_CQ512_LBE_O+4-1 downto AXI_CQ512_LBE_O);
+        CQ_BE                   <= CQ_AXI_USER(AXI_CQ512_BE);
 
         conv_pr : process (all)
             variable eof_pos : unsigned(3-1 downto 0) := (others => '0');

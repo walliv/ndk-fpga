@@ -52,6 +52,12 @@ def binstr_bit(binstr: str, idx: int) -> bool:
     return binstr[len(binstr) - 1 - idx] == "1"
 
 
+def generic_bool(handle) -> bool:
+    """Value of a boolean generic, which a simulator hands over as a number or as a name."""
+    value = handle.value
+    return value.lower() == "true" if isinstance(value, str) else bool(int(value))
+
+
 def get_signal_value_in_bytes(signal, big_endian: bool = False) -> bytes:
     """
     Get value of a OUT signals in bytes.
