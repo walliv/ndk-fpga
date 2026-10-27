@@ -5,8 +5,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+import re
 import shutil
 import subprocess
+
+from pathlib import Path
 
 import pytest
 
@@ -25,11 +28,11 @@ set env(FIRMWARE_BASE) {REPO}/
 source {REPO}/build/Vivado.inc.tcl
 """
 
-# An IP script that reports the build directory it was given.
+# An IP script that reports the build directory it was given and whether that exists.
 IP_SCRIPT = """
-puts "ip_build_dir [dict get $IP_PARAMS_L IP_BUILD_DIR]"
+set dir [dict get $IP_PARAMS_L IP_BUILD_DIR]
+puts "ip_build_dir $dir [file isdirectory $dir]"
 """
-
 
 # Runs SetupDesign of the Vivado flow on stand-ins for the Vivado commands it calls, which print their arguments.
 SETUP_DESIGN = VIVADO_INC + tcl_stubs(
@@ -39,6 +42,13 @@ proc version {args} { return 2025.1 }
 set NB_MAIN_CALLED 1
 array set SYNTH_FLAGS {FPGA xcu55c-fsvh2892-2L-e OUTPUT stub SETUP_FLAGS {}}
 SetupDesign SYNTH_FLAGS
+"""
+
+# An IP modification script for EvalFile that writes an output into its build directory only if asked to.
+EVAL_IP_SCRIPT = """
+set dir [dict get $IP_PARAMS_L IP_BUILD_DIR]
+puts "exists [file isdirectory $dir]"
+if {[dict get $IP_PARAMS_L WRITE]} { close [open $dir/stub.xci w] }
 """
 
 
@@ -58,7 +68,8 @@ def repository(tmp_path):
     (repo / "comp" / "Modules.tcl").write_text(
         'lappend MOD "$ENTITY_BASE/top.vhd"\n'
         'lappend MOD [list "$ENTITY_BASE/ip/stub.ip.tcl" TYPE VIVADO_TCL PHASE {ADD_FILES}'
-        ' VARS [list IP_PARAMS_L [list IP_BUILD_DIR "$ENTITY_BASE/ip/build"]]]\n'
+        ' IP_BUILD_DIR "$ENTITY_BASE/ip/ipcfg_0123abcd" IP_DIR_KEYED 1'
+        ' VARS [list IP_PARAMS_L [list IP_BUILD_DIR "$ENTITY_BASE/ip/ipcfg_0123abcd"]]]\n'
     )
     build = repo / "build"
     build.mkdir()
@@ -81,7 +92,8 @@ def test_filelist(repository, tmp_path):
     shutil.copytree(repository, moved)
     output = tclsh(moved / "build", f"{VIVADO_STUBS}\nset shell_git_root {moved}\nsource filelist.tcl\n")
     assert f"read_vhdl -library work -vhdl2008 {moved}/comp/top.vhd" in output
-    assert f"ip_build_dir {moved}/comp/ip/build" in output
+    assert f"ip_build_dir {moved}/comp/ip/ipcfg_0123abcd 1" in output
+    assert not (moved / "comp" / "ip" / "ipcfg_0123abcd").exists()
 
 
 def test_filelist_needs_shell_git_root(repository):
@@ -153,3 +165,66 @@ def test_unusable_ip_cache_is_disabled(tmp_path):
     output = setup_design(tmp_path, tmp_path / "file" / "cache")
     assert not [line for line in output if "config_ip_cache" in line]
     assert [line for line in output if line.startswith("WARNING: IP synthesis cache disabled")]
+
+
+@pytest.fixture
+def ip_base(tmp_path):
+    (tmp_path / "ip").mkdir()
+    (tmp_path / "ip" / "stub.ip.tcl").write_text("# modification script\n")
+    return tmp_path
+
+
+def ip_build_dirs(base, **params):
+    """IP_BUILD_DIR of each source that get_ip_mod_files returns for a stub IP of the given parameters."""
+    params = {"IP_BUILD_DIR": base / "build", "IP_MODIFY_BASE": base / "ip", "IP_TEMPLATE_BASE": base / "template",
+              "IP_DEVICE_FAMILY": "Ultrascale+", **params}
+    tcl_params = " ".join(f"{name} {{{value}}}" for name, value in params.items())
+    return tclsh(base, (
+        f"source {REPO}/core/ip/common.tcl\n"
+        f'foreach item [get_ip_mod_files [list [list "" stub stub_ip "" 1]] [list {tcl_params}]] {{\n'
+        "    puts [dict get [lrange $item 1 end] IP_BUILD_DIR]\n"
+        "}\n"
+    ))
+
+
+def test_ip_dir_is_keyed_by_the_parameters(ip_base):
+    dirs = ip_build_dirs(ip_base, WIDTH=8)
+    assert len(dirs) == 1
+    assert Path(dirs[0]).parent == ip_base / "build"
+    assert re.fullmatch(r"ipcfg_[0-9a-f]{8}", Path(dirs[0]).name)
+    assert ip_build_dirs(ip_base, WIDTH=8) == dirs
+    assert ip_build_dirs(ip_base, WIDTH=16) != dirs
+    (ip_base / "ip" / "stub.ip.tcl").write_text("# another modification script\n")
+    assert ip_build_dirs(ip_base, WIDTH=8) != dirs
+
+
+def test_ip_dir_key_ignores_the_build_dir(ip_base):
+    dirs = ip_build_dirs(ip_base, WIDTH=8)
+    moved = ip_build_dirs(ip_base, WIDTH=8, IP_BUILD_DIR=ip_base / "other")
+    assert Path(moved[0]).name == Path(dirs[0]).name
+
+
+def test_quartus_ip_dir_is_not_keyed(ip_base):
+    assert set(ip_build_dirs(ip_base, IP_DEVICE_FAMILY="Agilex")) == {str(ip_base / "build")}
+
+
+def eval_ip_script(directory, ip_dir, write, keyed=True):
+    """Runs a stub IP script through EvalFile, as the Vivado flow does, with ip_dir as its build directory."""
+    script = directory / "stub.ip.tcl"
+    script.write_text(EVAL_IP_SCRIPT)
+    return tclsh(directory, VIVADO_INC + (
+        f"EvalFile {script} [list TYPE VIVADO_TCL PHASE ADD_FILES IP_BUILD_DIR {ip_dir} IP_DIR_KEYED {int(keyed)}"
+        f" VARS [list IP_PARAMS_L [list IP_BUILD_DIR {ip_dir} WRITE {int(write)}]]]\n"
+    ))
+
+
+@pytest.mark.parametrize("write", [False, True])
+def test_keyed_ip_dir(tmp_path, write):
+    ip_dir = tmp_path / "ipcfg_0123abcd"
+    assert "exists 1" in eval_ip_script(tmp_path, ip_dir, write)
+    assert ip_dir.is_dir() == write
+
+
+def test_unkeyed_ip_dir_is_left_alone(tmp_path):
+    assert "exists 0" in eval_ip_script(tmp_path, tmp_path / "ipcfg_0123abcd", False, keyed=False)
+    assert not (tmp_path / "ipcfg_0123abcd").exists()

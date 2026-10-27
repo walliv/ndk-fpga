@@ -34,6 +34,10 @@ apps/*/build/*/*.nfw
 apps/*/build/*/*.log
 apps/*/build/*/filelist.tcl
 
+# Per-configuration IP output directories created by the Vivado IP flow (see core/ip/common.tcl),
+# wherever the card places its IP build directory.
+ipcfg_*/
+
 # Vivado per-run reports written beside the project
 apps/*/build/*/*_par.*
 apps/*/build/*/*_synth.*
