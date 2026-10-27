@@ -7,7 +7,7 @@ from cocotb.triggers import RisingEdge
 from cocotb.types import LogicArray
 from cocotbext.ofm.base.types import LogicArray2D
 from cocotbext.ofm.base.monitors import BusMonitor
-from cocotbext.ofm.mfb.utils import get_mfb_params
+from cocotbext.ofm.mfb.utils import get_mfb_params, region_frame_event
 from cocotbext.ofm.mfb.transaction import MfbTransaction
 from math import log2
 from copy import copy
@@ -41,6 +41,7 @@ class MFBMonitor(BusMonitor):
             self.bus, mfb_params
         )
         self._region_items = self._region_size * self._block_size
+        self._region_data_w = self._region_items * self._item_width
         self._os = [s for s in self._optional_signals if hasattr(self.bus, s)]
         self._os_widths = {s: len(getattr(self.bus, s)) // self._regions for s in self._os}
 
@@ -56,6 +57,7 @@ class MFBMonitor(BusMonitor):
 
         self.frame_cnt = 0
         self.item_cnt  = 0
+        self._in_frame = False
 
     def _is_valid_word(self, signal_src_rdy, signal_dst_rdy):
         if signal_dst_rdy is None:
@@ -81,6 +83,38 @@ class MFBMonitor(BusMonitor):
             if len(sig_val) > 0:
                 self._os_data[s].deserialize(sig_val)
 
+    def _word_valid(self):
+        return self._is_valid_word(self.bus.src_rdy, self.bus.dst_rdy)
+
+    def _region_ctrl(self, r):
+        """SOF, EOF, SOF_POS and EOF_POS of region `r`, a position 0 where its flag is not set."""
+        sof = self._sof[r]
+        eof = self._eof[r]
+
+        if self._sof_pos is not None:
+            sof_pos = self._sof_pos[r].to_unsigned() if sof else 0
+        else:
+            sof_pos = 0
+
+        if self._eof_pos is not None:
+            eof_pos = self._eof_pos[r].to_unsigned() if eof else 0
+        else:
+            eof_pos = 0
+
+        return sof, eof, sof_pos, eof_pos
+
+    def _data_bytes(self, r, lo, hi):
+        """Little-endian bytes of region `r` data bits [lo:hi), counted from the LSB."""
+        return self._data[r][hi - 1:lo].to_bytes(byteorder="little")
+
+    def _set_os(self, r, vld_with=None):
+        """Read the optional signals of region `r` when they are valid with `vld_with`, or unconditionally when None."""
+        if vld_with is not None and vld_with != self._os_vld_with:
+            return
+        for s in self._os:
+            if self._os_data[s] is not None:
+                setattr(self._transaction, s, self._os_data[s][r].to_unsigned())
+
     def _recv_trans(self):
         self.log.debug(f"received transaction: {self._transaction}")
 
@@ -89,115 +123,79 @@ class MFBMonitor(BusMonitor):
         else:
             self._recv(copy(self._transaction))
 
+    def _frame_received(self):
+        self._recv_trans()
+        self.frame_cnt += 1
+        self.item_cnt += (len(self._transaction.data) * 8) // self._item_width
+
     async def _monitor_recv(self):
         clk_re = RisingEdge(self.clock)
-
-        in_frame = False
+        self._in_frame = False
 
         while True:
             await clk_re
+            self.monitor_cycle()
 
-            if self.in_reset:
-                continue
+    def monitor_cycle(self):
+        """One cycle's sampling of the bus."""
+        if self.in_reset:
+            return
 
-            if self._is_valid_word(self.bus.src_rdy, self.bus.dst_rdy):
-                self._read_control_signals()
+        if not self._word_valid():
+            return
 
-                for r in range(self._regions):
-                    sof = self._sof[r]
-                    eof = self._eof[r]
+        self._read_control_signals()
 
-                    if self._sof_pos is not None:
-                        sof_pos = self._sof_pos[r].to_unsigned() if sof else 0
-                    else:
-                        sof_pos = 0
+        for r in range(self._regions):
+            sof, eof, sof_pos, eof_pos = self._region_ctrl(r)
 
-                    if self._eof_pos is not None:
-                        eof_pos = self._eof_pos[r].to_unsigned() if eof else 0
-                    else:
-                        eof_pos = 0
+            pkt_start = sof_pos * self._block_size * self._item_width
+            pkt_end   = (eof_pos + 1) * self._item_width
+            event = region_frame_event(sof, eof, sof_pos * self._block_size, eof_pos)
 
-                    pkt_start = sof_pos * self._block_size * self._item_width
-                    pkt_end   = (eof_pos + 1) * self._item_width
+            if self._in_frame:
+                if event in ("whole", "end_start"):
+                    # if sof appears before eof
+                    if event == "whole" and self._region_size > 1:
+                        raise MFBProtocolError(f"MFB error: a start-of-frame received without an end-of-frame! ({sof_pos=}, {eof_pos=})")
 
-                    if in_frame:
-                        if sof and eof:
-                            # if sof appears before eof
-                            if self._region_size > 1:
-                                if pkt_end > pkt_start:
-                                    raise MFBProtocolError(f"MFB error: a start-of-frame received without an end-of-frame! ({sof_pos=}, {eof_pos=})")
+                    # end of one packet
+                    self._transaction.data += self._data_bytes(r, 0, pkt_end)
+                    self._set_os(r, "eof")
+                    self._frame_received()
 
-                            # end of one packet
-                            self._transaction.data += self._data[r][pkt_end-1:].to_bytes(byteorder="little")
+                    # start of another packet, in_frame stays True
+                    self._transaction.data = self._data_bytes(r, pkt_start, self._region_data_w)
+                    self._set_os(r, "sof")
 
-                            # read optional signals (if present) on eof
-                            if self._os_vld_with == "eof":
-                                for s in self._os:
-                                    if self._os_data[s] is not None:
-                                        setattr(self._transaction, s, self._os_data[s][r].to_unsigned())
+                elif event == "start":
+                    # sof when the previous packet hasn't ended
+                    raise MFBProtocolError(f"MFB error: a start-of-frame received without an end-of-frame! ({sof_pos=})")
 
-                            self._recv_trans()
-                            self.frame_cnt += 1
-                            self.item_cnt += (len(self._transaction.data) * 8) // self._item_width
+                elif event == "end":
+                    # packet ends in this region and new one doesn't start
+                    self._transaction.data += self._data_bytes(r, 0, pkt_end)
+                    self._set_os(r, "eof")
+                    self._frame_received()
+                    self._in_frame = False
 
-                            # start of another packet, in_frame stays True
-                            self._transaction.data = self._data[r][:pkt_start].to_bytes(byteorder="little")
+                else:
+                    # packet starts and ends in another region, in_frame stays True
+                    self._transaction.data += self._data_bytes(r, 0, self._region_data_w)
 
-                            # read optional signals (if present) on sof
-                            if self._os_vld_with == "sof":
-                                for s in self._os:
-                                    if self._os_data[s] is not None:
-                                        setattr(self._transaction, s, self._os_data[s][r].to_unsigned())
+            else:
+                if event in ("whole", "end_start"):
+                    # packet starts and ends in this region, in_frame stays False
+                    self._transaction.data = self._data_bytes(r, pkt_start, pkt_end)
+                    self._set_os(r)
+                    self._frame_received()
 
-                        elif sof:
-                            # sof when the previous packet hasn't ended
-                            raise MFBProtocolError(f"MFB error: a start-of-frame received without an end-of-frame! ({sof_pos=})")
+                elif event == "start":
+                    # packet starts in this regions and ends in another one
+                    self._transaction.data = self._data_bytes(r, pkt_start, self._region_data_w)
+                    self._set_os(r, "sof")
+                    self._in_frame = True
 
-                        elif eof:
-                            # packet ends in this region and new one doesn't start
-                            self._transaction.data += self._data[r][pkt_end-1:].to_bytes(byteorder="little")
-
-                            # read optional signals (if present) on eof
-                            if self._os_vld_with == "eof":
-                                for s in self._os:
-                                    if self._os_data[s] is not None:
-                                        setattr(self._transaction, s, self._os_data[s][r].to_unsigned())
-
-                            self._recv_trans()
-                            in_frame = False
-                            self.frame_cnt += 1
-                            self.item_cnt += (len(self._transaction.data) * 8) // self._item_width
-
-                        else:
-                            # packet starts and ends in another region, in_frame stays True
-                            self._transaction.data += self._data[r].to_bytes(byteorder="little")
-
-                    else:
-                        if sof and eof:
-                            # packet starts and ends in this region, in_frame stays False
-                            self._transaction.data = self._data[r][pkt_end-1 : pkt_start].to_bytes(byteorder="little")
-
-                            # read optional signals (if present) on sof or eof
-                            for s in self._os:
-                                if self._os_data[s] is not None:
-                                    setattr(self._transaction, s, self._os_data[s][r].to_unsigned())
-
-                            self._recv_trans()
-                            self.frame_cnt += 1
-                            self.item_cnt += (len(self._transaction.data) * 8) // self._item_width
-
-                        elif sof:
-                            # packet starts in this regions and ends in another one
-                            self._transaction.data = self._data[r][:pkt_start].to_bytes(byteorder="little")
-
-                            # read optional signals (if present) on sof
-                            if self._os_vld_with == "sof":
-                                for s in self._os:
-                                    if self._os_data[s] is not None:
-                                        setattr(self._transaction, s, self._os_data[s][r].to_unsigned())
-
-                            in_frame = True
-
-                        elif eof:
-                            # eof when not in frame
-                            raise MFBProtocolError("MFB error: an end-of-frame received before a start-of-frame!")
+                elif event == "end":
+                    # eof when not in frame
+                    raise MFBProtocolError("MFB error: an end-of-frame received before a start-of-frame!")
