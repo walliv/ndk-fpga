@@ -612,7 +612,8 @@ begin
         META_WIDTH       => PCIE_RQ_META_WIDTH,
         MASKING_EN       => false,
         CNT_MAX          => 2**3,
-        ARRIVAL_ORDER_EN => False
+        -- A pointer update must not leave before the data and DMA header writes it covers.
+        ARRIVAL_ORDER_EN => True
     )
     port map (
         CLK             => CLK,
