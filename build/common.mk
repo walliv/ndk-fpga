@@ -8,6 +8,9 @@
 RM ?= rm -f
 TCLSH ?= tclsh
 
+# The cocotbext and ofm of this repository, to go ahead of any editable install that points to another checkout.
+OFM_PYTHONPATH := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))..)/python/cocotbext:$(abspath $(dir $(lastword $(MAKEFILE_LIST)))..)/python/ofm
+
 .PHONY: simulation vhdocl cocotb clean_common coverage-report
 
 GEN_MK_TARGETS += simulation vhdocl cocotb ghdl-sim nvc nvc-sim nvc-elab nvc-run
