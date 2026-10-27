@@ -26,6 +26,9 @@ class MFBDriver(ModularBusDriver):
 
     A word is staged as plain integers and per-region lists and only the signals whose value differs from the last
     write are written. With nothing queued, the driver parks the bus and sleeps until the next append().
+
+    An idle generator with frame_gaps set, e.g. OnOffIdleGenerator, counts blocks: its gap before a frame leaves blocks
+    empty, inside a frame it is asked before each later word for whole idle words. Others put idle transactions first.
     """
 
     bus: MfbProtocol
@@ -78,6 +81,7 @@ class MFBDriver(ModularBusDriver):
         self._region_bytes   : int = bus.REGION_SIZE * self._block_bytes
         self._word_bytes     : int = self._regions * self._region_bytes
         self._word_items     : int = self._regions * self._region_items
+        self._word_blocks    : int = self._regions * bus.REGION_SIZE
 
         self._init_signals()
 
@@ -247,8 +251,13 @@ class MFBDriver(ModularBusDriver):
 
             assert isinstance(transaction, MfbTransaction), f"Transaction must be an instance of MfbTransaction, not {type(transaction)}."
 
-            for _ in range(self._idle_gen.get(transaction)):
-                await self._idle(self._idle_fac.make())
+            if self._idle_gen.frame_gaps:
+                gap = self._idle_gen.get(transaction)
+                if gap:
+                    await self._skip(gap * self._block_bytes)
+            else:
+                for _ in range(self._idle_gen.get(transaction)):
+                    await self._idle(self._idle_fac.make())
 
             await self._frame(transaction)
 
@@ -308,7 +317,10 @@ class MFBDriver(ModularBusDriver):
         item_bytes = self._item_bytes
         cur = self._cursor
 
-        if not cur:
+        gen = self._idle_gen
+        frame_gaps = gen.frame_gaps
+
+        if not cur and not frame_gaps:
             self._run = transaction
             self._run_items = 0
 
@@ -337,6 +349,9 @@ class MFBDriver(ModularBusDriver):
                 value = getattr(transaction, name.lower(), None)
                 if value is not None:
                     self._w_words[name] = value
+            if frame_gaps:
+                gen.put(transaction, items=take // item_bytes, blocks=-(-take // block_bytes), first=pos // item_bytes,
+                        last=(pos + take) // item_bytes - 1, start=not pos, end=pos + take >= length)
             pos += take
             cur += take
 
@@ -345,6 +360,12 @@ class MFBDriver(ModularBusDriver):
 
             await self._send_word()
             cur = 0
+
+            if frame_gaps:
+                gap = gen.get(transaction, first=pos // item_bytes, last=length // item_bytes - 1)
+                for _ in range(-(-gap // self._word_blocks)):
+                    await self._idle_word()
+                    gen.put(IdleTransaction(), items=self._word_items, end=True)
 
         region = (cur - 1) // region_bytes
         self._w_eof |= 1 << region
@@ -363,7 +384,8 @@ class MFBDriver(ModularBusDriver):
     def _run_end(self):
         """Report a run of frames to the idle generator once the word it ends in is full; a run starts in an empty word."""
         if not self._cursor and self._run is not None:
-            self._idle_gen.put(self._run, items=self._run_items, end=True)
+            if not self._idle_gen.frame_gaps:
+                self._idle_gen.put(self._run, items=self._run_items, end=True)
             self._run = None
 
 

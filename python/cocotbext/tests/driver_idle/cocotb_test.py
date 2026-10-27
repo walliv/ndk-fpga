@@ -6,13 +6,14 @@
 """Each driver sends whole words split by scripted idle words while the sink drops DST_RDY at random. Words
 must arrive once, in order and held while waiting, and each gap must last exactly its idle words."""
 
+import itertools
 import random
 
 import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import ClockCycles, ReadOnly, RisingEdge
 
-from cocotbext.ofm.base.generators import IdleGenerator
+from cocotbext.ofm.base.generators import IdleGenerator, OnOffIdleGenerator
 from cocotbext.ofm.base.transaction import IdleTransactionFactory
 from cocotbext.ofm.mfb.drivers import MFBDriver
 from cocotbext.ofm.mfb.protocol import MfbParams
@@ -127,6 +128,71 @@ async def run_mfb_idle_words_test(dut):
     for f in frames:
         drv.append(MfbTransaction(data=f))
     await run(dut, "RX_MFB", [int.from_bytes(f, "little") for f in frames], gaps[1:] + [0])
+
+
+@cocotb.test()
+async def run_mfb_frame_gap_words_test(dut):
+    """Frames of one to four words; the on-off generator ends each word with its scripted number of whole idle words,
+    inside a frame as between frames."""
+    await start(dut)
+    geo = mfb_geometry(dut)
+    blocks = geo.regions * geo.region_size
+    word_bytes = geo.word_width // 8
+    rng = random.Random(random.getrandbits(64))
+    gaps = [rng.randint(0, GAP_MAX) for _ in range(WORDS)]
+    pattern = itertools.chain(((blocks, g * blocks) for g in gaps), itertools.repeat((blocks, 0)))
+    drv = MFBDriver(dut, "RX_MFB", dut.CLK, generics_prefix="MFB", idle_generator=OnOffIdleGenerator(pattern))
+    data = rng.randbytes(WORDS * word_bytes)
+    sent = 0
+    while sent < WORDS:
+        n = min(rng.randint(1, 4), WORDS - sent)
+        drv.append(MfbTransaction(data=data[sent * word_bytes:(sent + n) * word_bytes]))
+        sent += n
+    words = [int.from_bytes(data[k * word_bytes:(k + 1) * word_bytes], "little") for k in range(WORDS)]
+    await run(dut, "RX_MFB", words, gaps)
+
+
+async def collect_sof_blocks(dut, geo, blocks):
+    """The block of every SOF, counted from the first word on; with DST_RDY high every clock is a word. Started in
+    the timestep of the first word, it reads that word before the first edge."""
+    width = len(dut.RX_MFB_SOF_POS) // geo.regions
+    word = None
+    await ReadOnly()
+    while True:
+        if word is not None or int(dut.RX_MFB_SRC_RDY.value):
+            word = 0 if word is None else word + 1
+            sof, sof_pos = int(dut.RX_MFB_SOF.value), str(dut.RX_MFB_SOF_POS.value)
+            for r in range(geo.regions):
+                if int(dut.RX_MFB_SRC_RDY.value) and sof >> r & 1:
+                    field = sof_pos[len(sof_pos) - (r + 1) * width:len(sof_pos) - r * width]
+                    blocks.append((word * geo.regions + r) * geo.region_size + int(field, 2))
+        await RisingEdge(dut.CLK)
+        await ReadOnly()
+
+
+@cocotb.test()
+async def run_mfb_frame_gap_blocks_test(dut):
+    """Frames of one region; the on-off generator leaves its scripted number of blocks, up to more than a word,
+    empty between them."""
+    await start(dut)
+    geo = mfb_geometry(dut)
+    dut.RX_MFB_DST_RDY.value = 1
+    rng = random.Random(random.getrandbits(64))
+    frames = 200
+    gaps = [rng.randint(0, 3) * geo.region_size for _ in range(frames)]
+    pattern = itertools.chain(((geo.region_size, g) for g in gaps), itertools.repeat((geo.region_size, 0)))
+    drv = MFBDriver(dut, "RX_MFB", dut.CLK, generics_prefix="MFB", idle_generator=OnOffIdleGenerator(pattern))
+    blocks = []
+    for _ in range(frames):
+        drv.append(MfbTransaction(data=rng.randbytes(geo.region_size * geo.block_size * geo.item_width // 8)))
+    cocotb.start_soon(collect_sof_blocks(dut, geo, blocks))
+    await ClockCycles(dut.CLK, frames * 3)
+
+    expected = [0]
+    for g in gaps[:frames - 1]:
+        expected.append(expected[-1] + geo.region_size + g)
+    assert blocks == expected, f"{len(blocks)} SOFs, first misplaced: " \
+        f"{next(((k, b, e) for k, (b, e) in enumerate(zip(blocks, expected)) if b != e), None)}"
 
 
 @cocotb.test()
