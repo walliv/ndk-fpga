@@ -818,9 +818,7 @@ begin
                 -- Reset registers by writing 0
                 -- Sample registers from counters by writing 1
                 -- Reset and sample old value at the same time by writing 2
-                with to_integer(unsigned(piped_mi_dwr_reg)) select reg_di (i)(0) <=
-                    (others => '0') when 0,
-                    cntr_do(i) when others;
+                reg_di (i)(0) <= (others => '0') when (unsigned(piped_mi_dwr_reg) = 0) else cntr_do(i);
 
                 -- reading is performed one clock cycle earlier than the writing
                 reg_we   (i)(0) <= '1' when cntr_rd_reg = '1' or cntr_rst_reg = '1' else '0';
