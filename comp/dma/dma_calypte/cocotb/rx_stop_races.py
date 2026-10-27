@@ -18,7 +18,7 @@ from cocotbext.ofm.utils.signals import signal_binstr, signal_int
 from checkers import BenchError
 from cocotb_test import _now
 from rx_full_buffer import RxHolBench
-from rx_start_stop import S_PACKET_PROCESS, STOP_WAIT_FOR_POINTERS, RxStartStopBench
+from rx_start_stop import S_PACKET_PROCESS, STOP_WAIT_FOR_POINTERS, RxStartStopBench, fsm_state
 
 STALE_HIT = "stop slot open while the stop comparator still shows the pointers before their last write"
 
@@ -38,7 +38,7 @@ class RxStaleStopBench(RxStartStopBench):
         cmps = (sw.dsp_comp_hdp_i, sw.dsp_comp_hhp_i)
 
         def cycle_probe():
-            if (int(sw.stop_fsm_pst.value) == STOP_WAIT_FOR_POINTERS and signal_binstr(sw.stop_chan_ok) == "1"
+            if (fsm_state(sw.stop_fsm_pst) == STOP_WAIT_FOR_POINTERS and signal_binstr(sw.stop_chan_ok) == "1"
                     and signal_binstr(sw.stop_ptr_ok) == "1"
                     and any(signal_int(c.INPUT_1) != signal_int(c.INPUT_2) for c in cmps)):
                 self.hits[STALE_HIT] += 1
@@ -94,7 +94,7 @@ class RxStaleSdpBench(RxHolBench):
             c = self.stopping
             if c is None:
                 return
-            if (self.held["data"] == c and int(h.pkt_process_pst.value) == S_PACKET_PROCESS
+            if (self.held["data"] == c and fsm_state(h.pkt_process_pst) == S_PACKET_PROCESS
                     and signal_int(h.pkt_chan_reg) == c):
                 self.hol_hits[f"{self.HIT} ({self.queues[c].mode})"] += 1
                 self.stopping = None

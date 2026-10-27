@@ -25,7 +25,7 @@ from traffic import ndk_rand_dist, pick
 
 SW_POLL_CYCLES = 20
 # States of the header manager's packet_process_fsm_t and chan_state_change_t and of the SW manager's stop_fsm_type by
-# position, as nvc's VHPI gives an enum.
+# position, as fsm_state() reads them.
 PKT_FSM = ("S_IDLE", "S_PACKET_PROCESS", "S_PACKET_DISCARD")
 CHAN_FSM = ("S_IDLE", "S_WAIT_FOR_PKT_END")
 STOP_FSM = ("IDLE", "WAIT_FOR_REQ_ACK", "WAIT_FOR_POINTERS", "WAIT_FOR_PTR_UPDATE_DISPATCH")
@@ -33,6 +33,12 @@ S_IDLE, S_PACKET_PROCESS, S_PACKET_DISCARD = map(PKT_FSM.index, ("S_IDLE", "S_PA
 CHAN_S_IDLE, CHAN_S_WAIT_FOR_PKT_END = map(CHAN_FSM.index, ("S_IDLE", "S_WAIT_FOR_PKT_END"))
 STOP_IDLE, STOP_WAIT_FOR_POINTERS, STOP_DISPATCH = map(STOP_FSM.index, ("IDLE", "WAIT_FOR_POINTERS",
                                                                         "WAIT_FOR_PTR_UPDATE_DISPATCH"))
+
+
+def fsm_state(handle):
+    """Position of an enum signal. cocotb 2.1's EnumObject.value wraps positions above 1 on Questa, whose FLI handle
+    reports one element where VHPI reports the 8 or 32 bits of the value, so it is read through the GPI value."""
+    return handle._handle.get_signal_val_long()
 
 
 START_WINDOW_HIT = "pointer write before start_acked"
@@ -100,7 +106,7 @@ class RxStartStopBench(CalypteBench):
                       "on START_REQ_VLD in S_IDLE without a stop; a request outside S_IDLE is lost")
 
         def takes():
-            idle = int(h.chan_state_change_pst.value) == CHAN_S_IDLE
+            idle = fsm_state(h.chan_state_change_pst) == CHAN_S_IDLE
             stop = idle and signal_binstr(h.STOP_REQ_VLD) == "1"
             start = idle and not stop and signal_binstr(h.START_REQ_VLD) == "1"
             return (signal_int(h.STOP_REQ_CHANNEL) if stop else None, signal_int(h.START_REQ_CHANNEL) if start else None)
@@ -119,7 +125,7 @@ class RxStartStopBench(CalypteBench):
             eof = signal_binstr(h.MFB_EOF) == "1" and signal_handshake(h.MFB_SRC_RDY, h.MFB_DST_RDY)
             if eof:
                 self.events["EOF"].append(cycle)
-            if signal_binstr(h.input_fifo_empty) == "0" and int(h.pkt_process_pst.value) == S_IDLE:
+            if signal_binstr(h.input_fifo_empty) == "0" and fsm_state(h.pkt_process_pst) == S_IDLE:
                 self.events["SOF"].append(cycle)
             taken = takes()
             for kind, idx, busy, running in reqs:
@@ -127,7 +133,7 @@ class RxStartStopBench(CalypteBench):
                 if c is None:
                     continue
                 self.last_take[kind] = cycle
-                pst = int(h.pkt_process_pst.value)
+                pst = fsm_state(h.pkt_process_pst)
                 if kind == "start":
                     self.start_window.add(c)
                 if eof and pst == busy and signal_int(h.pkt_chan_reg) == c:
@@ -513,7 +519,7 @@ class RxStopLivelockBench(RxStartStopBench):
         def cycle_probe():
             nonlocal prev
             cycle = _now() // CLK_NS
-            pst = int(sw.stop_fsm_pst.value)
+            pst = fsm_state(sw.stop_fsm_pst)
             if signal_binstr(sw.STOP_REQ_VLD) == "1":
                 self.stop_rec = {"ch": signal_int(sw.STOP_REQ_CHAN), "req": cycle, "disp": [], "disp_len": [], "slot": [],
                                  "ok": None, "ack": None, "hits": 0, "late": False}
@@ -589,10 +595,10 @@ class RxStopLivelockBench(RxStartStopBench):
         await ClockCycles(self.clk, step + 1)
         self.send(b, size)
         limit = 4 * self.rx_ch + size // self.word_bytes
-        await self.wait_for(lambda: int(h.pkt_process_pst.value) == S_PACKET_DISCARD and signal_int(h.pkt_chan_reg) == b,
+        await self.wait_for(lambda: fsm_state(h.pkt_process_pst) == S_PACKET_DISCARD and signal_int(h.pkt_chan_reg) == b,
                             limit)
         await self.rx_regs[b].write("control", 1)
-        held = await self.wait_for(lambda: int(h.chan_state_change_pst.value) == CHAN_S_WAIT_FOR_PKT_END, limit)
+        held = await self.wait_for(lambda: fsm_state(h.chan_state_change_pst) == CHAN_S_WAIT_FOR_PKT_END, limit)
         n = len(self.stops)
         start = cocotb.start_soon(self.complete(b, 1, f"RX ch{b} start against its dropped packet"))
         lat = await self.complete(c, 0, f"RX ch{c} stop behind the start of ch{b} (step {step})")
