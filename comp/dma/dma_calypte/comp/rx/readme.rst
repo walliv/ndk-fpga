@@ -66,11 +66,13 @@ set for one channel is shown in the following table:
     * - 0x18
       - Hardware data pointer (HDP)
       - W/R
-      - Write pointer for data (up to 16 bits)
+      - Write pointer for data (up to 16 bits). It moves past a block once the write of that block has left
+        the controller.
     * - 0x1C
       - Hardware header pointer (HHP)
       - W/R
-      - Write pointer for headers (up to 16 bits)
+      - Write pointer for headers (up to 16 bits). It moves past a DMA header once its write has left the
+        controller.
     * - 0x20
       - Update timeout
       - R/W
