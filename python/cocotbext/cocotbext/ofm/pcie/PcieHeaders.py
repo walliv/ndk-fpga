@@ -107,3 +107,13 @@ class RQMfbMeta(SerializableHeader):
         ['header', 'prefix', 'firstBe', 'lastBe'],
         [128, 32, 4, 4],
     ))
+
+
+class CCUser(SerializableHeader):
+    items = list(zip(
+        [
+            'sop0', 'sop1', 'sop_ptr0', 'sop_ptr1', 'eop0', 'eop1', 'eop_ptr0', 'eop_ptr1',
+            'discontinue', 'parity'
+        ],
+        [1, 1, 2, 2, 1, 1, 4, 4, 1, 64],
+    ))
