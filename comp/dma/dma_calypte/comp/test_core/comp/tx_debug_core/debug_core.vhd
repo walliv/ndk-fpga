@@ -1244,14 +1244,15 @@ begin
 
     mfb_merger_simple_i : entity work.MFB_MERGER_SIMPLE
     generic map (
-        REGIONS     => MFB_REGIONS,
-        REGION_SIZE => MFB_REGION_SIZE,
-        BLOCK_SIZE  => MFB_BLOCK_SIZE,
-        ITEM_WIDTH  => MFB_ITEM_WIDTH,
+        REGIONS          => MFB_REGIONS,
+        REGION_SIZE      => MFB_REGION_SIZE,
+        BLOCK_SIZE       => MFB_BLOCK_SIZE,
+        ITEM_WIDTH       => MFB_ITEM_WIDTH,
 
-        META_WIDTH  => log2(PKT_SIZE_MAX+1) + DMA_META_WIDTH + log2(CHANNELS),
-        MASKING_EN  => TRUE,
-        CNT_MAX     => 32
+        META_WIDTH       => log2(PKT_SIZE_MAX+1) + DMA_META_WIDTH + log2(CHANNELS),
+        MASKING_EN       => TRUE,
+        CNT_MAX          => 32,
+        ARRIVAL_ORDER_EN => False
     )
     port map (
         CLK             => CLK,

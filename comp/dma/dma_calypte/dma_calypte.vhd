@@ -604,14 +604,15 @@ begin
 
     pcie_rq_mfb_merger_i : entity work.MFB_MERGER_SIMPLE
     generic map (
-        REGIONS     => PCIE_RQ_MFB_REGIONS,
-        REGION_SIZE => PCIE_RQ_MFB_REGION_SIZE,
-        BLOCK_SIZE  => PCIE_RQ_MFB_BLOCK_SIZE,
-        ITEM_WIDTH  => PCIE_RQ_MFB_ITEM_WIDTH,
+        REGIONS          => PCIE_RQ_MFB_REGIONS,
+        REGION_SIZE      => PCIE_RQ_MFB_REGION_SIZE,
+        BLOCK_SIZE       => PCIE_RQ_MFB_BLOCK_SIZE,
+        ITEM_WIDTH       => PCIE_RQ_MFB_ITEM_WIDTH,
 
-        META_WIDTH  => PCIE_RQ_META_WIDTH,
-        MASKING_EN  => false,
-        CNT_MAX     => 2**3
+        META_WIDTH       => PCIE_RQ_META_WIDTH,
+        MASKING_EN       => false,
+        CNT_MAX          => 2**3,
+        ARRIVAL_ORDER_EN => False
     )
     port map (
         CLK             => CLK,
