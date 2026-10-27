@@ -589,6 +589,20 @@ architecture FULL of RX_DMA_CALYPTE_SW_MANAGER is
     constant UPD_TIMEOUT_CNTR_NULL_VAL : unsigned(MI_WIDTH -1 downto 0) := (others => '0');
     signal   upd_timeout_cntr_reg      : unsigned(MI_WIDTH -1 downto 0);
     signal   upd_timeout_cntr_next     : unsigned(MI_WIDTH -1 downto 0);
+
+    -- The stop comparators register their inputs and their result in every DEVICE branch of DSP_COMPARATOR (CMP_DSP
+    -- AREG/BREG and PREG, the Intel DSP atoms' input and output registers, the behavioural input and RESULT registers).
+    constant PTR_CMP_REGS_EN : boolean := true;
+    constant PTR_CMP_LATENCY : natural := tsel(PTR_CMP_REGS_EN, 1, 0) + 1;
+
+    -- A pointer register of the stopping channel was written, or the channel changed, in this cycle
+    signal stop_ptr_wr      : std_logic;
+    signal stop_hxp_wr      : std_logic;
+    signal stop_settle_cntr : unsigned(log2(PTR_CMP_LATENCY+1) -1 downto 0);
+    -- The comparator results reflect the current pointer registers of the stopping channel
+    signal stop_ptr_fresh   : std_logic;
+    -- The pointer registers of the stopping channel themselves, not the comparator result, differ
+    signal stop_ptr_ne_now  : std_logic;
     -- =====================================================================
 
 
@@ -1144,7 +1158,7 @@ begin
                 end if;
 
                 -- This takes priority if this would occur at the same time with timeout counter runout
-                if (stop_chan_ok = '1' and stop_ptr_ok = '1') then
+                if (stop_chan_ok = '1' and stop_ptr_ok = '1' and stop_ptr_fresh = '1') then
                     stop_fsm_nst                                                 <= IDLE;
                     stop_acked                                                   <= '1';
                     enabled_chan_rst(to_integer(unsigned(stop_fsm_channel_reg))) <= '1';
@@ -1155,6 +1169,43 @@ begin
     -- Detect Stop acknowledgement propagation to Status Register
     stop_chan_ok <= '1' when (stop_fsm_channel_reg = active_chan_reg) else '0';
     stop_ptr_ok  <= stop_hdp_ok_reg and stop_hhp_ok_reg;
+
+    stop_hxp_wr <= '1' when ((HDP_WR_EN = '1' and HDP_WR_CHAN = stop_fsm_channel_reg) or
+                             (HHP_WR_EN = '1' and HHP_WR_CHAN = stop_fsm_channel_reg)) else
+                   '0';
+    stop_ptr_wr <= '1' when (stop_hxp_wr = '1' or
+                             (START_REQ_VLD = '1' and active_chan_reg = stop_fsm_channel_reg) or
+                             (piped_mi_wr = '1' and mi_chan = stop_fsm_channel_reg and
+                              (mi_reg_addri = R_ADDRS(R_SDP) or mi_reg_addri = R_ADDRS(R_SHP))) or
+                             stop_fsm_channel /= stop_fsm_channel_reg) else
+                   '0';
+
+    stop_ptr_fresh <= '1' when (stop_settle_cntr = PTR_CMP_LATENCY and stop_ptr_wr = '0') else '0';
+
+    stop_track_p : process (CLK)
+    begin
+        if (rising_edge(CLK)) then
+            if (stop_ptr_wr = '1') then
+                stop_settle_cntr <= (others => '0');
+            elsif (stop_settle_cntr /= PTR_CMP_LATENCY) then
+                stop_settle_cntr <= stop_settle_cntr + 1;
+            end if;
+
+            if (RESET = '1') then
+                stop_settle_cntr <= (others => '0');
+            end if;
+        end if;
+    end process;
+
+    stop_ptr_ne_now <= '1' when (reg_dob_opt(R_HDP)(1)(POINTER_WIDTH-1 downto 0) /= reg_dob_opt(R_SDP)(1)(POINTER_WIDTH-1 downto 0) or
+                                 reg_dob_opt(R_HHP)(1)(POINTER_WIDTH-1 downto 0) /= reg_dob_opt(R_SHP)(1)(POINTER_WIDTH-1 downto 0)) else
+                       '0';
+
+    -- psl default clock is rising_edge(CLK);
+
+    -- psl assert_stop_ack_ptrs_equal :
+    --      assert always (stop_acked = '1' -> stop_ptr_ne_now = '0') abort (RESET)
+    --      report "RX_DMA_SW_MANAGER: A stop acknowledged while the channel's HDP/HHP differ from its SDP/SHP!";
     -- =====================================================================
 
     -- =============================================================================================
@@ -1284,7 +1335,7 @@ begin
     dsp_comp_hdp_i : entity work.DSP_COMPARATOR
     generic map (
         INPUT_DATA_WIDTH => POINTER_WIDTH,
-        INPUT_REGS_EN    => true,
+        INPUT_REGS_EN    => PTR_CMP_REGS_EN,
         DEVICE           => DEVICE,
         MODE             => "><="
     )
@@ -1307,7 +1358,7 @@ begin
     dsp_comp_hhp_i : entity work.DSP_COMPARATOR
     generic map (
         INPUT_DATA_WIDTH => POINTER_WIDTH,
-        INPUT_REGS_EN    => true,
+        INPUT_REGS_EN    => PTR_CMP_REGS_EN,
         DEVICE           => DEVICE,
         MODE             => "><="
     )
