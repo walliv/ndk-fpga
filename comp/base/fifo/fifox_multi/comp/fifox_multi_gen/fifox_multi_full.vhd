@@ -172,6 +172,9 @@ architecture FULL of FIFOX_MULTI_GEN is
 
         return true;
     end function;
+
+    -- psl default clock is rising_edge(CLK);
+
 begin
 
     -- -------------------------------------------------------------------------
@@ -182,11 +185,11 @@ begin
         severity failure;
 
     -- psl assert_read_empty_fifo :
-    --      assert always (SAFE_READ_MODE=true or (RD and EMPTY) = (READ_PORTS-1 downto 0 => '0')) abort (RESET) @rising_edge(CLK)
+    --      assert always (SAFE_READ_MODE=true or (RD and EMPTY) = (READ_PORTS-1 downto 0 => '0')) abort (RESET)
     --      report "ERROR: FIFOX Multi: Non-safe Read Mode condition violated! Reading from port to_string(i) is forbidden when EMPTY is active!";
 
     -- psl assert_write_full_fifo :
-    --      assert always (rd_check(RD, EMPTY)) abort (RESET) @rising_edge(CLK)
+    --      assert always (rd_check(RD, EMPTY)) abort (RESET)
     --      report "ERROR: FIFOX Multi: Aligned read condition viloated! Reading from non-empty port which and dont read from lower nonempty port is forbidden!";
 
 
