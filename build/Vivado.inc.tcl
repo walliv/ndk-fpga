@@ -35,6 +35,40 @@ source $OFM_PATH/build/scripts/vivado/msg_filter/tcl_msg_filters.tcl
 # ---------------------------------------------------------------------
 
 # -----------------------------------------------------------------------------
+# Procedure file_properties
+# The properties that the options of a source file ask for, each as the arguments of set_property before its object.
+# EvalFile sets them in the project and filelist_EvalFile writes them to the filelist.
+#
+proc file_properties {OPT} {
+    array set opt $OPT
+    set properties [list]
+
+    if {$opt(TYPE) == "CONSTR_VIVADO"} {
+        foreach name {SCOPED_TO_REF PROCESSING_ORDER USED_IN} {
+            if {[info exists opt($name)]} {
+                lappend properties [list $name $opt($name)]
+            }
+        }
+    }
+
+    foreach {param_name param_value} $OPT {
+        if {$param_name == "VIVADO_SET_PROPERTY"} {
+            lappend properties $param_value
+        }
+    }
+    return $properties
+}
+
+# -----------------------------------------------------------------------------
+# Procedure tcl_script_runs
+# Whether the Tcl script of a source entry runs while the files are added.
+#
+proc tcl_script_runs {OPT} {
+    array set opt $OPT
+    return [expr {[info exists opt(PHASE)] && "ADD_FILES" in $opt(PHASE)}]
+}
+
+# -----------------------------------------------------------------------------
 # Procedure EvalFile
 # Add file to the project
 #
@@ -55,19 +89,6 @@ proc EvalFile {FNAME OPT} {
     } elseif {$opt(TYPE) == "CONSTR_VIVADO"} {
         puts "Constraints file added: $FNAME"
         add_files -fileset constrs_1 -norecurse $FNAME
-
-        if {[info exists opt(SCOPED_TO_REF)]} {
-            puts "- file scoped to ref: $opt(SCOPED_TO_REF)"
-            set_property SCOPED_TO_REF $opt(SCOPED_TO_REF) [get_files [file tail $FNAME]]
-        }
-        if {[info exists opt(PROCESSING_ORDER)]} {
-            puts "- file processing order: $opt(PROCESSING_ORDER)"
-            set_property PROCESSING_ORDER $opt(PROCESSING_ORDER) [get_files [file tail $FNAME]]
-        }
-        if {[info exists opt(USED_IN)]} {
-            puts "- file used in: $opt(USED_IN)"
-            set_property USED_IN $opt(USED_IN) [get_files [file tail $FNAME]]
-        }
     } elseif {$opt(TYPE) == "VIVADO_IP_XACT"} {
         add_files -norecurse $FNAME
         puts "IP added: $FNAME"
@@ -77,7 +98,7 @@ proc EvalFile {FNAME OPT} {
         generate_target all [get_files $FNAME] -force
         upgrade_ip [get_ips *] -quiet
     } elseif {$opt(TYPE) == "VIVADO_TCL"} {
-        if {[info exists opt(PHASE)] && "ADD_FILES" in $opt(PHASE)} {
+        if {[tcl_script_runs $OPT]} {
             puts "Running script: $FNAME"
 
             set vars ""
@@ -88,12 +109,9 @@ proc EvalFile {FNAME OPT} {
         }
     }
 
-
-    foreach {param_name param_value} $OPT {
-        if {$param_name == "VIVADO_SET_PROPERTY"} {
-            puts "- file set_propery params: $param_value"
-            set_property {*}$param_value [get_files [file tail $FNAME]]
-        }
+    foreach property [file_properties $OPT] {
+        puts "- file property: $property"
+        set_property {*}$property [get_files [file tail $FNAME]]
     }
 }
 
@@ -106,6 +124,144 @@ proc EvalComp {ENTITY ENTITY_BASE ARCHGRP} {
     if {[file exists $ENTITY_VFILE]} {
         source $ENTITY_VFILE
     }
+}
+
+# ---------------------------------------------------------------------
+# Procedure filelist_rebase_paths
+# Rewrites repository paths in IP parameters, also in nested lists, to a placeholder that the generated script resolves
+# with a string map, as the value sits in a brace-quoted dict.
+#
+proc filelist_rebase_paths {token combo_base git_root_token} {
+    if {[llength $token] > 1} {
+        set out [list]
+        foreach el $token {
+            lappend out [filelist_rebase_paths $el $combo_base $git_root_token]
+        }
+        return $out
+    }
+
+    if {[string first "/" $token] < 0} {
+        return $token
+    }
+
+    set norm [file normalize $token]
+    if {!([string match "${combo_base}/*" $norm] || $norm eq $combo_base)} {
+        return $token
+    }
+
+    set rel [string range $norm [string length $combo_base] end]
+    return "${git_root_token}${rel}"
+}
+
+# Placeholder for the repository root inside brace-quoted IP parameter dicts, where ${shell_git_root} would not be
+# substituted.
+set FILELIST_GIT_ROOT_TOKEN "@@SHELL_GIT_ROOT@@"
+
+# ---------------------------------------------------------------------
+# Procedure filelist_set
+# The commands that set a variable of the generated script to a value, with the repository paths in it relative to
+# ${shell_git_root}.
+#
+proc filelist_set {name value} {
+    global COMBO_BASE FILELIST_GIT_ROOT_TOKEN
+
+    set value [filelist_rebase_paths $value [file normalize $COMBO_BASE] $FILELIST_GIT_ROOT_TOKEN]
+    set cmds "set $name [list $value]\n"
+    # Resolve the placeholder to the real root at source time.
+    if {[string first $FILELIST_GIT_ROOT_TOKEN $value] >= 0} {
+        append cmds "set $name \[string map \[list $FILELIST_GIT_ROOT_TOKEN \$shell_git_root] \$$name]\n"
+    }
+    return $cmds
+}
+
+# ---------------------------------------------------------------------
+# Procedure filelist_EvalFile
+# The counterpart of EvalFile for target_filelist: collects the read_* and source commands of a source file, with its
+# path relative to ${shell_git_root}, in filelist_chunks.
+#
+proc filelist_EvalFile {FNAME OPT} {
+    global COMBO_BASE filelist_chunks
+
+    set opt(LIBRARY) "work"
+    array set opt $OPT
+
+    # The device tree entries carry no real path.
+    if {$opt(TYPE) == "DEVTREE"} {
+        return
+    }
+
+    set fext [file extension $FNAME]
+    set fname "\$\{shell_git_root\}[string range $FNAME [string length [file normalize $COMBO_BASE]] end]"
+    set cmds ""
+
+    if {$opt(TYPE) == ""} {
+        if {$fext == ".vhd" || $fext == ".vhdl"} {
+            append cmds "read_vhdl -library $opt(LIBRARY) -vhdl2008 $fname\n"
+        } elseif {$fext == ".v"} {
+            append cmds "read_verilog -library $opt(LIBRARY) $fname\n"
+        } elseif {$fext == ".sv" || $fext == ".svp"} {
+            append cmds "read_verilog -library $opt(LIBRARY) -sv $fname\n"
+        }
+    } elseif {$opt(TYPE) == "CONSTR_VIVADO" && $fext == ".xdc"} {
+        append cmds "read_xdc $fname\n"
+    } elseif {$opt(TYPE) == "VIVADO_IP_XACT"} {
+        append cmds "read_ip $fname\n"
+        append cmds "generate_target all \[get_files $fname\]\n"
+    } elseif {$opt(TYPE) == "VIVADO_BD"} {
+        append cmds "read_bd $fname\n"
+        append cmds "generate_target all \[get_files $fname\] -force\n"
+    } elseif {$opt(TYPE) == "VIVADO_TCL" && [tcl_script_runs $OPT]} {
+        # VARS is a flat {name value name value ...} list.
+        if {[info exists opt(VARS)]} {
+            foreach {var_name var_value} $opt(VARS) {
+                append cmds [filelist_set $var_name $var_value]
+            }
+        }
+        append cmds "source $fname\n"
+    }
+
+    foreach property [file_properties $OPT] {
+        append cmds "[list set_property {*}$property] \[get_files [list [file tail $fname]]\]\n"
+    }
+    lappend filelist_chunks $cmds
+}
+
+# ---------------------------------------------------------------------
+# Procedure target_filelist
+# Writes a stand-alone script (default "filelist.tcl") of read_* and source commands for every design source, with
+# paths relative to ${shell_git_root}, which the sourcing shell defines. Invoked through "make filelist".
+#
+proc target_filelist { {filename "filelist.tcl"} } {
+    global SYNTH_FLAGS HIERARCHY filelist_chunks
+
+    # Make sure dynamically generated sources (DevTree.vhd, netcope_const.vhd,
+    # combo_user_const.vhd, ...) exist on disk so the file list can reference them.
+    DevTree_init
+    foreach gen_file $SYNTH_FLAGS(NB_GENERATED_FILES) {
+        foreach gen_name [lindex $gen_file 0] {
+            target_generate_file [SimplPath $gen_name]
+        }
+    }
+
+    # EvalFileDevTree_paths only records the device-tree paths and filelist_EvalFile only collects text; neither runs
+    # a Vivado command, so this works under bare tclsh (see the ttarget_% rule).
+    set filelist_chunks [list]
+    AddInputFiles SYNTH_FLAGS HIERARCHY [list EvalFileDevTree_paths filelist_EvalFile] ""
+
+    set content "# This is an automatically generated file.\n"
+    append content "# You can regenerate it using \"make filelist\".\n\n"
+
+    append content "if \{!\[info exists shell_git_root]\} {
+    error \"The shell_git_root variable is undefined! Initialize it in a calling shell.\"
+}\n\n"
+    # AddInputFiles lists the files in the reverse of the order in which it adds them.
+    append content [join [lreverse $filelist_chunks] ""]
+
+    append content "generate_target all \[get_ips\]\n"
+    append content "synth_ip \[get_ips\]\n"
+
+    file delete "DevTree_paths.txt"
+    nb_file_update $filename $content
 }
 
 # ---------------------------------------------------------------------

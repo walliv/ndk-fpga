@@ -32,6 +32,7 @@ apps/*/build/*/*.bit
 apps/*/build/*/*.dcp
 apps/*/build/*/*.nfw
 apps/*/build/*/*.log
+apps/*/build/*/filelist.tcl
 
 # Vivado per-run reports written beside the project
 apps/*/build/*/*_par.*

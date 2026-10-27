@@ -1,0 +1,114 @@
+# test_vivado_flow.py: checks of the Vivado build flow that need tclsh only
+# Copyright (C) 2026 Universitaet Heidelberg, Institut fuer Technische Informatik (ZITI)
+# Author(s): Vladislav Valek <vladislav.valek@stud.uni-heidelberg.de>
+#
+# SPDX-License-Identifier: Apache-2.0
+
+import shutil
+import subprocess
+
+import pytest
+
+from flow_utils import REPO, make, tcl_stubs, write_makefile
+
+pytestmark = pytest.mark.skipif(shutil.which("tclsh") is None, reason="needs tclsh")
+
+# Stand-ins for the Vivado commands that a generated filelist.tcl calls; each call is printed as one Tcl list.
+VIVADO_STUBS = tcl_stubs(
+    *"read_vhdl read_verilog read_xdc read_ip read_bd generate_target synth_ip get_ips get_files set_property".split()
+)
+
+VIVADO_INC = f"""
+set env(OFM_PATH) {REPO}/
+set env(FIRMWARE_BASE) {REPO}/
+source {REPO}/build/Vivado.inc.tcl
+"""
+
+# An IP script that reports the build directory it was given.
+IP_SCRIPT = """
+puts "ip_build_dir [dict get $IP_PARAMS_L IP_BUILD_DIR]"
+"""
+
+
+def tclsh(directory, script):
+    result = subprocess.run(["tclsh"], input=script, cwd=directory, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    return result.stdout.splitlines()
+
+
+@pytest.fixture
+def repository(tmp_path):
+    """A stub repository with one VHDL source and one IP script, and a build directory that makes it like a card does."""
+    repo = tmp_path / "repo"
+    (repo / "comp" / "ip").mkdir(parents=True)
+    (repo / "comp" / "top.vhd").touch()
+    (repo / "comp" / "ip" / "stub.ip.tcl").write_text(IP_SCRIPT)
+    (repo / "comp" / "Modules.tcl").write_text(
+        'lappend MOD "$ENTITY_BASE/top.vhd"\n'
+        'lappend MOD [list "$ENTITY_BASE/ip/stub.ip.tcl" TYPE VIVADO_TCL PHASE {ADD_FILES}'
+        ' VARS [list IP_PARAMS_L [list IP_BUILD_DIR "$ENTITY_BASE/ip/build"]]]\n'
+    )
+    build = repo / "build"
+    build.mkdir()
+    (build / "Vivado.tcl").write_text(
+        f"set COMBO_BASE {repo}\n"
+        f"source {REPO}/build/targets/comp_vivado.tcl\n"
+    )
+    write_makefile(build, "stub", repo / "comp")
+    return repo
+
+
+def test_filelist(repository, tmp_path):
+    result = make(repository / "build", "filelist")
+    assert result.returncode == 0, result.stderr
+    filelist = repository / "build" / "filelist.tcl"
+    assert str(repository) not in filelist.read_text()
+
+    # The generated script must work from another checkout, which the sourcing shell names in shell_git_root.
+    moved = tmp_path / "moved"
+    shutil.copytree(repository, moved)
+    output = tclsh(moved / "build", f"{VIVADO_STUBS}\nset shell_git_root {moved}\nsource filelist.tcl\n")
+    assert f"read_vhdl -library work -vhdl2008 {moved}/comp/top.vhd" in output
+    assert f"ip_build_dir {moved}/comp/ip/build" in output
+
+
+def test_filelist_needs_shell_git_root(repository):
+    result = make(repository / "build", "filelist")
+    assert result.returncode == 0, result.stderr
+    result = subprocess.run(["tclsh", "filelist.tcl"], cwd=repository / "build", capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "shell_git_root variable is undefined" in result.stderr
+
+
+def filelist_output(repository, modules):
+    """What sourcing the filelist.tcl that make generates for a Modules.tcl prints, with stand-ins for Vivado."""
+    (repository / "comp" / "Modules.tcl").write_text(modules)
+    result = make(repository / "build", "filelist")
+    assert result.returncode == 0, result.stderr
+    return tclsh(repository / "build", f"{VIVADO_STUBS}\nset shell_git_root {repository}\nsource filelist.tcl\n")
+
+
+def test_filelist_follows_eval_file(repository):
+    """The filelist takes the library and the file properties of a source and skips a script outside ADD_FILES."""
+    (repository / "comp" / "pkg.vhd").touch()
+    (repository / "comp" / "pins.xdc").touch()
+    (repository / "comp" / "ip" / "unphased.ip.tcl").write_text('puts "must not run"\n')
+    output = filelist_output(repository, (
+        'lappend MOD [list lib "$ENTITY_BASE/pkg.vhd"]\n'
+        'lappend MOD [list "$ENTITY_BASE/pins.xdc" TYPE CONSTR_VIVADO SCOPED_TO_REF top'
+        " VIVADO_SET_PROPERTY {USED_IN synthesis}]\n"
+        'lappend MOD [list "$ENTITY_BASE/ip/unphased.ip.tcl" TYPE VIVADO_TCL]\n'
+    ))
+    assert f"read_vhdl -library lib -vhdl2008 {repository}/comp/pkg.vhd" in output
+    assert f"read_xdc {repository}/comp/pins.xdc" in output
+    assert "set_property SCOPED_TO_REF top {}" in output
+    assert "set_property USED_IN synthesis {}" in output
+    assert "must not run" not in output
+
+
+def test_eval_file_sets_the_file_properties(tmp_path):
+    output = tclsh(tmp_path, VIVADO_INC + tcl_stubs("add_files", "get_files", "set_property") + (
+        "EvalFile /src/pins.xdc [list TYPE CONSTR_VIVADO SCOPED_TO_REF top VIVADO_SET_PROPERTY {USED_IN synthesis}]\n"
+    ))
+    assert "set_property SCOPED_TO_REF top {}" in output
+    assert "set_property USED_IN synthesis {}" in output

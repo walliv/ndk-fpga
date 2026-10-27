@@ -26,3 +26,11 @@ def write_makefile(directory, entity, path):
         "all: comp\n"
         f"include {REPO}/build/Makefile\n"
     )
+
+
+def tcl_stubs(*commands):
+    """Tcl that stands in for Vivado commands: each call prints its arguments as one Tcl list."""
+    return (
+        "proc record {args} { puts $args }\n"
+        f"foreach cmd {{{' '.join(commands)}}} {{ interp alias {{}} $cmd {{}} record $cmd }}\n"
+    )
