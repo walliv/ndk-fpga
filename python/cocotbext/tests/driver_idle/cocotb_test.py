@@ -5,16 +5,18 @@
 # SPDX-License-Identifier: Apache-2.0
 """Each driver sends whole words split by scripted idle words while the sink drops DST_RDY at random. Words
 must arrive once, in order and held while waiting, and each gap must last exactly its idle words. The fast MFB driver
-is also checked for byte enables."""
+is also checked for byte enables and for the throughput probe."""
 
 import itertools
 import random
 from dataclasses import asdict
 
 import cocotb
+import pytest
 from cocotb.clock import Clock
 from cocotb.triggers import ClockCycles, ReadOnly, RisingEdge
 from cocotb.types import LogicArray
+from cocotb.utils import get_sim_time
 
 from cocotbext.ofm.base.generators import IdleGenerator
 from cocotbext.ofm.base.transaction import IdleTransactionFactory
@@ -24,6 +26,7 @@ from cocotbext.ofm.mfb.protocol import MfbParams
 from cocotbext.ofm.mfb.transaction import MfbTransaction
 from cocotbext.ofm.mvb.drivers import MVBDriver
 from cocotbext.ofm.mvb.transaction import MvbTrClassic
+from cocotbext.ofm.utils.throughput_probe import ThroughputProbe, ThroughputProbeMfbInterface
 from cocotbext.ofm.ver.backpressure import BackpressureConfig, apply_backpressure
 
 CLK_NS = 4
@@ -213,3 +216,22 @@ async def run_mvb_idle_words_test(dut):
             drv.append(MvbTrClassic(data=v))
     words = [sum(v << (k * width) for k, v in enumerate(word)) for word in values]
     await run(dut, "RX_MVB", words, gaps[1:] + [0])
+
+
+@cocotb.test()
+async def run_throughput_probe_elapsed_time_test(dut):
+    """A probe created late in a run rates its items against the time since its creation, not the simulation time."""
+    await start(dut)
+    geo = mfb_geometry(dut)
+    dut.RX_MFB_DST_RDY.value = 1
+    await ClockCycles(dut.CLK, 100)
+    drv = FastMFBDriver(dut, "RX_MFB", dut.CLK, mfb_params=asdict(geo), vld_gen=None)
+    probe = ThroughputProbe(ThroughputProbeMfbInterface(drv), throughput_units="items")
+    created = get_sim_time(unit="sec")
+    rng = random.Random(random.getrandbits(64))
+    for _ in range(50):
+        await drv.send(rng.randbytes(geo.word_width // 8))
+    elapsed = get_sim_time(unit="sec") - created
+
+    assert drv.item_cnt > 0
+    assert probe._get_average_throughput() == pytest.approx(drv.item_cnt / elapsed, rel=1e-3)
