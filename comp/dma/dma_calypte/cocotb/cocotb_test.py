@@ -75,6 +75,7 @@ class CalypteBench:
         self.in_reset = True
         # Extra consumers of every PCIE_RQ_MFB frame, called with the frame and its sampling time.
         self.rq_out_hooks = []
+        self.rise_hooks, self.fall_hooks = [], []
 
     def _check_elaboration(self):
         """The port widths must follow the generics, else every check would use wrong geometry."""
@@ -320,6 +321,15 @@ class CalypteBench:
         if start is not None or rt is not None or stop is not None:
             self.ptr_model.tx_cycle(start, rt, stop)
 
+    def on_cycle(self, fn, falling=False):
+        """Runs fn() out of reset in the read-only phase of every rising (falling) edge from the next one on, before the
+        sampler's own work (after mid_sampler's): the timing and order a probe task started here gets, without a task."""
+        cocotb.start_soon(self._add_hook(fn, falling))
+
+    async def _add_hook(self, fn, falling):
+        await (FallingEdge if falling else RisingEdge)(self.clk)
+        (self.fall_hooks if falling else self.rise_hooks).append(fn)
+
     async def sampler(self):
         edge = RisingEdge(self.clk)
         props = list(self.mfb_props.values())
@@ -330,6 +340,8 @@ class CalypteBench:
             now = _now()
             self.in_reset = signal_binstr(self.dut.RESET) != "0"
             if not self.in_reset:
+                for fn in self.rise_hooks:
+                    fn()
                 for m in self.monitors:
                     m.monitor_cycle()
                 self._probes()
@@ -353,6 +365,8 @@ class CalypteBench:
                 continue
             now = _now()
             self.rx_stop_inv.cycle(now // CLK_NS, now)
+            for fn in self.fall_hooks:
+                fn()
 
     # ------------------------------------------------------------------------------------------
     # Test flow
@@ -393,13 +407,17 @@ class CalypteBench:
         await Timer(200, "ns")
         return [cocotb.start_soon(run.run()) for run in self.rx_runs]
 
+    async def read_counter(self, regs, name):
+        """A counter register shows the value latched by its last strobe, so every read strobes it first."""
+        await regs.write_words(name, 1, 1)
+        return await regs.read(name)
+
     async def read_counters(self, regs):
         out = []
         for r in regs:
             vals = {}
             for name in COUNTERS:
-                await r.write_words(name, 1, 1)
-                vals[name] = await r.read(name)
+                vals[name] = await self.read_counter(r, name)
             out.append(vals)
         return out
 
@@ -471,26 +489,31 @@ class CalypteBench:
             await Timer(100, "ns")
         await Timer(1, "us")
 
-        rx_cnt = await self.read_counters(self.rx_regs)
-        tx_cnt = await self.read_counters(self.tx_regs)
+        def unparked():
+            return [f"RX ch{run.ch} register sequence did not park within 500 us: {run.state} since "
+                    f"{run.state_since} ns" for run in self.rx_runs if not run.parked]
 
-        problems = [f"{len(self.report.errors)} error(s) reported during the run, first: {self.report.errors[0]}"
-                    ] if self.report.errors else []
-        for run in self.rx_runs:
-            if not run.parked:
-                problems.append(f"RX ch{run.ch} register sequence did not park within 500 us: {run.state} since "
-                                f"{run.state_since} ns")
-        problems += self.end_checks(rx_cnt, tx_cnt)
-
-        self.log.info(
-            f"summary: sim_time={_now()} ns cycles={self.cycles} | RX in {self.rx_source.sent} pkts "
+        await self.finish(lambda: (
+            f"RX in {self.rx_source.sent} pkts "
             f"{self.rx_source.sent_bytes} B, model processed {self.rx_model.processed}, RQ TLPs compared "
             f"{self.rx_cmp.compared} | TX budget {self.budget.transactions}, CQ writes {self.cq_sender.sent}, "
             f"USR_TX packets compared {self.tx_data_cmp.compared} | pointer updates compared "
             f"{self.ptr_cmp.compared} {self.ptr_model.counts} | merger frames {self.merger.out_frames} | "
             f"RX starts/stops {sum(r.starts for r in self.rx_runs)}/{sum(r.stops for r in self.rx_runs)}, "
             f"TX starts/stops {sum(s.starts for s in self.tx_seqs)}/{sum(s.stops for s in self.tx_seqs)} | "
-            f"MI accesses {self.mi.accesses} | {self.rx_ptr_stats()}")
+            f"MI accesses {self.mi.accesses} | {self.rx_ptr_stats()}"), early=unparked)
+
+    async def finish(self, summary, early=None, late=None):
+        """`early()` and `late()` give a bench's problems before and after end_checks, `summary()` its summary line; all
+        are called after the counter reads, which change what they may report (MI accesses, parked runs)."""
+        rx_cnt = await self.read_counters(self.rx_regs)
+        tx_cnt = await self.read_counters(self.tx_regs)
+        problems = [f"{len(self.report.errors)} error(s) reported during the run, first: {self.report.errors[0]}"
+                    ] if self.report.errors else []
+        problems += early() if early else []
+        problems += self.end_checks(rx_cnt, tx_cnt)
+        problems += late() if late else []
+        self.log.info(f"summary: sim_time={_now()} ns cycles={self.cycles} | {summary()}")
         if problems:
             for p in problems:
                 self.log.error(p)
@@ -533,3 +556,80 @@ async def run_dma_calypte_test(dut):
 async def run_dma_calypte_speed_test(dut):
     """UVM `speed` of RX and TX together: no input gaps, DST_RDY constantly 1 on every output."""
     await CalypteBench(dut, speed=True).run()
+
+
+@cocotb.test()
+async def run_rx_stop_at_eof_test(dut):
+    """RX channel stops and starts swept cycle by cycle against the end of a single packet."""
+    from rx_start_stop import RxStartStopBench  # it imports this module
+    await RxStartStopBench(dut, "EOF").run()
+
+
+@cocotb.test()
+async def run_rx_stop_at_sof_test(dut):
+    """RX channel stops and starts swept cycle by cycle against the start of a single packet."""
+    from rx_start_stop import RxStartStopBench  # it imports this module
+    await RxStartStopBench(dut, "SOF").run()
+
+
+@cocotb.test()
+async def run_rx_start_discard_test(dut):
+    """RX channel starts swept cycle by cycle against the header decision of a long packet the channel drops."""
+    from rx_start_stop import RxStartDiscardBench  # it imports this module
+    await RxStartDiscardBench(dut).run()
+
+
+@cocotb.test()
+async def run_rx_stop_livelock_test(dut):
+    """RX channel stops whose dispatch period divides CHANNELS, held to every phase against the channel's slot."""
+    from rx_start_stop import RxStopLivelockBench  # it imports this module
+    await RxStopLivelockBench(dut).run()
+
+
+@cocotb.test()
+async def run_rx_full_resume_test(dut):
+    """H-a: stop a channel whose packet is queued behind a full channel's held request, then consume the full one."""
+    from rx_full_buffer import RxFullBufferBench  # it imports this module
+    await RxFullBufferBench(dut, "resume").run()
+
+
+@cocotb.test()
+async def run_rx_full_resume_no_timeout_test(dut):
+    """H-a with R_UPDATE_TIMEOUT 0: pointers of c moved after its stop sent them must be sent again at once."""
+    from rx_full_buffer import RxFullBufferBench  # it imports this module
+    await RxFullBufferBench(dut, "resume", upd_timeout=0).run()
+
+
+@cocotb.test()
+async def run_rx_full_stop_test(dut):
+    """H-b: as H-a, but the full channel is stopped by the driver's stop protocol instead of being consumed."""
+    from rx_full_buffer import RxFullBufferBench  # it imports this module
+    await RxFullBufferBench(dut, "stop").run()
+
+
+@cocotb.test()
+async def run_rx_full_idle_stop_test(dut):
+    """H-c: stop a channel with nothing queued while another channel's request is held on its full buffer."""
+    from rx_full_buffer import RxFullBufferBench  # it imports this module
+    await RxFullBufferBench(dut, "idle").run()
+
+
+@cocotb.test()
+async def run_rx_stale_stop_test(dut):
+    """Stops of a just started channel against its smallest packet, swept into the stop comparator's latency."""
+    from rx_stop_races import RxStaleStopBench  # it imports this module
+    await RxStaleStopBench(dut).run()
+
+
+@cocotb.test()
+async def run_rx_stale_sdp_test(dut):
+    """One channel's stop whose stale SDP write fills the channel's own ring while one of its packets is in progress."""
+    from rx_stop_races import RxStaleSdpBench  # it imports this module
+    await RxStaleSdpBench(dut).run()
+
+
+@cocotb.test()
+async def run_rx_ndptool_test(dut):
+    """ndptool's exit: every RX queue stops at once after its consumer, under continuing RX traffic."""
+    from rx_stop_races import RxNdptoolBench  # it imports this module
+    await RxNdptoolBench(dut).run()
