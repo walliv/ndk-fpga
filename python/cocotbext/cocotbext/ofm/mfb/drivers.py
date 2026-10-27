@@ -79,8 +79,8 @@ class MFBDriver(ModularBusDriver):
         return self._appended - self._frame_cnt
 
     def append(self, transaction: MfbTransaction | IdleTransaction, callback=None, event: Event | None = None):
-        """Queue a frame, or an IdleTransaction for a gap of its length in bytes. Once the sink accepts the frame,
-        `event` is set and `callback` is called with the frame."""
+        """Queue a frame, an MfbTransaction or plain bytes or LogicArray, or an IdleTransaction for a gap of its length
+        in bytes. Once the sink accepts the frame, `event` is set and `callback` is called with the frame."""
         self._queue.append(transaction)
 
         if not isinstance(transaction, IdleTransaction):
@@ -356,7 +356,8 @@ class MFBDriver(ModularBusDriver):
                 await self._idle(transaction)
                 continue
 
-            assert isinstance(transaction, MfbTransaction), f"Transaction must be an instance of MfbTransaction, not {type(transaction)}."
+            assert isinstance(transaction, (MfbTransaction, bytes, bytearray, LogicArray)), \
+                f"Transaction must be an MfbTransaction, bytes or a LogicArray, not {type(transaction)}."
 
             if self._idle_gen.frame_gaps:
                 gap = self._idle_gen.get(transaction)
@@ -402,17 +403,22 @@ class MFBDriver(ModularBusDriver):
         self._cursor = pos
         self._run_end()
 
-    def _set_region_values(self, transaction, region: int, put_with: str):
-        """Stage the transaction's values of the per-region optional signals valid with `put_with` in `region`."""
+    def _set_region_values(self, fields, region: int, put_with: str):
+        """Stage the values in `fields`, an MfbTransaction or None, of the per-region optional signals valid with
+        `put_with` in `region`."""
         for name, signal_put_with, width, _, _ in self._region_signals:
             if signal_put_with == put_with and name not in ("SOF_POS", "EOF_POS"):
-                value = getattr(transaction, name.lower(), None)
+                value = getattr(fields, name.lower(), None)
                 if value is not None:
                     self._w_regions[name][region] = _field_value(value, width, name)
 
-    async def _frame(self, transaction: MfbTransaction):
-        """Lay the frame from the cursor, sending each word it fills."""
-        data = transaction.data
+    async def _frame(self, transaction: MfbTransaction | bytes | bytearray | LogicArray):
+        """Lay the frame from the cursor, sending each word it fills. Plain bytes or a LogicArray are a frame without
+        values of optional signals."""
+        fields = transaction if isinstance(transaction, MfbTransaction) else None
+        data = transaction.data if fields is not None else transaction
+        if isinstance(data, LogicArray):
+            data = data.to_bytes(byteorder="little")
         length = len(data)
 
         if not length:
@@ -441,7 +447,7 @@ class MFBDriver(ModularBusDriver):
                     cur = 0
 
         if self._has_be:
-            be = getattr(transaction, "be", None)
+            be = getattr(fields, "be", None)
             if be is None:
                 be = (1 << length) - 1
             elif isinstance(be, LogicArray):
@@ -451,7 +457,7 @@ class MFBDriver(ModularBusDriver):
         self._w_sof |= 1 << region
         if "SOF_POS" in self._w_regions:
             self._w_regions["SOF_POS"][region] = (cur % region_bytes) // block_bytes
-        self._set_region_values(transaction, region, "SOF")
+        self._set_region_values(fields, region, "SOF")
 
         pos = 0
         while True:
@@ -462,7 +468,7 @@ class MFBDriver(ModularBusDriver):
             if self._has_be:
                 self._w_be |= (be >> pos & (1 << take) - 1) << cur
             for name, _, _ in self._word_signals:
-                value = getattr(transaction, name.lower(), None)
+                value = getattr(fields, name.lower(), None)
                 if value is not None:
                     self._w_words[name] = value
             if frame_gaps:
@@ -487,7 +493,7 @@ class MFBDriver(ModularBusDriver):
         self._w_eof |= 1 << region
         if "EOF_POS" in self._w_regions:
             self._w_regions["EOF_POS"][region] = ((cur - 1) % region_bytes) // item_bytes
-        self._set_region_values(transaction, region, "EOF")
+        self._set_region_values(fields, region, "EOF")
 
         cur = -(-cur // block_bytes) * block_bytes
         if cur >= word_bytes:
@@ -519,12 +525,18 @@ def _region_value(values: list, width: int, x_field: str):
     return "".join(x_field if v is None else (v if isinstance(v, str) else format(v, f"0{width}b")) for v in reversed(values))
 
 
-def _field_value(value, width: int, name: str):
-    """A transaction's value of a `width`-bit field: an int, or the bit string of a LogicArray."""
+def _field_value(value, width: int, name: str = "value"):
+    """A transaction's value of a `width`-bit field, an int, little-endian bytes or a LogicArray, as an int or as the
+    bit string of a LogicArray."""
     if isinstance(value, LogicArray):
         if len(value) != width:
             raise ValueError(f"{name} of {len(value)} bits does not fit the {width}-bit field of a region")
         return str(value)
+
+    if isinstance(value, (bytes, bytearray)):
+        value = int.from_bytes(value, byteorder="little")
+    elif not isinstance(value, int):
+        raise TypeError(f"Unsupported type of {name}: {type(value)}")
 
     if not 0 <= value < 1 << width:
         raise ValueError(f"{name} {value:#x} does not fit the {width}-bit field of a region")

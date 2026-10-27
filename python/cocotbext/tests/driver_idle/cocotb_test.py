@@ -321,6 +321,31 @@ async def run_mfb_sof_after_eof_test(dut):
 
 
 @cocotb.test()
+async def run_mfb_transaction_forms_test(dut):
+    """A frame is an MfbTransaction with bytes or a LogicArray as data, or plain bytes or a LogicArray; frame_cnt and
+    item_cnt count the accepted ones."""
+    await start(dut)
+    geo = mfb_geometry(dut)
+    word_bytes = geo.word_width // 8
+    dut.RX_MFB_DST_RDY.value = 1
+    rng = random.Random(random.getrandbits(64))
+    drv = MFBDriver(dut, "RX_MFB", dut.CLK, generics_prefix="MFB", idle_generator=IdleGenerator())
+    words = []
+    cocotb.start_soon(collect_frame_words(dut, words))
+
+    payloads = [rng.randbytes(word_bytes) for _ in range(5)]
+    forms = [MfbTransaction(data=payloads[0]), MfbTransaction(data=LogicArray.from_bytes(payloads[1], byteorder="little")),
+             payloads[2], bytearray(payloads[3]), LogicArray.from_bytes(payloads[4], byteorder="little")]
+    for form in forms:
+        await drv.send(form)
+    await ClockCycles(dut.CLK, 2)
+
+    assert words == [(int.from_bytes(p, "little"), 1, 1 << (geo.regions - 1)) for p in payloads], \
+        f"words as (DATA, SOF, EOF): {[(hex(d), s, e) for d, s, e in words]}"
+    assert drv.frame_cnt == len(forms) and drv.item_cnt == len(forms) * word_bytes * 8 // geo.item_width
+
+
+@cocotb.test()
 async def run_mvb_idle_words_test(dut):
     """Words of MVB_ITEMS items; the idle generator puts the scripted idle words before each word's first item."""
     await start(dut)
