@@ -885,13 +885,14 @@ begin
     -- MFB merger
     mfb_merger_i : entity work.MFB_MERGER_SIMPLE
     generic map (
-        REGIONS     => MFB_REGIONS,
-        REGION_SIZE => MFB_REGION_SIZE,
-        BLOCK_SIZE  => MFB_BLOCK_SIZE,
-        ITEM_WIDTH  => MFB_ITEM_WIDTH,
-        META_WIDTH  => MFB_UP_META_WIDTH,
-        MASKING_EN  => False,
-        CNT_MAX     => MFB_MERGER_CNT_MAX
+        REGIONS          => MFB_REGIONS,
+        REGION_SIZE      => MFB_REGION_SIZE,
+        BLOCK_SIZE       => MFB_BLOCK_SIZE,
+        ITEM_WIDTH       => MFB_ITEM_WIDTH,
+        META_WIDTH       => MFB_UP_META_WIDTH,
+        MASKING_EN       => False,
+        CNT_MAX          => MFB_MERGER_CNT_MAX,
+        ARRIVAL_ORDER_EN => False
     )
     port map (
         CLK             => CLK,

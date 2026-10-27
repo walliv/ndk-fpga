@@ -676,13 +676,14 @@ begin
 
         cc_merger_i : entity work.MFB_MERGER_SIMPLE
         generic map (
-            REGIONS     => CC_MFB_REGIONS,
-            REGION_SIZE => CC_MFB_REGION_SIZE,
-            BLOCK_SIZE  => CC_MFB_BLOCK_SIZE,
-            ITEM_WIDTH  => CC_MFB_ITEM_WIDTH,
-            META_WIDTH  => PCIE_CC_META_WIDTH,
-            MASKING_EN  => False,
-            CNT_MAX     => CC_MFB_MERGER_CNT_MAX
+            REGIONS          => CC_MFB_REGIONS,
+            REGION_SIZE      => CC_MFB_REGION_SIZE,
+            BLOCK_SIZE       => CC_MFB_BLOCK_SIZE,
+            ITEM_WIDTH       => CC_MFB_ITEM_WIDTH,
+            META_WIDTH       => PCIE_CC_META_WIDTH,
+            MASKING_EN       => False,
+            CNT_MAX          => CC_MFB_MERGER_CNT_MAX,
+            ARRIVAL_ORDER_EN => False
         )
         port map (
             CLK             => PCIE_CLK,
