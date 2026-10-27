@@ -39,8 +39,9 @@ entity TX_DMA_PCIE_TRANS_BUFFER is
         -- port A serves every read and index 0 is used.
         READ_BARREL_SHIFTER_EN : b_array_t(MFB_REGIONS -1 downto 0) := (others => TRUE);
 
-        -- Memory primitive: BRAM (default) or URAM. URAM needs an AMD DEVICE.
-        RAM_TYPE : string := "BRAM"
+        -- Memory primitive: AUTO resolves to URAM for 2 regions on UltraScale+/Versal when a bank
+        -- holds at least 2048 rows, else BRAM. URAM needs an AMD DEVICE.
+        RAM_TYPE : string := "AUTO"
     );
     port (
         CLK   : in std_logic;
@@ -72,16 +73,25 @@ end entity;
 
 architecture FULL of TX_DMA_PCIE_TRANS_BUFFER is
 
-    constant IS_INTEL_DEV : boolean := (DEVICE = "STRATIX10" or DEVICE = "AGILEX");
+    constant IS_INTEL_DEV       : boolean := (DEVICE = "STRATIX10" or DEVICE = "AGILEX");
+    constant IS_XILINX_URAM_DEV : boolean := (DEVICE = "ULTRASCALE" or DEVICE = "VERSAL");
+
+    -- Rows of one even/odd bank if the channels shared URAM-sized (16384-row) arrays.
+    constant BUFFER_DEPTH      : natural := trbuf_buffer_depth_f(POINTER_WIDTH, MFB_REGIONS*MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH);
+    constant BANK_ITEMS_URAM_C : natural := (trbuf_chans_per_array_f(CHANNELS, BUFFER_DEPTH, TRBUF_DEPTH_URAM) * BUFFER_DEPTH) / 2;
+    -- Resolved once here and passed to the banked buffer as its RAM_TYPE.
+    constant RES_RAM_TYPE      : string := tsel(
+        (RAM_TYPE = "URAM") or (RAM_TYPE = "AUTO" and IS_XILINX_URAM_DEV and MFB_REGIONS = 2 and BANK_ITEMS_URAM_C >= 2048),
+        "URAM", "BRAM");
     -- The banked buffer only where the per-byte one cannot serve the generics.
-    constant USE_BANKED   : boolean := (not IS_INTEL_DEV) and (RAM_TYPE = "URAM");
+    constant USE_BANKED        : boolean := (not IS_INTEL_DEV) and (RES_RAM_TYPE = "URAM");
 
 begin
 
     impl_g : if (not USE_BANKED) generate
 
-        assert (RAM_TYPE = "BRAM")
-            report "TX_DMA_PCIE_TRANS_BUFFER: on an Intel DEVICE, RAM_TYPE must be BRAM!"
+        assert (RAM_TYPE = "AUTO" or RAM_TYPE = "BRAM")
+            report "TX_DMA_PCIE_TRANS_BUFFER: on an Intel DEVICE, RAM_TYPE must be AUTO or BRAM!"
             severity FAILURE;
 
         trans_buffer_i : entity work.TX_DMA_PCIE_TRANS_BUFFER_IMPL(BYTE)
@@ -99,7 +109,7 @@ begin
             SPLIT_READ_PORTS       => SPLIT_READ_PORTS,
             READ_BARREL_SHIFTER_EN => READ_BARREL_SHIFTER_EN,
 
-            RAM_TYPE => RAM_TYPE
+            RAM_TYPE => RES_RAM_TYPE
         )
         port map (
             CLK   => CLK,
@@ -140,7 +150,7 @@ begin
             SPLIT_READ_PORTS       => SPLIT_READ_PORTS,
             READ_BARREL_SHIFTER_EN => READ_BARREL_SHIFTER_EN,
 
-            RAM_TYPE => RAM_TYPE
+            RAM_TYPE => RES_RAM_TYPE
         )
         port map (
             CLK   => CLK,
