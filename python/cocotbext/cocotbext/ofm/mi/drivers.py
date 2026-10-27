@@ -175,6 +175,12 @@ class MIRequestDriver(BusDriver):
 
         return bytes(drd[start_offset: byte_count-end_offset])
 
+    async def write32(self, addr: int, value: int, byte_enable: Optional[int] = None) -> None:
+        await self.write(addr, (value & 0xFFFFFFFF).to_bytes(4, 'little'), byte_enable=byte_enable)
+
+    async def write64(self, addr: int, value: int, byte_enable: Optional[int] = None) -> None:
+        await self.write(addr, (value & 0xFFFFFFFFFFFFFFFF).to_bytes(8, 'little'), byte_enable=byte_enable)
+
     async def read32(self, addr: int, byte_enable: Optional[int] = None) -> int:
         return int.from_bytes(await self.read(addr, byte_count=4, byte_enable=byte_enable), 'little')
 
