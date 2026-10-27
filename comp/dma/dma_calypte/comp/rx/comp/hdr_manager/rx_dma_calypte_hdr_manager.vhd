@@ -174,6 +174,15 @@ architecture FULL of RX_DMA_CALYPTE_HDR_MANAGER is
     signal start_req_done_int       : std_logic;
     signal stop_req_done_int        : std_logic;
 
+    -- The software manager pulses *_REQ_VLD once and waits for *_REQ_DONE without a deadline, so a
+    -- request that arrives while channel_status_p is busy is held here until S_IDLE takes it.
+    signal start_req_q_vld  : std_logic;
+    signal start_req_q_chan : std_logic_vector(log2(CHANNELS)-1 downto 0);
+    signal start_req_q_take : std_logic;
+    signal stop_req_q_vld   : std_logic;
+    signal stop_req_q_chan  : std_logic_vector(log2(CHANNELS)-1 downto 0);
+    signal stop_req_q_take  : std_logic;
+
     -- =============================================================================================
     -- Input FIFO
     -- =============================================================================================
@@ -393,6 +402,14 @@ begin
     --      assert always (ptr_fifo_full = '0') abort (RESET)
     --      report "RX_DMA_HDR_MANAGER: Complete filling of the Pointer FIFO occured!";
 
+    -- psl assert_start_req_overrun :
+    --      assert always (START_REQ_VLD = '1' -> start_req_q_vld = '0') abort (RESET)
+    --      report "RX_DMA_HDR_MANAGER: A start request arrived while the previous one was still queued!";
+
+    -- psl assert_stop_req_overrun :
+    --      assert always (STOP_REQ_VLD = '1' -> stop_req_q_vld = '0') abort (RESET)
+    --      report "RX_DMA_HDR_MANAGER: A stop request arrived while the previous one was still queued!";
+
     -- =============================================================================================
     -- Debug signals for verification
     -- =============================================================================================
@@ -475,6 +492,32 @@ begin
         end if;
     end process;
 
+    req_queue_reg_p : process (CLK) is
+    begin
+        if (rising_edge(CLK)) then
+            if (start_req_q_take = '1') then
+                start_req_q_vld <= '0';
+            end if;
+            if (START_REQ_VLD = '1') then
+                start_req_q_vld  <= '1';
+                start_req_q_chan <= START_REQ_CHANNEL;
+            end if;
+
+            if (stop_req_q_take = '1') then
+                stop_req_q_vld <= '0';
+            end if;
+            if (STOP_REQ_VLD = '1') then
+                stop_req_q_vld  <= '1';
+                stop_req_q_chan <= STOP_REQ_CHANNEL;
+            end if;
+
+            if (RESET = '1') then
+                start_req_q_vld <= '0';
+                stop_req_q_vld  <= '0';
+            end if;
+        end if;
+    end process;
+
     channel_status_p : process (all)
     begin
         chan_state_change_nst    <= chan_state_change_pst;
@@ -482,16 +525,19 @@ begin
         is_start_req_pending_new <= is_start_req_pending_reg;
         start_req_done_int       <= '0';
         stop_req_done_int        <= '0';
+        start_req_q_take         <= '0';
+        stop_req_q_take          <= '0';
 
         case chan_state_change_pst is
             when S_IDLE =>
 
-                if (STOP_REQ_VLD = '1') then
-                    channel_status_new(to_integer(unsigned(STOP_REQ_CHANNEL))) <= '0';
+                if (stop_req_q_vld = '1') then
+                    stop_req_q_take                                           <= '1';
+                    channel_status_new(to_integer(unsigned(stop_req_q_chan))) <= '0';
 
                     -- If the channel the request was sent on does not have a packet processed on
                     -- it, acknowledge the stop immediately and do not wait for anything.
-                    if (pkt_chan_reg /= STOP_REQ_CHANNEL or pkt_process_pst /= S_PACKET_PROCESS) then
+                    if (pkt_chan_reg /= stop_req_q_chan or pkt_process_pst /= S_PACKET_PROCESS) then
                         stop_req_done_int <= '1';
                     else
                         -- If the channel to be stopped is processing a packet, do not
@@ -500,12 +546,13 @@ begin
                         is_start_req_pending_new <= '0';
                     end if;
 
-                elsif (START_REQ_VLD = '1') then
-                    channel_status_new(to_integer(unsigned(START_REQ_CHANNEL))) <= '1';
+                elsif (start_req_q_vld = '1') then
+                    start_req_q_take                                           <= '1';
+                    channel_status_new(to_integer(unsigned(start_req_q_chan))) <= '1';
 
                     -- If the channel the request was sent on does not have a packet dropped on
                     -- it, acknowledge the start immediately and do not wait for anything.
-                    if (pkt_chan_reg /= START_REQ_CHANNEL or pkt_process_pst /= S_PACKET_DISCARD) then
+                    if (pkt_chan_reg /= start_req_q_chan or pkt_process_pst /= S_PACKET_DISCARD) then
                         start_req_done_int <= '1';
                     else
                         -- If the channel to be started is dropping a packet, do not
