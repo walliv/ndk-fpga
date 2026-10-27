@@ -8,8 +8,11 @@
 from collections import deque
 from dataclasses import dataclass
 
+import cocotb
 from cocotb.handle import LogicArrayObject, LogicObject
+from cocotb.triggers import Event
 from cocotb.types import Logic, LogicArray
+from cocotb.utils import get_sim_time
 
 from cocotbext.ofm.base.drivers import ModularBusDriver
 from cocotbext.ofm.base.transaction import IdleTransaction
@@ -22,7 +25,7 @@ class MFBDriver(ModularBusDriver):
     """Driver of an MFB bus built on the signals of an :class:`MfbProtocol`.
 
     A word is staged as plain integers and per-region lists and only the signals whose value differs from the last
-    write are written.
+    write are written. With nothing queued, the driver parks the bus and sleeps until the next append().
     """
 
     bus: MfbProtocol
@@ -43,6 +46,8 @@ class MFBDriver(ModularBusDriver):
 
         self._no_inner_idles : bool = no_inner_idles
 
+        cocotb.start_soon(self._measure_period())
+
     @property
     def item_cnt(self):
         return self._item_cnt
@@ -54,6 +59,9 @@ class MFBDriver(ModularBusDriver):
     def append(self, transaction: MfbTransaction | IdleTransaction):
         """Queue a frame, or an IdleTransaction for a gap of its length in bytes."""
         self._queue.append(transaction)
+
+        if self._sleeping:
+            self._wake.set()
 
     def _init_state(self):
         self.state: MFBDriver.State = MFBDriver.State()
@@ -74,6 +82,9 @@ class MFBDriver(ModularBusDriver):
         self._init_signals()
 
         self._queue    : deque = deque()
+        self._wake     : Event = Event()
+        self._sleeping : bool  = False
+        self._period   : int   = 0
         self._cursor   : int   = 0
         self._frame_cnt: int   = 0
         # the frame that started the run of frames being laid and the items sent since
@@ -189,19 +200,43 @@ class MFBDriver(ModularBusDriver):
         else:
             await self._idle_word()
 
+    async def _measure_period(self):
+        await self._clk_re
+        t1 = get_sim_time()
+        await self._clk_re
+        self._period = get_sim_time() - t1
+
+    async def _sleep(self):
+        """Park the bus until a transaction is queued; the idle generator learns of the idle words meanwhile."""
+        self._write_word(0)
+        start = get_sim_time()
+
+        self._wake.clear()
+        self._sleeping = True
+        await self._wake.wait()
+        self._sleeping = False
+
+        await self._clk_re
+
+        if self._period:
+            words = round((get_sim_time() - start) / self._period)
+            if words > 0:
+                self._idle_gen.put(IdleTransaction(), items=words * self._word_items, end=True)
+
     async def _main_loop(self):
         queue = self._queue
 
         while True:
             if not queue:
-                # a frame that ended inside the word leaves the word open
+                # a frame that ended inside the word leaves the word open; more may be queued while it is sent
                 if self._cursor:
                     if self._w_has_data:
                         await self._send_word()
                     self._cursor = 0
                     self._run_end()
+                    continue
 
-                await self._idle(self._idle_fac.make())
+                await self._sleep()
                 continue
 
             transaction = queue.popleft()

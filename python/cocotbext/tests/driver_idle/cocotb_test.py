@@ -146,3 +146,36 @@ async def run_mvb_idle_words_test(dut):
             drv.append(MvbTrClassic(data=v))
     words = [sum(v << (k * width) for k, v in enumerate(word)) for word in values]
     await run(dut, "RX_MVB", words, gaps[1:] + [0])
+
+
+async def collect_sof_words(dut, words):
+    """Every accepted MFB word as (DATA, SOF)."""
+    while True:
+        await RisingEdge(dut.CLK)
+        await ReadOnly()
+        if int(dut.RX_MFB_SRC_RDY.value) and int(dut.RX_MFB_DST_RDY.value):
+            words.append((int(dut.RX_MFB_DATA.value), int(dut.RX_MFB_SOF.value)))
+
+
+@cocotb.test()
+async def run_mfb_append_while_flushing_test(dut):
+    """A frame appended while the driver waits for DST_RDY on the open word of the last frame is sent after it."""
+    await start(dut)
+    geo = mfb_geometry(dut)
+    word_bytes = geo.word_width // 8
+    rng = random.Random(random.getrandbits(64))
+    drv = MFBDriver(dut, "RX_MFB", dut.CLK, generics_prefix="MFB")
+    drv.set_idle_generator(IdleGenerator())
+    words = []
+    cocotb.start_soon(collect_sof_words(dut, words))
+
+    # The first frame ends inside its word, which the driver offers alone once its queue runs empty.
+    first, second = rng.randbytes(word_bytes // 4), rng.randbytes(word_bytes // 4)
+    drv.append(MfbTransaction(data=first))
+    await ClockCycles(dut.CLK, 3)
+    drv.append(MfbTransaction(data=second))
+    await ClockCycles(dut.CLK, 3)
+    dut.RX_MFB_DST_RDY.value = 1
+    await ClockCycles(dut.CLK, 10)
+
+    assert [d for d, _ in words] == [int.from_bytes(first, "little"), int.from_bytes(second, "little")]
