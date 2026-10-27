@@ -266,7 +266,9 @@ and if the software is not able to read data fast enough (e.g. the HDP
 catches up with the SDP), the ``HDR_MANAGER`` pauses the generation of PCIe
 headers for the current packet, thus stopping the transmission from
 ``HDR_INSERTOR`` as well. This is the only case of transaction blocking in the
-F2H controller.
+F2H controller. The requests of all channels are served in order, so a channel
+whose buffer is full holds the RX traffic of every channel until the software
+frees space in it.
 
 Upon header/data access, the SW updates the SDP and SHP values in the channel's C/S
 register space. These registers are located in the ``SW_MANAGER``
