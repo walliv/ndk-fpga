@@ -7,7 +7,7 @@ import cocotb.queue
 from cocotb.triggers import Event, RisingEdge
 
 from ..utils import SerializableHeader
-from .PcieHeaders import CQHeader, CCHeader, CQUser
+from .PcieHeaders import CQHeader, CCHeader, CQUser, CCUser
 
 
 class CQHeaderEmpty(SerializableHeader):
@@ -59,7 +59,15 @@ class Axi4SCompleter:
 
         # INFO: tkeep not checked for continuity
         tkeep = int.from_bytes(tr['TKEEP'], byteorder='big')
-        vld_bytes = int(tkeep).bit_count() * 4
+        if tkeep == 0:
+            # Straddled interface: tkeep and tlast are not used, the start and end of a TLP are in TUSER
+            tuser = CCUser.deserialize(int.from_bytes(tr['TUSER'], byteorder='big'))
+            if tuser.sop1 or tuser.eop1 or tuser.sop_ptr0:
+                raise NotImplementedError("Only one TLP starting in the first Dword of a CC beat is supported")
+            tlast = bool(tuser.eop0)
+            vld_bytes = (tuser.eop_ptr0 + 1) * 4 if tuser.eop0 else len(data)
+        else:
+            vld_bytes = int(tkeep).bit_count() * 4
 
         if self._cc_inframe is None:
             h = len(CCHeader()) // 8
