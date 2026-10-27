@@ -39,6 +39,9 @@ class MFBDriver(ModularBusDriver):
     An idle generator with frame_gaps set, e.g. OnOffIdleGenerator, counts blocks: its gap before a frame leaves blocks
     empty, inside a frame it is asked before each later word for whole idle words. Others put idle transactions first.
 
+    With hold_on_idle, an idle word keeps the signals of the last word and drops SRC_RDY only, as a FIFO that runs
+    empty does; otherwise DATA, SOF and EOF are 0 and the per-region and optional signals X.
+
     BE, where the bus has it, enables the bytes in the frame's `be`, an int or a LogicArray with a bit per payload byte,
     or every payload byte without it; bytes outside a frame are disabled.
     """
@@ -57,8 +60,9 @@ class MFBDriver(ModularBusDriver):
         META    : LogicArray2D           = 0
 
     def __init__(self, dut, name, clock, protocol=MfbProtocol, no_inner_idles: bool = False,
-                 mfb_params: dict | MfbParams | None = None, **kwargs):
+                 mfb_params: dict | MfbParams | None = None, hold_on_idle: bool = False, **kwargs):
         self._mfb_params = asdict(mfb_params) if isinstance(mfb_params, MfbParams) else mfb_params
+        self._hold_on_idle = hold_on_idle
         super().__init__(dut, name, clock, protocol=protocol, **kwargs)
 
         self._no_inner_idles : bool = no_inner_idles
@@ -113,7 +117,7 @@ class MFBDriver(ModularBusDriver):
         self._epoch += 1
 
         self._last.clear()
-        self._write_word(0)
+        self._idle_bus()
 
         if self._sleeping:
             self._wake.set()
@@ -217,7 +221,14 @@ class MFBDriver(ModularBusDriver):
         self._w_words    : dict = {}
 
     def _write_to_bus(self):
-        self._write_word(0)
+        self._idle_bus()
+
+    def _idle_bus(self):
+        """Write the bus of an idle word: the staged word, which is empty, or only SRC_RDY low with hold_on_idle."""
+        if self._hold_on_idle and self._last:
+            self._put("SRC_RDY", 0)
+        else:
+            self._write_word(0)
 
     def _put(self, name, value):
         """Write `value` to the signal `name` unless it holds that value from the last write."""
@@ -282,7 +293,7 @@ class MFBDriver(ModularBusDriver):
 
     async def _idle_word(self):
         """One clock of SRC_RDY low, whatever DST_RDY is."""
-        self._write_word(0)
+        self._idle_bus()
         await self._edge()
 
     async def _edge(self):
@@ -307,7 +318,7 @@ class MFBDriver(ModularBusDriver):
 
     async def _sleep(self):
         """Park the bus until a transaction is queued; the idle generator learns of the idle words meanwhile."""
-        self._write_word(0)
+        self._idle_bus()
         start = get_sim_time()
 
         self._wake.clear()

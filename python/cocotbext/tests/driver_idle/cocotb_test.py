@@ -154,6 +154,46 @@ async def run_mfb_frame_gap_words_test(dut):
     await run(dut, "RX_MFB", words, gaps)
 
 
+async def sample_bus(dut, cycles):
+    """One (SRC_RDY, DATA, SOF, EOF) entry per clock, from the timestep it is started in."""
+    while True:
+        await ReadOnly()
+        cycles.append(tuple(int(getattr(dut, f"RX_MFB_{s}").value) for s in ("SRC_RDY", "DATA", "SOF", "EOF")))
+        await RisingEdge(dut.CLK)
+
+
+@cocotb.test()
+async def run_mfb_hold_on_idle_test(dut):
+    """With hold_on_idle, the idle words inside and between frames keep the last word on the bus and drop SRC_RDY
+    only."""
+    await start(dut)
+    geo = mfb_geometry(dut)
+    blocks = geo.regions * geo.region_size
+    word_bytes = geo.word_width // 8
+    rng = random.Random(random.getrandbits(64))
+    cocotb.start_soon(apply_backpressure(dut.RX_MFB_DST_RDY, dut.CLK, BackpressureConfig(1, 1, 1 - DST_RDY_HIGH), rng))
+    pattern = ((blocks, rng.randint(0, GAP_MAX) * blocks) for _ in itertools.count())
+    drv = MFBDriver(dut, "RX_MFB", dut.CLK, generics_prefix="MFB", idle_generator=OnOffIdleGenerator(pattern),
+                    hold_on_idle=True)
+    for _ in range(WORDS // 4):
+        drv.append(MfbTransaction(data=rng.randbytes(rng.randint(1, 4) * word_bytes)))
+    cycles = []
+    cocotb.start_soon(sample_bus(dut, cycles))
+    while drv.pending:
+        await ClockCycles(dut.CLK, 100)
+
+    last, idles, errors = None, 0, []
+    for n, (src_rdy, *word) in enumerate(cycles):
+        if src_rdy:
+            last = word
+        elif last is not None:
+            idles += 1
+            if word != last:
+                errors.append(n)
+    assert idles > 0, "no idle word between the first and the last word"
+    assert not errors, f"{len(errors)} idle word(s) changed the bus, first in cycle {errors[0]}"
+
+
 async def collect_sof_blocks(dut, geo, blocks):
     """The block of every SOF, counted from the first word on; with DST_RDY high every clock is a word. Started in
     the timestep of the first word, it reads that word before the first edge."""
