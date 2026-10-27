@@ -321,6 +321,53 @@ Comparison of FPGA vendors
             :align: center
             :scale: 10
 
+Verification
+------------
+
+``cocotb/`` holds a cocotb bench of the whole ``DMA_CALYPTE`` with RX and TX traffic running at
+the same time. It ports the stimulus, models, scoreboards and properties of the RX and TX UVM benches
+(``comp/rx/uvm``, ``comp/tx/uvm``) and adds a check of the RQ merger. The combinations of
+``cocotb/ver_settings.py`` cover every enabled combination of both UVM ``ver_settings.py``, each with
+the cocotb tests its ``TEST_FILTER`` selects; a Jenkins build runs two of them at random.
+
+.. code-block:: sh
+
+    cd comp/dma/dma_calypte/cocotb
+    make                                          # the "default" combination, in Questa or with SIM=nvc in nvc
+    make suite                                    # every combination, in parallel nvc runs through pytest-xdist
+    python3 ../../../../build/scripts/multi_ver/multi_ver_cocotb.py ver_settings.py -r 100  # all, one after another
+    make sim-run CONFIG=default TEST=run_dma_calypte_speed_test
+    make suite SUITE_REPEAT=10                    # every shard ten times with random seeds
+    make sim-run CONFIG=2reg TEST=run_dma_calypte_test RANDOM_SEED=1101 WAVES=1   # one seed, with waves
+
+Every combination is elaborated in the suite (``test_elaboration``), but the Intel ones (``intel_*``) run
+there only when selected with ``CONFIG``: nvc has no usable model of the Agilex DSP atom behind ``DSP_COMPARATOR``
+(encrypted) nor of ``altera_syncram`` (SystemVerilog only), so their pointer comparators and 1-region
+transaction buffer do not work there. ``NVC_LIBPATH`` puts a directory of substitute simulation
+libraries ahead of the installed ones in every nvc step. The Intel memories and DSP blocks are
+exercised by the RX and TX UVM benches and by the Intel combinations of this bench under Questa with the
+Altera simulation libraries.
+
+The stop logic of both directions depends on the latency of ``DSP_COMPARATOR``. On every vendor it is
+set by ``INPUT_REGS_EN`` alone: an input register stage when it is true, plus one output register
+(``CMP_DSP`` registers on AMD, the input and output registers of the Agilex and Stratix 10 DSP atoms,
+or the behavioural branch). The testbenches in ``comp/base/dsp/dsp_comparator*/sim`` check every
+branch against one reference with this delay, so the AMD configurations exercise the same comparator
+timing as an Intel device.
+
+Checked: every RX RQ write against the RX DMA model (field by field, MPS and 4 KiB page rules), every
+USR_TX packet and its metadata against the TX DMA model, every pointer update of both directions
+against the pointer-updater model, the merger output against its two inputs, the per-channel packet
+and byte counters, MFB rules on all MFB interfaces, the frame layout of the RQ streams, the
+pointer-updater request interfaces and the RTL's PSL assertions. Every test also checks that an RX
+stop is acknowledged only with the channel's HDP/HHP equal to its SDP/SHP, that neither moves again
+before the channel's next start request, and that every RX pointer update on ``PCIE_RQ_MFB`` covers
+only data blocks and DMA headers whose writes left before it; for each violation, and for each stop
+acknowledged with a write of the channel still on its way, the log names where that write was (merger
+input 0, the RX DMA RQ output, the header insertor or the header manager FIFO) and how late it left.
+Stimulus size knobs:
+``RX_SIM_TIME_US``, ``RX_BATCH_MIN``/``RX_BATCH_MAX``, ``TX_TRANSACTIONS_MIN``/``TX_TRANSACTIONS_MAX``.
+
 Local Subcomponents
 -------------------
 
