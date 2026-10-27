@@ -11,6 +11,9 @@ TARGET=cocotb
 .PHONY: all
 all: comp
 
+# make suite: every combination of ver_settings.py times every cocotb test, in parallel nvc runs.
+include ../../../../../../../build/scripts/multi_ver/nvc_suite.mk
+
 # Without GENERICS, as multi_ver_cocotb.py gives them, a run takes the "default" setting of ver_settings.py.
 include ../../../../../../../build/scripts/multi_ver/ver_settings.mk
 
