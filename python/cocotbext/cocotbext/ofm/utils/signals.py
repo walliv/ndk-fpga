@@ -26,6 +26,17 @@ async def await_signal_sync(clk_re: RisingEdge, signal, value: int = 1) -> None:
         await clk_re
 
 
+def signal_binstr(handle) -> str:
+    """A signal's value as the simulator's MSB-first bit string, which avoids building a Logic or
+    LogicArray per read. Takes a plain cocotb handle, not a proxy created for an array_idx."""
+    return handle._handle.get_signal_val_binstr()
+
+
+def signal_int(handle) -> int:
+    """A signal's unsigned value read through signal_binstr; raises ValueError on a bit that is not 0 or 1."""
+    return int(signal_binstr(handle), 2)
+
+
 def get_signal_value_in_bytes(signal, big_endian: bool = False) -> bytes:
     """
     Get value of a OUT signals in bytes.

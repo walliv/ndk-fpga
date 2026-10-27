@@ -8,8 +8,19 @@ import pytest
 from cocotb.types import LogicArray
 
 from cocotbext.ofm.utils.signals import (align_read_request, align_request, align_write_request,
-                                         get_signal_value_in_bytes)
+                                         get_signal_value_in_bytes, signal_binstr, signal_int)
 from stubs import StubSignal
+
+
+def test_signal_is_read_as_the_bit_string_of_the_simulator():
+    sig = StubSignal(8)
+    sig.binstr = "00101101"
+
+    assert signal_binstr(sig) == "00101101"
+    assert signal_int(sig) == 0x2D
+    sig.binstr = "0010X101"
+    with pytest.raises(ValueError):
+        signal_int(sig)
 
 
 def test_signal_value_is_little_endian_by_default():
