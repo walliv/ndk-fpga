@@ -184,7 +184,7 @@ SETTINGS = {
         "CC_MFB_REGION_SIZE"   : "1"                 ,
         "CC_MFB_BLOCK_SIZE"    : "8"                 ,
 
-        "STRADDLING"       : "0"                 ,
+        "STRADDLING"       : "1"                 ,
 
         "DEVICE"               : "\\\"ULTRASCALE\\\"",
         "PCIE_ENDPOINT_TYPE"   : "\\\"DUMMY\\\""     ,
