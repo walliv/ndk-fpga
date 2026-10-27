@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from cocotbext.ofm.pcie import CQMfbMeta, CQUser, CQUser256, RQMfbMeta
+from cocotbext.ofm.pcie import CCUser, CQMfbMeta, CQUser, CQUser256, RQMfbMeta
 
 META_PACK = Path(__file__).resolve().parents[3] / "comp" / "base" / "pkg" / "pcie_meta_pack.vhd"
 
@@ -64,3 +64,10 @@ def test_cq_user_256_follows_the_256_bit_tuser_of_pg213():
 
     assert (offsets["byte_en"], offsets["sop"], offsets["tph_present"], offsets["tph_st_tag"]) == (8, 40, 42, 45)
     assert offsets["parity"] == 53 and len(CQUser256()) == 85
+
+
+def test_cc_user_follows_the_512_bit_tuser_of_pg213():
+    offsets = CCUser.offsets()
+
+    assert (offsets["sop_ptr0"], offsets["eop0"], offsets["eop_ptr0"], offsets["eop_ptr1"]) == (2, 6, 8, 12)
+    assert offsets["parity"] == 17 and len(CCUser()) == 81

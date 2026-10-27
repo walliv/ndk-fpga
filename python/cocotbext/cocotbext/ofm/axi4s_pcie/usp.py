@@ -1,15 +1,11 @@
-# usp.py: Stimulus and meta model of the CQ interface of the UltraScale+ PCIe IP
+# usp.py: Stimulus, monitor and models of the CQ and CC interfaces of the UltraScale+ PCIe IP
 # Copyright (C) 2026 Universitaet Heidelberg, Institut fuer Technische Informatik (ZITI)
 # Author(s): Vladislav Valek <vladislav.valek@stud.uni-heidelberg.de>
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Completer Request (CQ) AXI4-Stream interface of the UltraScale+ PCIe IP, see PG213 tables 10 and 18.
-
-``UspLayout`` selects the 256-bit interface or the 512-bit one with or without straddling. ``pack_cq`` turns TLPs into
-beats, ``UspCqDriver`` drives them and ``CqTlp.meta`` gives the PCIE_CQ_META an MFB converter has to produce for them.
-``run_cq_test`` sends TLPs to a DUT and compares the frames and meta of its CQ MFB output with them.
-"""
+"""CQ and CC AXI4-Stream interfaces of the UltraScale+ PCIe IP (PG213 tables 10, 12, 18 and 20): packing of TLPs into
+CQ beats, a CQ driver, a CC monitor that checks the rules of the IP, and runners that compare a DUT with the model."""
 
 import random
 from dataclasses import dataclass
@@ -18,11 +14,15 @@ import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import ClockCycles, RisingEdge
 from cocotb_bus.drivers import BitDriver
+from cocotb_bus.monitors import Monitor
 from cocotb_bus.scoreboard import Scoreboard
 
-from cocotbext.ofm.mfb.transaction import MfbTransactionWithMeta
-from cocotbext.ofm.pcie.PcieHeaders import CQHeader, CQMfbMeta, CQUser, CQUser256
-from cocotbext.ofm.utils.header import concat
+from cocotbext.ofm.base.transaction import IdleTransaction
+from cocotbext.ofm.mfb.drivers import MFBDriver
+from cocotbext.ofm.mfb.protocol import MfbProtocol
+from cocotbext.ofm.mfb.transaction import MfbTransaction, MfbTransactionWithMeta
+from cocotbext.ofm.pcie.PcieHeaders import CCUser, CQHeader, CQMfbMeta, CQUser, CQUser256
+from cocotbext.ofm.utils.header import concat, deconcat
 from cocotbext.ofm.ver.backpressure import BackpressureConfig, BackpressureGenerator
 
 REGION_DW = 8
@@ -324,3 +324,137 @@ async def run_cq_test(dut, layout, make_tlps, p_low, monitor):
     expected.extend(MfbTransactionWithMeta(data=tlp.frame(), meta=tlp.meta()) for tlp in tlps)
     driver.append(pack_cq(layout, tlps, rng))
     await _finish(dut, scoreboard, monitor, len(tlps), "frames", "TLPs", busy=lambda: bool(driver.beats))
+
+
+CC256 = UspLayout("cc256", 256, 33, False)
+CC512 = UspLayout("cc512", 512, 81, False)
+CC512_STRADDLE = UspLayout("cc512_straddle", 512, 81, True)
+
+CC_DESCRIPTOR_DW = 3
+
+
+def cc_layout(regions, straddle):
+    """Layout of a CC interface whose MFB side has ``regions`` regions."""
+    if regions == 1:
+        return CC256
+    return CC512_STRADDLE if straddle else CC512
+
+
+def random_cc_frame(rng, max_payload_dw=64, p_no_payload=0.4):
+    """A completion with a 3-Dword descriptor and no payload or up to ``max_payload_dw`` Dwords of it."""
+    n = 0 if rng.random() < p_no_payload else rng.choice((1, 1, 2, 4, 5, 8, rng.randint(1, max_payload_dw)))
+    return _dw_bytes(rng.getrandbits(32) for _ in range(CC_DESCRIPTOR_DW + n))
+
+
+def random_cc_frames(n, **kwargs):
+    """``make_frames`` of ``run_cc_test`` that draws ``n`` frames of ``random_cc_frame(rng, **kwargs)``."""
+    return lambda rng: [random_cc_frame(rng, **kwargs) for _ in range(n)]
+
+
+class UspCcMonitor(Monitor):
+    """Rebuilds the TLPs of a CC interface into ``MfbTransaction`` and checks what the IP requires of the user logic."""
+
+    def __init__(self, dut, name, clock, layout):
+        self.name = f"{name}_AXI"
+        super().__init__()
+        self.layout = layout
+        self.clock = clock
+        self.sig = {s: getattr(dut, f"{name}_AXI_{s}") for s in ("DATA", "USER", "LAST", "KEEP", "VALID", "READY")}
+        self.frame_cnt = 0
+        self._open = None
+
+    def _fail(self, rule):
+        raise AssertionError(f"{self.layout.name}: {rule}")
+
+    def _emit(self):
+        self._recv(MfbTransaction(data=_dw_bytes(self._open)))
+        self.frame_cnt += 1
+        self._open = None
+
+    def _beat_plain(self, dws, keep, last, user):
+        if user != 0:
+            self._fail(f"TUSER 0x{user:x} is not 0 without straddling")
+        n = bin(keep).count("1")
+        if keep != (1 << n) - 1 or n == 0:
+            self._fail(f"tkeep 0x{keep:x} is not contiguous from Dword 0")
+        if n != len(dws) and not last:
+            self._fail("tkeep is not all ones before the last beat")
+        self._open = (self._open or []) + dws[:n]
+        if last:
+            self._emit()
+
+    def _beat_straddle(self, dws, user):
+        u = CCUser.deserialize(user)
+        sop = u.sop0 | u.sop1 << 1
+        eop = u.eop0 | u.eop1 << 1
+        sop_ptrs = (u.sop_ptr0, u.sop_ptr1)
+        sops = [ptr * 4 for ptr in sop_ptrs][:bin(sop).count("1")]
+        eops = [u.eop_ptr0, u.eop_ptr1][:bin(eop).count("1")]
+        if sop not in (0, 1, 3) or eop not in (0, 1, 3):
+            self._fail(f"is_sop {sop} or is_eop {eop} is reserved")
+        if any(sop_ptrs[j] not in (0, 2) for j in range(len(sops))):
+            self._fail("is_sop_ptr is reserved")
+        if len(sops) == 2 and sops[1] != REGION_DW:
+            self._fail("the second TLP does not start in Dword 8")
+        pos = 0
+        si = ei = 0
+        while True:
+            if self._open is not None:
+                if ei < len(eops):
+                    if eops[ei] < pos:
+                        self._fail("is_eop_ptr is before the start of its TLP")
+                    self._open += dws[pos:eops[ei] + 1]
+                    pos = eops[ei] + 1
+                    ei += 1
+                    if len(self._open) < CC_DESCRIPTOR_DW:
+                        self._fail("a TLP is shorter than its descriptor")
+                    self._emit()
+                else:
+                    self._open += dws[pos:]
+                    break
+            elif si < len(sops):
+                if sops[si] < pos:
+                    self._fail("a TLP starts before the previous one has ended")
+                pos = sops[si]
+                self._open = []
+                si += 1
+            else:
+                break
+        if ei != len(eops) or si != len(sops):
+            self._fail("is_sop or is_eop does not match the other")
+
+    async def _monitor_recv(self):
+        s = self.sig
+        while True:
+            await RisingEdge(self.clock)
+            if not s["VALID"].value:
+                if self._open is not None:
+                    self._fail("tvalid is low inside a TLP")
+                continue
+            if not s["READY"].value:
+                continue
+            dws = deconcat([int(s["DATA"].value)] + [32] * self.layout.dws)
+            if self.layout.straddle:
+                self._beat_straddle(dws, int(s["USER"].value))
+            else:
+                self._beat_plain(dws, int(s["KEEP"].value), int(s["LAST"].value), int(s["USER"].value))
+
+
+async def run_cc_test(dut, layout, make_frames, p_low):
+    """Send ``make_frames(rng)`` to the ``CC_MFB_*`` ports and compare what is on ``CC_AXI_*`` with them."""
+    rng = _seeded_rng(dut, layout)
+    dut.CC_AXI_READY.value = 0
+    await _start(dut)
+    driver = MFBDriver(dut, "CC_MFB", dut.CLK, protocol=MfbProtocol, generics_prefix="MFB", no_default_rate_limiter=True)
+    monitor = UspCcMonitor(dut, "CC", dut.CLK, layout)
+    scoreboard, expected = _scoreboard(dut, monitor, dut.CC_AXI_READY, p_low)
+
+    frames = make_frames(rng)
+    region_bytes = REGION_DW * 4
+    for frame in frames:
+        expected.append(MfbTransaction(data=frame))
+        driver.append(MfbTransaction(data=frame))
+        # Without straddling a word holds one TLP, so a frame that ends in the first region fills the second with idle
+        if not layout.straddle and layout.dws > REGION_DW and 0 < len(frame) % (2 * region_bytes) <= region_bytes:
+            driver.append(IdleTransaction(region_bytes))
+    await _finish(dut, scoreboard, monitor, len(frames), "TLPs", "frames")
