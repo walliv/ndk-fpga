@@ -14,8 +14,7 @@ use work.type_pack.all;
 use work.pcie_axi_meta_pack.all;
 
 -- The Purpose of this component is to convert AXI to MFB bus.
--- Supported are 512b and 256b with and without straddling, but
--- variants with straddling and all 256 variant has not been tested.
+-- Supported are 512b and 256b with and without straddling.
 entity PCIE_CQ_AXI2MFB is
     generic (
         -- =======================================================================
