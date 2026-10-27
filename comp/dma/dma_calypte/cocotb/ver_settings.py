@@ -6,6 +6,14 @@
 
 BASE = "run_dma_calypte_test"
 SPEED = "run_dma_calypte_speed_test"
+STOP_AT_EOF = "run_rx_stop_at_eof_test"
+STOP_AT_SOF = "run_rx_stop_at_sof_test"
+START_DISCARD = "run_rx_start_discard_test"
+STOP_LIVELOCK = "run_rx_stop_livelock_test"
+FULL = ("run_rx_full_resume_test", "run_rx_full_resume_no_timeout_test", "run_rx_full_stop_test",
+        "run_rx_full_idle_stop_test")
+DRIVER = ("run_rx_stale_stop_test", "run_rx_stale_sdp_test", "run_rx_ndptool_test")
+
 
 def tests(*names):
     """The cocotb tests a combination runs, as COCOTB_TEST_FILTER, which cocotb searches in "<module>.<test>"."""
@@ -39,7 +47,7 @@ SETTINGS = {
         "RX_CHANNELS": "2",
         "TX_CHANNELS": "2",
         "TRBUF_REG_EN": "false",
-        "__cocotb_params__": tests(BASE, SPEED),
+        "__cocotb_params__": tests(BASE, SPEED, STOP_AT_EOF, STOP_AT_SOF, START_DISCARD, *FULL, *DRIVER),
     },
 
     "intel": {"DEVICE": "\\\"AGILEX\\\""},
@@ -47,14 +55,19 @@ SETTINGS = {
     "ch32_trbuf": {"RX_CHANNELS": "32", "TX_CHANNELS": "8", "TRBUF_REG_EN": "true"},
     "ch16_trbuf": {"RX_CHANNELS": "16", "TX_CHANNELS": "16", "TRBUF_REG_EN": "true"},
 
+    "tests_ch32_trbuf": {"__cocotb_params__": tests(BASE, STOP_AT_EOF, STOP_AT_SOF, START_DISCARD, STOP_LIVELOCK, *FULL,
+                                                    *DRIVER)},
+    "tests_2reg": {"__cocotb_params__": tests(BASE, *FULL, *DRIVER)},
+    "tests_ch16_2reg_trbuf": {"__cocotb_params__": tests(BASE, STOP_LIVELOCK, *FULL, *DRIVER)},
+    "tests_intel_2reg": {"__cocotb_params__": tests(BASE, SPEED, *FULL, *DRIVER)},
     "tests_base": {"__cocotb_params__": tests(BASE)},
 
     "_combinations_": {
         "default": (),
-        "ch32_trbuf": ("ch32_trbuf", "tests_base"),
-        "2reg": ("2reg", "tests_base"),
-        "ch16_2reg_trbuf": ("2reg", "ch16_trbuf", "tests_base"),
-        "intel_2reg": ("intel", "2reg"),
+        "ch32_trbuf": ("ch32_trbuf", "tests_ch32_trbuf"),
+        "2reg": ("2reg", "tests_2reg"),
+        "ch16_2reg_trbuf": ("2reg", "ch16_trbuf", "tests_ch16_2reg_trbuf"),
+        "intel_2reg": ("intel", "2reg", "tests_intel_2reg"),
         "intel_ch16_trbuf": ("intel", "ch16_trbuf", "tests_base"),
         "intel_ch16_2reg_trbuf": ("intel", "2reg", "ch16_trbuf", "tests_base"),
     },

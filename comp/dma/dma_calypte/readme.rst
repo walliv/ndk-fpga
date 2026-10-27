@@ -368,6 +368,55 @@ input 0, the RX DMA RQ output, the header insertor or the header manager FIFO) a
 Stimulus size knobs:
 ``RX_SIM_TIME_US``, ``RX_BATCH_MIN``/``RX_BATCH_MAX``, ``TX_TRANSACTIONS_MIN``/``TX_TRANSACTIONS_MAX``.
 
+``run_rx_stop_at_eof_test`` and ``run_rx_stop_at_sof_test`` sweep RX channel stops and starts cycle
+by cycle against the end and the start of a single packet with no other RX traffic. Every request
+must complete, and the sweep must hit the cycle in which the header manager takes the request as that
+packet's EOF passes (its header is decided); with 8 or more channels a start must also meet a pointer
+write before the software manager acknowledges it. Passes are added, re-centred on the least delayed
+hazard offset measured, until every such cycle was hit (``CALYPTE_SWEEP_PASSES_MAX``, 32). Once a
+channel reports stopped, no RQ write may target its buffers, no block or DMA header of it may get an
+address, and the last pointer update sent to the host must carry the final hardware pointers. Without
+the header manager's request queue the tests take a stop on ``STOP_REQ_VLD`` and a start on
+``START_REQ_VLD`` in its channel FSM's ``S_IDLE``.
+
+``run_rx_start_discard_test`` sweeps only starts, against the header decision of a 2 to 4 KiB packet. A
+packet whose header is decided with the old status is dropped, and the start may complete only after its
+end: the channel's discarded packets counter, sampled as soon as STATUS reports the start and again once
+the packet left, must not change.
+
+The directed RX tests drive the software as the ndp tools do through libnfb and the ndp kernel driver
+(``cocotb/rx_driver.py``): each queue runs in kernel or userspace mode, picked per queue and logged;
+consumers find packets by the DMA header valid flag and write SDP | SHP as one 64-bit write (two
+32-bit MI writes) per burst, or in userspace mode only after 32 packets; a stop is the driver's loop of
+SDP | SHP from the update buffer (0 until the first stop update), CONTROL = STOP, SDP and SHP again and
+up to 101 STATUS reads. ``run_dma_calypte_test`` and ``run_dma_calypte_speed_test`` keep the UVM
+register sequence.
+
+``run_rx_full_resume_test``, ``run_rx_full_stop_test`` and ``run_rx_full_idle_stop_test`` fill the
+data or header ring of a channel X so that its next request is held, which holds every channel's
+requests behind it, and stop another channel c: with a packet of c queued behind X and X then freed by
+its consumer, with X stopped as well by the stop loop, or with c idle. Every stop must complete and
+keep the stop contract; grey-box counters prove the hold and the queueing.
+``run_rx_full_resume_no_timeout_test`` repeats the first with ``R_UPDATE_TIMEOUT`` 0 on every channel,
+so pointers of c that moved after its stop sent them reach the host only if the stop sends them again
+without a timeout.
+
+``run_rx_stale_stop_test`` stops a just started channel against its smallest packet swept cycle by
+cycle so that the packet's pointer write lands inside the stop comparator latency on the channel's
+round-robin slot; with up to 8 channels that cycle must be hit. ``run_rx_stale_sdp_test`` stops one
+channel whose consumer moved SDP close to the ring end while a long packet of it enters: the stop loop's
+stale SDP write fills the channel's own ring with that packet in progress. ``run_rx_ndptool_test``
+models ndptool's exit: all RX queues run with their consumers under random traffic, then every queue
+stops at once after its consumer while traffic continues; three rounds.
+
+``run_rx_stop_livelock_test`` (32 and 16 channels) stops an idle channel while the header manager
+waits for the EOF of another channel's dropped packet to finish that channel's start, so stepping that
+EOF by one cycle per stop moves the stop's first pointer update dispatch over every phase of the
+channel's round-robin slot. ``R_UPDATE_TIMEOUT`` is set so that the re-dispatch period, measured as
+timeout + 1 + dispatch length, divides the channel count. Every stop must be acknowledged within
+4 x channels x period cycles of its pointers matching, and one dispatch must fall on the slot with
+the pointers matching.
+
 Local Subcomponents
 -------------------
 
