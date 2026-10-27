@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # Copyright (C) 2024 CESNET z. s. p. o.
+# Copyright (C) 2026 Universitaet Heidelberg, Institut fuer Technische Informatik (ZITI)
 # Author(s): Martin Spinler <spinler@cesnet.cz>
+#            Vladislav Valek <vladislav.valek@stud.uni-heidelberg.de>
 
 from random import choices
 
@@ -22,7 +24,12 @@ class IdleGenerator():
 
     Some idle generators need to know more about the bus parameters and should be parametrized
     with proper configure call.
+
+    A generator with frame_gaps set counts in the driver's gap units (blocks on MFB). A driver sending a frame in parts
+    also calls get with first/last before each later part and makes the gap; others insert that many idle transactions.
     """
+
+    frame_gaps = False
 
     def __init__(self):
         # some generators need to be fully configured before the put/get method can be called
@@ -197,3 +204,31 @@ class ItemRateLimiter(IdleGenerator):
             self._idle_transactions += items_count
 
         self._total_transactions += items_count
+
+
+class OnOffIdleGenerator(IdleGenerator):
+    """
+    Idles in bursts from (on, off) pairs of an iterator, e.g. random_tuple_iterator: `on` units of data, then `off`
+    idle units, then the next pair. The data units are the `blocks` the driver puts, else its `items`.
+    """
+
+    frame_gaps = True
+
+    def __init__(self, pattern):
+        super().__init__()
+
+        self._pattern = iter(pattern)
+        self._on, self._off = next(self._pattern)
+
+    def get(self, transaction, **kwargs) -> int:
+        """The idle units due before the next part, 0 until the data units of the current burst are spent."""
+        if self._on > 0:
+            return 0
+
+        off = self._off
+        self._on, self._off = next(self._pattern)
+        return off
+
+    def put(self, transaction, **kwargs) -> None:
+        if not isinstance(transaction, IdleTransaction):
+            self._on -= kwargs.get("blocks", kwargs.get("items", 0))
