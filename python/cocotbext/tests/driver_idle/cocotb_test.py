@@ -11,7 +11,7 @@ import random
 
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import ClockCycles, ReadOnly, RisingEdge
+from cocotb.triggers import ClockCycles, Event, ReadOnly, RisingEdge
 
 from cocotbext.ofm.base.generators import IdleGenerator, OnOffIdleGenerator
 from cocotbext.ofm.base.transaction import IdleTransactionFactory
@@ -220,6 +220,42 @@ async def collect_sof_words(dut, words):
         await ReadOnly()
         if int(dut.RX_MFB_SRC_RDY.value) and int(dut.RX_MFB_DST_RDY.value):
             words.append((int(dut.RX_MFB_DATA.value), int(dut.RX_MFB_SOF.value)))
+
+
+async def count_eofs(dut, eofs):
+    """The count of accepted EOFs in eofs[0], sampled at ReadOnly before the edge that accepts them."""
+    while True:
+        await ReadOnly()
+        if int(dut.RX_MFB_SRC_RDY.value) and int(dut.RX_MFB_DST_RDY.value):
+            eofs[0] += bin(int(dut.RX_MFB_EOF.value)).count("1")
+        await RisingEdge(dut.CLK)
+
+
+@cocotb.test()
+async def run_mfb_send_test(dut):
+    """send() returns once the sink has accepted the frame, whatever DST_RDY does, and the events given to append()
+    are set then; pending counts the frames not yet accepted."""
+    await start(dut)
+    geo = mfb_geometry(dut)
+    rng = random.Random(random.getrandbits(64))
+    cocotb.start_soon(apply_backpressure(dut.RX_MFB_DST_RDY, dut.CLK, BackpressureConfig(1, 4, 0.5), rng))
+    drv = MFBDriver(dut, "RX_MFB", dut.CLK, generics_prefix="MFB")
+    eofs = [0]
+    cocotb.start_soon(count_eofs(dut, eofs))
+
+    for k in range(40):
+        await drv.send(MfbTransaction(data=rng.randbytes(rng.randint(1, 3 * geo.word_width // 8))))
+        assert eofs[0] == k + 1 and drv.frame_cnt == k + 1 and drv.pending == 0, \
+            f"send() of frame {k} returned with {eofs[0]} frame(s) accepted, frame_cnt {drv.frame_cnt}"
+
+    events = [Event() for _ in range(20)]
+    for ev in events:
+        drv.append(MfbTransaction(data=rng.randbytes(rng.randint(1, 100))), event=ev)
+    assert drv.pending == len(events)
+    for k, ev in enumerate(events):
+        await ev.wait()
+        assert eofs[0] >= 41 + k, f"the event of frame {k} was set before the sink accepted it"
+    assert drv.pending == 0
 
 
 @cocotb.test()

@@ -59,12 +59,33 @@ class MFBDriver(ModularBusDriver):
     def frame_cnt(self):
         return self._frame_cnt
 
-    def append(self, transaction: MfbTransaction | IdleTransaction):
-        """Queue a frame, or an IdleTransaction for a gap of its length in bytes."""
+    @property
+    def pending(self) -> int:
+        """Frames appended and not yet accepted by the sink."""
+        return self._appended - self._frame_cnt
+
+    def append(self, transaction: MfbTransaction | IdleTransaction, callback=None, event: Event | None = None):
+        """Queue a frame, or an IdleTransaction for a gap of its length in bytes. Once the sink accepts the frame,
+        `event` is set and `callback` is called with the frame."""
         self._queue.append(transaction)
+
+        if not isinstance(transaction, IdleTransaction):
+            self._appended += 1
+            if callback is not None or event is not None:
+                self._waiters.append((self._appended, transaction, callback, event))
 
         if self._sleeping:
             self._wake.set()
+
+    async def send(self, transaction: MfbTransaction | IdleTransaction):
+        """Queue a transaction like append() and return once the sink has accepted the frame."""
+        if isinstance(transaction, IdleTransaction):
+            self.append(transaction)
+            return
+
+        accepted = Event()
+        self.append(transaction, event=accepted)
+        await accepted.wait()
 
     def _init_state(self):
         self.state: MFBDriver.State = MFBDriver.State()
@@ -90,6 +111,9 @@ class MFBDriver(ModularBusDriver):
         self._sleeping : bool  = False
         self._period   : int   = 0
         self._cursor   : int   = 0
+        self._appended : int   = 0
+        # (frame count at which it is accepted, frame, callback, event) of each frame someone waits for
+        self._waiters  : deque = deque()
         self._frame_cnt: int   = 0
         # the frame that started the run of frames being laid and the items sent since
         self._run              = None
@@ -181,20 +205,39 @@ class MFBDriver(ModularBusDriver):
     async def _send_word(self):
         """Offer the staged word until DST_RDY accepts it, then count it and empty the stage."""
         self._write_word(1)
-        await self._clk_re
+        await self._edge()
 
         dst_rdy = self._dst_rdy
         while not dst_rdy():
-            await self._clk_re
+            await self._edge()
 
         self._item_cnt += self._w_items
         self._run_items += self._w_items
-        self._frame_cnt += self._w_eof.bit_count()
+        eofs = self._w_eof.bit_count()
         self._clear_word()
+
+        if eofs:
+            self._frame_cnt += eofs
+            self._release()
+
+    def _release(self):
+        """Wake the senders of the accepted frames."""
+        waiters = self._waiters
+
+        while waiters and waiters[0][0] <= self._frame_cnt:
+            _, transaction, callback, event = waiters.popleft()
+            if event is not None:
+                event.set()
+            if callback is not None:
+                callback(transaction)
 
     async def _idle_word(self):
         """One clock of SRC_RDY low, whatever DST_RDY is."""
         self._write_word(0)
+        await self._edge()
+
+    async def _edge(self):
+        """Wait for the next rising edge."""
         await self._clk_re
 
     async def _close_word(self):
@@ -220,7 +263,7 @@ class MFBDriver(ModularBusDriver):
         await self._wake.wait()
         self._sleeping = False
 
-        await self._clk_re
+        await self._edge()
 
         if self._period:
             words = round((get_sim_time() - start) / self._period)
