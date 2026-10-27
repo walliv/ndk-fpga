@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # Copyright (C) 2026 CESNET z. s. p. o.
+# Copyright (C) 2026 Universitaet Heidelberg, Institut fuer Technische Informatik (ZITI)
 # Author(s): Martin Spinler <spinler@cesnet.cz>
 #            Ondrej Schwarz <ondrejschwarz@cesnet.cz>
+#            Vladislav Valek <vladislav.valek@stud.uni-heidelberg.de>
 
 import cocotb
 import warnings
@@ -64,6 +66,20 @@ if cocotb.__version__ >= "2.0.0":
     from cocotb.triggers import GPITrigger
     from cocotb._gpi_triggers import _EdgeBase
     from cocotb.simulator import register_value_change_callback, VALUE_CHANGE, RISING, FALLING
+    from cocotb.utils import get_sim_time
+
+    # The vector a proxy wrote a bit of in the current timestep: the write is immediate, yet a read in the same timestep
+    # can return the vector from before it, so the next bit written from that read would undo it.
+    _pending_bits = {}
+
+    def _write_bit(handle, idx, value):
+        """Write bit `idx` of the vector `handle`, keeping the other bits written through proxies in this timestep."""
+        now = get_sim_time()
+        pending = _pending_bits.get(handle._path)
+        full_val = pending[1] if pending is not None and pending[0] == now else handle.value
+        full_val[idx] = value
+        _pending_bits[handle._path] = (now, full_val)
+        handle.set(Immediate(full_val))
 
     class _EdgeProxyBase(_EdgeBase):
         # Shared by all edge kinds: one simulator callback per signal path
@@ -224,9 +240,7 @@ if cocotb.__version__ >= "2.0.0":
             if isinstance(value, Deposit) or isinstance(value, Immediate):
                 value  = value.value
 
-            full_val = self._lao_handle.value
-            full_val[self._array_idx] = value
-            self._lao_handle.set(Immediate(full_val))
+            _write_bit(self._lao_handle, self._array_idx, value)
 
         @cached_property
         def rising_edge(self):
@@ -303,12 +317,7 @@ if cocotb.__version__ >= "2.0.0":
                 return
 
             # Update only this bit
-            full_val = self._handle.value
-            if isinstance(value, (Deposit, Immediate)):
-                full_val[self._array_idx] = value.value
-            else:
-                full_val[self._array_idx] = value
-            self._handle.set(Immediate(full_val))
+            _write_bit(self._handle, self._array_idx, value.value if isinstance(value, (Deposit, Immediate)) else value)
 
         def setimmediatevalue(self, value):
             warnings.warn("Method setimmediatevalue(value) is deprecated in cocotb 2.0, use set(Immediate(value)) instead.", DeprecationWarning)
