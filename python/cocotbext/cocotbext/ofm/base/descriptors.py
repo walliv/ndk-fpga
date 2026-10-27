@@ -28,6 +28,15 @@ class BusParameter:
         return self._func(instance)
 
 
+def _dut_key(dut):
+    """The DUT object as a cache key; one that cannot be hashed counts by its identity."""
+    try:
+        hash(dut)
+    except TypeError:
+        return id(dut)
+    return dut
+
+
 class BaseDescriptor:
     """
     Base class for descriptors that retrieve data from the DUT.
@@ -48,7 +57,8 @@ class BaseDescriptor:
         self._aliases.append(alias)
 
     def resolve(self, bus):
-        cache_key = (bus.name, bus.array_idx)
+        # buses of one name on two DUT objects, e.g. views of two endpoints, resolve on their own
+        cache_key = (_dut_key(bus.dut), bus.name, bus.array_idx)
 
         if cache_key in self._resolve_cache.keys():
             return self._resolve_cache[cache_key]
