@@ -7,6 +7,9 @@ results.xml
 # The component benches write theirs to a bare netcope_tmp/, which the pattern above misses.
 netcope_tmp/
 DevTree_paths.txt
+# Per-configuration elaborations and shard directories of the parallel nvc suites of the cocotb benches
+**/cocotb/elab/
+**/cocotb/shards/
 
 # nvc code coverage databases and reports (opt-in via COVERAGE_EN, see build/common.mk)
 *.ncdb
