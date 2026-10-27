@@ -9,6 +9,7 @@ use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
 use work.math_pack.all;
+use work.type_pack.all;
 
 -- This component generates PCIe headers and DMA header for the incoming packet
 -- The first step is to generate the DMA header; the second is to generate PCIe headers
@@ -137,6 +138,12 @@ entity RX_DMA_CALYPTE_HDR_MANAGER is
         PKT_CNTR_PKT_SIZE : out std_logic_vector(log2(PKT_MTU+1) -1 downto 0);
 
         -- =========================================================================================
+        -- Stop support
+        -- =========================================================================================
+        -- Channels with an address request queued, held or with a PCIe header not yet taken by the header insertor
+        PEND_CHAN : out std_logic_vector(CHANNELS -1 downto 0);
+
+        -- =========================================================================================
         -- Performance counter outputs
         -- =========================================================================================
         DATA_ADDR_REQ_CNTR_INC    : out std_logic;
@@ -205,11 +212,13 @@ architecture FULL of RX_DMA_CALYPTE_HDR_MANAGER is
     -- =============================================================================================
     -- PCIe header FIFOs
     -- =============================================================================================
+    -- Each PCIe header carries the channel of its request
+    constant HDR_TAG_W                    : natural := log2(CHANNELS);
     -- Width of data in the FIFO for PCIe headers of transactions carrying DMA header
-    constant PCIE_HDR_DMA_TRAN_FIFO_W     : natural := 128 + 1 + 1;
+    constant PCIE_HDR_DMA_TRAN_FIFO_W     : natural := HDR_TAG_W + 128 + 1 + 1;
     constant PCIE_HDR_DMA_TRAN_FIFO_SIZE  : natural := 8;
     -- Width of data in the FIFO for PCIe headers of transactions carrying user data
-    constant PCIE_HDR_DATA_TRAN_FIFO_W    : natural := 128;
+    constant PCIE_HDR_DATA_TRAN_FIFO_W    : natural := HDR_TAG_W + 128;
     constant PCIE_HDR_DATA_TRAN_FIFO_SIZE : natural := 8;
 
     -- Signals for the FIFO that carries the PCIe headers for transactions with DMA headers
@@ -333,6 +342,28 @@ architecture FULL of RX_DMA_CALYPTE_HDR_MANAGER is
     signal ptr_fifo_empty : std_logic;
 
     -- =============================================================================================
+    -- Tracking of the requests of every channel
+    --
+    -- Per kind (0: data, 1: DMA header), the requests are numbered in their write order, which is also the order of
+    -- serving and of their headers' pops. A channel is pending from its request write until the pop of the header of
+    -- its last request.
+    -- =============================================================================================
+    -- Request FIFO + header register + PCIe header FIFO entries in flight per kind, below 2**TRK_SEQ_W
+    constant TRK_SEQ_W : natural := log2(DATA_ADDR_NEXT_FIFO_SIZE + PCIE_HDR_DATA_TRAN_FIFO_SIZE + 2) + 1;
+
+    signal data_hdr_tag    : std_logic_vector(HDR_TAG_W -1 downto 0);
+    signal dma_hdr_tag     : std_logic_vector(HDR_TAG_W -1 downto 0);
+    signal trk_wr          : std_logic_vector(1 downto 0);
+    signal trk_pop         : std_logic_vector(1 downto 0);
+    signal trk_pop_chan    : slv_array_t(1 downto 0)(HDR_TAG_W -1 downto 0);
+    signal trk_wr_seq      : u_array_t(1 downto 0)(TRK_SEQ_W -1 downto 0);
+    signal trk_pop_seq     : u_array_t(1 downto 0)(TRK_SEQ_W -1 downto 0);
+    signal trk_last_seq    : slv_array_t(1 downto 0)(TRK_SEQ_W -1 downto 0);
+    signal trk_pend        : slv_array_t(1 downto 0)(CHANNELS -1 downto 0);
+    -- Every numbered request of a kind had its header popped, yet a channel is pending for that kind
+    signal trk_idle_err    : std_logic_vector(1 downto 0);
+
+    -- =============================================================================================
     -- Perfofmance counter logic
     -- =============================================================================================
     signal data_addr_next_reg    : std_logic;
@@ -401,6 +432,10 @@ begin
     -- psl assert_ptr_fifo_full :
     --      assert always (ptr_fifo_full = '0') abort (RESET)
     --      report "RX_DMA_HDR_MANAGER: Complete filling of the Pointer FIFO occured!";
+
+    -- psl assert_trk_idle_pend :
+    --      assert always (trk_idle_err = "00") abort (RESET)
+    --      report "RX_DMA_HDR_MANAGER: A channel is pending although every request of its kind was taken!";
 
     -- psl assert_start_req_overrun :
     --      assert always (START_REQ_VLD = '1' -> start_req_q_vld = '0') abort (RESET)
@@ -946,7 +981,8 @@ begin
         end if;
     end process;
 
-    pcie_hdr_dma_hdr_tran_fifo_in <= pcie_hdr_dma_hdr_tran & vld_bit_sel & dma_hdr_p2p_en_reg;
+    -- The channel of the served request, registered in the same cycle as the header that is written to the FIFO
+    pcie_hdr_dma_hdr_tran_fifo_in <= HHP_UPDATE_CHAN & pcie_hdr_dma_hdr_tran & vld_bit_sel & dma_hdr_p2p_en_reg;
 
     pcie_hdr_dma_hdr_tran_fifo_i : entity work.FIFOX
     generic map (
@@ -974,9 +1010,9 @@ begin
         AEMPTY => open
     );
 
-    (DMA_PCIE_HDR, vld_bit_out, p2p_en_out) <= pcie_hdr_dma_hdr_tran_fifo_do;
-    DMA_PCIE_HDR_SRC_RDY                    <= not pcie_hdr_dma_hdr_tran_fifo_empty;
-    pcie_hdr_dma_hdr_tran_fifo_rd           <= DMA_PCIE_HDR_DST_RDY;
+    (dma_hdr_tag, DMA_PCIE_HDR, vld_bit_out, p2p_en_out) <= pcie_hdr_dma_hdr_tran_fifo_do;
+    DMA_PCIE_HDR_SRC_RDY                                 <= not pcie_hdr_dma_hdr_tran_fifo_empty;
+    pcie_hdr_dma_hdr_tran_fifo_rd                        <= DMA_PCIE_HDR_DST_RDY;
 
     pcie_hdr_data_tran_reg_p : process (CLK) is
     begin
@@ -987,7 +1023,7 @@ begin
         end if;
     end process;
 
-    pcie_hdr_data_tran_fifo_in <= pcie_hdr_data_tran;
+    pcie_hdr_data_tran_fifo_in <= HDP_UPDATE_CHAN & pcie_hdr_data_tran;
 
     pcie_hdr_data_tran_fifo_i : entity work.FIFOX
     generic map (
@@ -1015,9 +1051,9 @@ begin
         AEMPTY => open
     );
 
-    DATA_PCIE_HDR              <= pcie_hdr_data_tran_fifo_do;
-    DATA_PCIE_HDR_SRC_RDY      <= not pcie_hdr_data_tran_fifo_empty;
-    pcie_hdr_data_tran_fifo_rd <= DATA_PCIE_HDR_DST_RDY;
+    (data_hdr_tag, DATA_PCIE_HDR) <= pcie_hdr_data_tran_fifo_do;
+    DATA_PCIE_HDR_SRC_RDY         <= not pcie_hdr_data_tran_fifo_empty;
+    pcie_hdr_data_tran_fifo_rd    <= DATA_PCIE_HDR_DST_RDY;
 
     -- =============================================================================================
     -- FIFOs for DMA header parts
@@ -1157,6 +1193,64 @@ begin
     -- signal is valid and set to 1.
     DMA_HDR_SRC_RDY <= ((not hdr_meta_fifo_empty) and (not ptr_fifo_empty) and (not pkt_size_fifo_empty) and (not discard_fifo_empty) and (not discard_fifo_do(0)))
                        or ((not discard_fifo_empty) and discard_fifo_do(0));
+
+    -- =============================================================================================
+    -- Tracking of the requests of every channel
+    -- =============================================================================================
+    trk_wr          <= dma_hdr_addr_next_wr & data_addr_next_wr;
+    trk_pop(0)      <= pcie_hdr_data_tran_fifo_rd and not pcie_hdr_data_tran_fifo_empty;
+    trk_pop(1)      <= pcie_hdr_dma_hdr_tran_fifo_rd and not pcie_hdr_dma_hdr_tran_fifo_empty;
+    trk_pop_chan(0) <= data_hdr_tag;
+    trk_pop_chan(1) <= dma_hdr_tag;
+
+    trk_g : for k in 0 to 1 generate
+        trk_last_seq_i : entity work.GEN_LUTRAM
+        generic map (
+            DATA_WIDTH         => TRK_SEQ_W,
+            ITEMS              => CHANNELS,
+            RD_PORTS           => 1,
+            RD_LATENCY         => 0,
+            WRITE_USE_RD_ADDR0 => FALSE,
+            MLAB_CONSTR_RDW_DC => FALSE,
+            DEVICE             => DEVICE
+        )
+        port map (
+            CLK     => CLK,
+            WR_EN   => trk_wr(k),
+            WR_ADDR => input_channel,
+            WR_DATA => std_logic_vector(trk_wr_seq(k)),
+            RD_ADDR => trk_pop_chan(k),
+            RD_DATA => trk_last_seq(k)
+        );
+
+        trk_p : process (CLK) is
+        begin
+            if (rising_edge(CLK)) then
+                if (trk_pop(k) = '1') then
+                    trk_pop_seq(k) <= trk_pop_seq(k) + 1;
+                    -- The popped header belongs to its channel's last request
+                    if (unsigned(trk_last_seq(k)) = trk_pop_seq(k)) then
+                        trk_pend(k)(to_integer(unsigned(trk_pop_chan(k)))) <= '0';
+                    end if;
+                end if;
+
+                if (trk_wr(k) = '1') then
+                    trk_wr_seq(k)                                    <= trk_wr_seq(k) + 1;
+                    trk_pend(k)(to_integer(unsigned(input_channel))) <= '1';
+                end if;
+
+                if (RESET = '1') then
+                    trk_wr_seq(k)  <= (others => '0');
+                    trk_pop_seq(k) <= (others => '0');
+                    trk_pend(k)    <= (others => '0');
+                end if;
+            end if;
+        end process;
+
+        trk_idle_err(k) <= (or trk_pend(k)) when (trk_wr_seq(k) = trk_pop_seq(k)) else '0';
+    end generate;
+
+    PEND_CHAN <= trk_pend(0) or trk_pend(1);
 
     -- =============================================================================================
     -- Performance counter logic

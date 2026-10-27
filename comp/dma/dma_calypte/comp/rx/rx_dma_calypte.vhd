@@ -199,6 +199,7 @@ architecture FULL of RX_DMA_CALYPTE is
     signal hdrm_pkt_sent_inc   : std_logic;
     signal hdrm_pkt_disc_inc   : std_logic;
     signal hdrm_pkt_sent_bytes : std_logic_vector((log2(PKT_SIZE_MAX+1)-1) downto 0);
+    signal hdrm_pend_chan      : std_logic_vector(CHANNELS-1 downto 0);
 
     -- =============================================================================================
     -- Transaction Buffer ---> Header Insertor
@@ -224,6 +225,7 @@ architecture FULL of RX_DMA_CALYPTE is
     signal stat_frame_lng_max_err : std_logic_vector(USER_RX_MFB_REGIONS -1 downto 0);
     signal stat_frame_lng_min_err : std_logic_vector(USER_RX_MFB_REGIONS -1 downto 0);
     signal stat_frame_lng_ovf_err : std_logic_vector(USER_RX_MFB_REGIONS -1 downto 0);
+    signal frame_too_long         : std_logic;
 
     -- =============================================================================================
     -- Input buffer ---> Frame length checker
@@ -333,6 +335,15 @@ begin
     assert ((PCIE_UP_MFB_REGIONS = 1 or PCIE_UP_MFB_REGIONS = 2) and PCIE_UP_MFB_REGION_SIZE = 1 and PCIE_UP_MFB_BLOCK_SIZE = 8 and PCIE_UP_MFB_ITEM_WIDTH = 32)
         report "RX_LL_DMA: The design is not set for such PCIe MFB configuration, the valid are: MFB#(1,1,8,32), MFB#(2,1,8,32)."
         severity FAILURE;
+
+    -- The header manager writes one data request per block from the saturating STAT_PKT_LNG, so a longer frame breaks the one request per data TLP mapping.
+    frame_too_long <= mfb_src_rdy_lng_check and mfb_dst_rdy_lng_check and mfb_eof_lng_check(0) and (stat_frame_lng_max_err(0) or stat_frame_lng_ovf_err(0));
+
+    -- psl default clock is rising_edge(CLK);
+
+    -- psl assert_frame_lng_max :
+    --      assert always (frame_too_long = '0') abort (RESET)
+    --      report "RX_DMA_CALYPTE: A frame longer than PKT_SIZE_MAX, which the design does not support!";
 
     perf_cntr_g: if (PERF_CNTR_EN) generate
 
@@ -492,6 +503,7 @@ begin
         STOP_REQ_ACK  => stop_req_done,
 
         ENABLED_CHAN => open,
+        PEND_CHAN    => hdrm_pend_chan,
 
         SDP_RD_CHAN => hdrm_data_rd_chan,
         SDP_RD_DATA => hdrm_sdp_rd_data,
@@ -600,6 +612,8 @@ begin
         PKT_CNTR_SENT_INC => hdrm_pkt_sent_inc,
         PKT_CNTR_DISC_INC => hdrm_pkt_disc_inc,
         PKT_CNTR_PKT_SIZE => hdrm_pkt_sent_bytes,
+
+        PEND_CHAN => hdrm_pend_chan,
 
         DATA_ADDR_REQ_CNTR_INC    => data_addr_req_cntr_incr,
         DMA_HDR_ADDR_REQ_CNTR_INC => dma_hdr_addr_req_cntr_incr,
