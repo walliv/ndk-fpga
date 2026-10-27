@@ -137,16 +137,18 @@ begin
         report "RX_DMA_HDR_INSERTOR: The design is not prepared for such TX MFB configuration, the valid are: MFB#(1,1,8,32), MFB#(2,1,8,32)."
         severity FAILURE;
 
+    -- psl default clock is rising_edge(CLK);
+
     -- psl rd_dma_fifo_empty :
-    --      assert always (HDRM_DMA_HDR_DST_RDY -> HDRM_DMA_HDR_SRC_RDY) abort (RST) @rising_edge(CLK)
+    --      assert always (HDRM_DMA_HDR_DST_RDY -> HDRM_DMA_HDR_SRC_RDY) abort (RST)
     --      report "RX_DMA_HDR_INSERTOR: Reading from the DMA Header FIFO can only occur if there are some data!";
 
     -- psl rd_dma_pcie_fifo_empty :
-    --      assert always (HDRM_DMA_PCIE_HDR_DST_RDY -> HDRM_DMA_PCIE_HDR_SRC_RDY) abort (RST) @rising_edge(CLK)
+    --      assert always (HDRM_DMA_PCIE_HDR_DST_RDY -> HDRM_DMA_PCIE_HDR_SRC_RDY) abort (RST)
     --      report "RX_DMA_HDR_INSERTOR: Reading from the DMA PCIe Header FIFO can only occur if there are some data!";
 
     -- psl rd_data_pcie_fifo_empty :
-    --      assert always (HDRM_DATA_PCIE_HDR_DST_RDY -> HDRM_DATA_PCIE_HDR_SRC_RDY) abort (RST) @rising_edge(CLK)
+    --      assert always (HDRM_DATA_PCIE_HDR_DST_RDY -> HDRM_DATA_PCIE_HDR_SRC_RDY) abort (RST)
     --      report "RX_DMA_HDR_INSERTOR: Reading from the data PCIe Header FIFO can only occur if there are some data!";
 
     --=============================================================================================================

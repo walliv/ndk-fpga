@@ -359,36 +359,38 @@ begin
     -- Assertions for verification
     -- =============================================================================================
 
+    -- psl default clock is rising_edge(CLK);
+
     -- psl assert_hdr_pcie_hdr_full :
-    --      assert always (pcie_hdr_dma_hdr_tran_fifo_full = '0') abort (RESET) @rising_edge(CLK)
+    --      assert always (pcie_hdr_dma_hdr_tran_fifo_full = '0') abort (RESET)
     --      report "RX_DMA_HDR_MANAGER: Complete filling of the PCIe header transaction FIFO occured!";
 
     -- psl assert_data_pcie_hdr_full :
-    --      assert always (pcie_hdr_data_tran_fifo_full = '0') abort (RESET) @rising_edge(CLK)
+    --      assert always (pcie_hdr_data_tran_fifo_full = '0') abort (RESET)
     --      report "RX_DMA_HDR_MANAGER: Complete filling of the PCIe data transaction FIFO occured!";
 
     -- psl assert_data_addr_next_fifo_full :
-    --      assert always (data_addr_next_fifo_full = '0') abort (RESET) @rising_edge(CLK)
+    --      assert always (data_addr_next_fifo_full = '0') abort (RESET)
     --      report "RX_DMA_HDR_MANAGER: Complete filling of the FIFO for data address requests occured!";
 
     -- psl assert_dma_hdr_addr_next_fifo_full :
-    --      assert always (dma_hdr_addr_next_fifo_full = '0') abort (RESET) @rising_edge(CLK)
+    --      assert always (dma_hdr_addr_next_fifo_full = '0') abort (RESET)
     --      report "RX_DMA_HDR_MANAGER: Complete filling of the FIFO for DMA header address requests occured!";
 
     -- psl assert_dma_discard_fifo_full :
-    --      assert always (discard_fifo_full = '0') abort (RESET) @rising_edge(CLK)
+    --      assert always (discard_fifo_full = '0') abort (RESET)
     --      report "RX_DMA_HDR_MANAGER: Complete filling of the Discard FIFO occured!";
 
     -- psl assert_pkt_size_fifo_full :
-    --      assert always (pkt_size_fifo_full = '0') abort (RESET) @rising_edge(CLK)
+    --      assert always (pkt_size_fifo_full = '0') abort (RESET)
     --      report "RX_DMA_HDR_MANAGER: Complete filling of the Packet Size FIFO occured!";
 
     -- psl assert_hdr_meta_fifo_full :
-    --      assert always (hdr_meta_fifo_full = '0') abort (RESET) @rising_edge(CLK)
+    --      assert always (hdr_meta_fifo_full = '0') abort (RESET)
     --      report "RX_DMA_HDR_MANAGER: Complete filling of the Header Meta FIFO occured!";
 
     -- psl assert_ptr_fifo_full :
-    --      assert always (ptr_fifo_full = '0') abort (RESET) @rising_edge(CLK)
+    --      assert always (ptr_fifo_full = '0') abort (RESET)
     --      report "RX_DMA_HDR_MANAGER: Complete filling of the Pointer FIFO occured!";
 
     -- =============================================================================================

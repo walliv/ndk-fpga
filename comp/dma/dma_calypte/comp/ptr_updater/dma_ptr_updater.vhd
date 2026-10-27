@@ -148,8 +148,10 @@ begin
         report "RX_DMA_CALYPTE_PTR_UPDATER: Unsupported MFB configuration."
         severity FAILURE;
 
+    -- psl default clock is rising_edge(CLK);
+
     -- psl assert_hdr_pcie_hdr_full :
-    --      assert always (fifo_full = '0') abort (RESET) @rising_edge(CLK)
+    --      assert always (fifo_full = '0') abort (RESET)
     --      report "DMA_PTR_UPDATER: Complete filling of the PCIe transaction FIFO occured!";
 
     -- =============================================================================================
