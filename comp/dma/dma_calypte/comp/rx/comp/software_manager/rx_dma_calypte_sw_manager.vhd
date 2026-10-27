@@ -609,6 +609,13 @@ architecture FULL of RX_DMA_CALYPTE_SW_MANAGER is
     signal stop_moved_reg   : std_logic;
     signal stop_moved_set   : std_logic;
     signal stop_dispatched  : std_logic;
+    -- A stop taken but not acknowledged yet whose FSM yielded; skip makes its channel wait one more round
+    signal stop_pend_reg    : std_logic_vector(CHANNELS-1 downto 0);
+    signal stop_skip_reg    : std_logic_vector(CHANNELS-1 downto 0);
+    signal stop_yield       : std_logic;
+    signal stop_resume      : std_logic;
+    signal stop_pend_active : std_logic;
+    signal stop_skip_active : std_logic;
     signal stop_ack_err     : std_logic;
     -- The pointer registers of the stopping channel themselves, not the comparator result, differ
     signal stop_ptr_ne_now  : std_logic;
@@ -1126,12 +1133,21 @@ begin
         enabled_chan_rst      <= (others => '0');
         PTR_UPD_DISP_EN       <= '0';
         upd_timeout_cntr_next <= upd_timeout_cntr_reg;
+        stop_yield            <= '0';
+        stop_resume           <= '0';
 
         case (stop_fsm_pst) is
 
             when IDLE =>
 
-                if (reg_dob_opt(R_CONTROL)(1)(0) = '0' and reg_dob_opt(R_STATUS)(1)(0) = '1') then
+                -- A taken stop always completes: it resumes without a second request, even if software has set R_CONTROL to 1.
+                if (stop_pend_active = '1') then
+                    if (stop_skip_active = '0') then
+                        stop_fsm_nst     <= WAIT_FOR_POINTERS;
+                        stop_fsm_channel <= active_chan_reg;
+                        stop_resume      <= '1';
+                    end if;
+                elsif (reg_dob_opt(R_CONTROL)(1)(0) = '0' and reg_dob_opt(R_STATUS)(1)(0) = '1') then
                     stop_fsm_nst     <= WAIT_FOR_REQ_ACK;
                     stop_fsm_channel <= active_chan_reg;
                     STOP_REQ_CHAN    <= active_chan_reg;
@@ -1169,6 +1185,11 @@ begin
                 if (stop_quiescent = '1' and stop_moved_reg = '1') then
                     -- The last update missed a pointer move: send the current pointers at once.
                     stop_fsm_nst <= WAIT_FOR_PTR_UPDATE_DISPATCH;
+                elsif (stop_quiescent = '0' and (unsigned(reg_dob_opt(R_UPDATE_TIMEOUT)(1)) = UPD_TIMEOUT_CNTR_NULL_VAL or
+                                                 upd_timeout_cntr_reg = UPD_TIMEOUT_CNTR_NULL_VAL)) then
+                    -- Requests of the channel may wait for another channel's stop, so serve the other channels meanwhile.
+                    stop_fsm_nst <= IDLE;
+                    stop_yield   <= '1';
                 end if;
 
                 -- This takes priority if this would occur at the same time with timeout counter runout
@@ -1176,6 +1197,7 @@ begin
                     stop_moved_reg = '0') then
                     stop_fsm_nst                                                 <= IDLE;
                     stop_acked                                                   <= '1';
+                    stop_yield                                                   <= '0';
                     enabled_chan_rst(to_integer(unsigned(stop_fsm_channel_reg))) <= '1';
                 end if;
         end case;
@@ -1185,7 +1207,9 @@ begin
     stop_chan_ok <= '1' when (stop_fsm_channel_reg = active_chan_reg) else '0';
     stop_ptr_ok  <= stop_hdp_ok_reg and stop_hhp_ok_reg;
 
-    stop_quiescent <= not PEND_CHAN(to_integer(unsigned(stop_fsm_channel_reg)));
+    stop_quiescent   <= not PEND_CHAN(to_integer(unsigned(stop_fsm_channel_reg)));
+    stop_pend_active <= stop_pend_reg(active_chan_regi);
+    stop_skip_active <= stop_skip_reg(active_chan_regi);
 
     stop_hxp_wr <= '1' when ((HDP_WR_EN = '1' and HDP_WR_CHAN = stop_fsm_channel_reg) or
                              (HHP_WR_EN = '1' and HHP_WR_CHAN = stop_fsm_channel_reg)) else
@@ -1201,7 +1225,8 @@ begin
 
     -- A pointer write in the dispatch cycle is not in what the dispatch read.
     stop_dispatched <= '1' when (stop_fsm_pst = WAIT_FOR_PTR_UPDATE_DISPATCH and PTR_UPD_DISP_ACK = '1') else '0';
-    stop_moved_set  <= '1' when (stop_hxp_wr = '1' and (stop_dispatched = '1' or stop_fsm_pst = WAIT_FOR_POINTERS)) else
+    stop_moved_set  <= '1' when (stop_resume = '1' or
+                                 (stop_hxp_wr = '1' and (stop_dispatched = '1' or stop_fsm_pst = WAIT_FOR_POINTERS))) else
                        '0';
 
     stop_track_p : process (CLK)
@@ -1219,9 +1244,23 @@ begin
                 stop_moved_reg <= '0';
             end if;
 
+            -- The round robin passing a skipped channel once more lets it resume on its next pass.
+            if (stop_skip_active = '1') then
+                stop_skip_reg(active_chan_regi) <= '0';
+            end if;
+            if (stop_yield = '1') then
+                stop_pend_reg(to_integer(unsigned(stop_fsm_channel_reg))) <= '1';
+                stop_skip_reg(to_integer(unsigned(stop_fsm_channel_reg))) <= '1';
+            end if;
+            if (stop_acked = '1') then
+                stop_pend_reg(to_integer(unsigned(stop_fsm_channel_reg))) <= '0';
+            end if;
+
             if (RESET = '1') then
                 stop_settle_cntr <= (others => '0');
                 stop_moved_reg   <= '0';
+                stop_pend_reg    <= (others => '0');
+                stop_skip_reg    <= (others => '0');
             end if;
         end if;
     end process;
@@ -1241,6 +1280,10 @@ begin
     -- psl assert_stop_ack_ptrs_equal :
     --      assert always (stop_acked = '1' -> stop_ptr_ne_now = '0') abort (RESET)
     --      report "RX_DMA_SW_MANAGER: A stop acknowledged while the channel's HDP/HHP differ from its SDP/SHP!";
+
+    -- psl assert_stop_no_repeated_req :
+    --      assert always (STOP_REQ_VLD = '1' -> stop_pend_active = '0') abort (RESET)
+    --      report "RX_DMA_SW_MANAGER: A stop request sent again for a channel whose stop is pending!";
     -- =====================================================================
 
     -- =============================================================================================
