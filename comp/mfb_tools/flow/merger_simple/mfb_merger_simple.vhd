@@ -26,19 +26,21 @@ use work.math_pack.all;
 entity MFB_MERGER_SIMPLE is
     generic (
         -- Number of Regions in a data word.
-        REGIONS         : natural := 2;
+        REGIONS          : natural := 2;
         -- Number of Blocks in a Region.
-        REGION_SIZE     : natural := 8;
+        REGION_SIZE      : natural := 8;
         -- Number of Items in a Block.
-        BLOCK_SIZE      : natural := 8;
+        BLOCK_SIZE       : natural := 8;
         -- Number of bits in an Item.
-        ITEM_WIDTH      : natural := 8;
+        ITEM_WIDTH       : natural := 8;
         -- Number of bits for metadata in a single Region.
-        META_WIDTH      : natural := 8;
+        META_WIDTH       : natural := 8;
         -- Refer to the readme.rst file for information
-        MASKING_EN      : boolean := True;
+        MASKING_EN       : boolean := True;
         -- Maximum amount of clock periods with destination ready before it tries to switch to the other input.
-        CNT_MAX         : integer := 64
+        CNT_MAX          : integer := 64;
+        -- Refer to the readme.rst file for information
+        ARRIVAL_ORDER_EN : boolean := False
     );
     port (
         -- =====================================================================
@@ -159,6 +161,48 @@ architecture BEHAVIORAL of MFB_MERGER_SIMPLE is
     signal eof_pos_tx           : std_logic_vector(EOF_POS_WIDTH-1 downto 0);
     signal src_rdy_tx           : std_logic;
     signal dst_rdy_tx           : std_logic;
+    -- source ready of the output register, taken from the mode in use
+    signal src_rdy_out          : std_logic;
+
+    -- arrival order mode: per input register stage, ownership of the output and frame tracking
+    signal ao_data              : slv_array_t(1 downto 0)(DATA_WIDTH-1 downto 0);
+    signal ao_meta              : slv_array_t(1 downto 0)(META_SIGNAL_WIDTH-1 downto 0);
+    signal ao_sof               : slv_array_t(1 downto 0)(REGIONS-1 downto 0);
+    signal ao_eof               : slv_array_t(1 downto 0)(REGIONS-1 downto 0);
+    signal ao_sof_pos           : slv_array_t(1 downto 0)(SOF_POS_WIDTH-1 downto 0);
+    signal ao_eof_pos           : slv_array_t(1 downto 0)(EOF_POS_WIDTH-1 downto 0);
+    signal ao_vld               : std_logic_vector(1 downto 0);
+    signal ao_rx_data           : slv_array_t(1 downto 0)(DATA_WIDTH-1 downto 0);
+    signal ao_rx_meta           : slv_array_t(1 downto 0)(META_SIGNAL_WIDTH-1 downto 0);
+    signal ao_rx_sof            : slv_array_t(1 downto 0)(REGIONS-1 downto 0);
+    signal ao_rx_eof            : slv_array_t(1 downto 0)(REGIONS-1 downto 0);
+    signal ao_rx_sof_pos        : slv_array_t(1 downto 0)(SOF_POS_WIDTH-1 downto 0);
+    signal ao_rx_eof_pos        : slv_array_t(1 downto 0)(EOF_POS_WIDTH-1 downto 0);
+    signal ao_rx_src_rdy        : std_logic_vector(1 downto 0);
+    signal ao_rx_dst_rdy        : std_logic_vector(1 downto 0);
+    signal ao_rx_acc            : std_logic_vector(1 downto 0);
+    -- a frame of the input is open after its last accepted word
+    signal ao_open              : std_logic_vector(1 downto 0);
+    signal ao_open_next         : std_logic_vector(1 downto 0);
+    signal ao_owner             : natural range 0 to 1;
+    signal ao_other             : natural range 0 to 1;
+    signal ao_owner_chg         : std_logic;
+    signal ao_owner_bound       : std_logic;
+    signal ao_owner_q           : natural range 0 to 1;
+    signal ao_handover_open     : std_logic;
+    signal ao_sel               : natural range 0 to 1;
+    signal ao_sel_next          : natural range 0 to 1;
+    signal ao_sel_formula       : natural range 0 to 1;
+    signal ao_owner_next        : natural range 0 to 1;
+    signal ao_vld_next          : std_logic_vector(1 downto 0);
+    signal ao_cnt               : unsigned(max(1, log2(CNT_MAX))-1 downto 0);
+    signal ao_cnt_reached       : std_logic;
+
+    -- Whether a frame is open after a region with the given SOF and EOF, open_in telling whether one was open before it.
+    function frame_open_f (sof : std_logic; eof : std_logic; open_in : std_logic) return std_logic is
+    begin
+        return (sof and not eof and not open_in) or (sof and eof and open_in) or (not sof and not eof and open_in);
+    end function;
 
 begin
     src_rdy0_rx <= RX_MFB0_SRC_RDY;
@@ -169,9 +213,6 @@ begin
     eof1_rx     <= RX_MFB1_EOF;
 
     dst_rdy_tx <= TX_MFB_DST_RDY;
-
-    RX_MFB0_DST_RDY <= dst_rdy0_rx;
-    RX_MFB1_DST_RDY <= dst_rdy1_rx;
 
     reg_src_rdy0_p : process (CLK)
     begin
@@ -253,9 +294,7 @@ begin
     -- this logic calculates whether or not current data word ends with an incomplete packet, according to which is decided, if masking is needed or
     -- if it is possible to switch at this moment
     inc_pkt0_g : for i in 0 to REGIONS-1 generate
-        inc_pkt0(i+1) <= (sof0_rx(i) and not eof0_rx(i) and not inc_pkt0(i)) or
-                         (sof0_rx(i) and eof0_rx(i) and inc_pkt0(i)) or
-                         (not sof0_rx(i) and not eof0_rx(i) and inc_pkt0(i));
+        inc_pkt0(i+1) <= frame_open_f(sof0_rx(i), eof0_rx(i), inc_pkt0(i));
     end generate;
 
     incomplete_pkt0_p : process (CLK)
@@ -273,9 +312,7 @@ begin
     sw_right_now0     <= (not inc_pkt0(0) and (or eof0_rx_dly) and src_rdy0_rx_dly) or (not inc_pkt0(0) and not src_rdy0_rx_dly);
 
     inc_pkt1_g : for i in 0 to REGIONS-1 generate
-        inc_pkt1(i+1) <= (sof1_rx(i) and not eof1_rx(i) and not inc_pkt1(i)) or
-                         (sof1_rx(i) and eof1_rx(i) and inc_pkt1(i)) or
-                         (not sof1_rx(i) and not eof1_rx(i) and inc_pkt1(i));
+        inc_pkt1(i+1) <= frame_open_f(sof1_rx(i), eof1_rx(i), inc_pkt1(i));
     end generate;
 
     incomplete_pkt1_p : process (CLK)
@@ -511,26 +548,7 @@ begin
         end case;
     end process;
 
-    -- the actual switching between inputs 0 and 1 according to the mux address
-    data_tx    <= data0_rx_dly when mux_addr = '0' else
-                  data1_rx_dly;
-
-    meta_tx    <= meta0_rx_dly when mux_addr = '0' else
-                  meta1_rx_dly;
-
-    sof_tx     <= masked_sof0_rx_dly when mux_addr = '0' else
-                  masked_sof1_rx_dly;
-
-    eof_tx     <= masked_eof0_rx_dly when mux_addr = '0' else
-                  masked_eof1_rx_dly;
-
-    sof_pos_tx <= sof_pos0_rx_dly when mux_addr = '0' else
-                  sof_pos1_rx_dly;
-
-    eof_pos_tx <= eof_pos0_rx_dly when mux_addr = '0' else
-                  eof_pos1_rx_dly;
-
-
+    -- In both modes the output advances with DST_RDY only, so constant input bits fold into the output register's reset.
     reg_out_data_p : process (CLK)
     begin
         if (rising_edge(CLK)) then
@@ -551,9 +569,162 @@ begin
             if (RST = '1') then
                 TX_MFB_SRC_RDY <= '0';
             elsif (dst_rdy_tx = '1') then
-                TX_MFB_SRC_RDY <= src_rdy_tx;
+                TX_MFB_SRC_RDY <= src_rdy_out;
             end if;
         end if;
     end process;
+
+    -- psl default clock is rising_edge(CLK);
+
+    output_g : if (not ARRIVAL_ORDER_EN) generate
+
+        RX_MFB0_DST_RDY <= dst_rdy0_rx;
+        RX_MFB1_DST_RDY <= dst_rdy1_rx;
+
+        -- the actual switching between inputs 0 and 1 according to the mux address
+        data_tx    <= data0_rx_dly when mux_addr = '0' else
+                      data1_rx_dly;
+
+        meta_tx    <= meta0_rx_dly when mux_addr = '0' else
+                      meta1_rx_dly;
+
+        sof_tx     <= masked_sof0_rx_dly when mux_addr = '0' else
+                      masked_sof1_rx_dly;
+
+        eof_tx     <= masked_eof0_rx_dly when mux_addr = '0' else
+                      masked_eof1_rx_dly;
+
+        sof_pos_tx <= sof_pos0_rx_dly when mux_addr = '0' else
+                      sof_pos1_rx_dly;
+
+        eof_pos_tx <= eof_pos0_rx_dly when mux_addr = '0' else
+                      eof_pos1_rx_dly;
+
+        src_rdy_out <= src_rdy_tx;
+
+    else generate
+
+        ao_rx_data    <= (RX_MFB1_DATA, RX_MFB0_DATA);
+        ao_rx_meta    <= (RX_MFB1_META, RX_MFB0_META);
+        ao_rx_sof     <= (RX_MFB1_SOF, RX_MFB0_SOF);
+        ao_rx_eof     <= (RX_MFB1_EOF, RX_MFB0_EOF);
+        ao_rx_sof_pos <= (RX_MFB1_SOF_POS, RX_MFB0_SOF_POS);
+        ao_rx_eof_pos <= (RX_MFB1_EOF_POS, RX_MFB0_EOF_POS);
+        ao_rx_src_rdy <= RX_MFB1_SRC_RDY & RX_MFB0_SRC_RDY;
+
+        RX_MFB0_DST_RDY <= ao_rx_dst_rdy(0);
+        RX_MFB1_DST_RDY <= ao_rx_dst_rdy(1);
+
+        ao_other    <= 1 - ao_owner;
+
+        -- The register of the input that lost ownership holds words older than any of the owner's. The selection is
+        -- registered from the next state, so the data multiplexer has a single select input.
+        ao_sel_formula <= ao_other when (ao_vld(ao_other) = '1') else ao_owner;
+        ao_owner_next  <= ao_other when (ao_owner_chg = '1') else ao_owner;
+        ao_sel_next    <= 1 - ao_owner_next when (ao_vld_next(1 - ao_owner_next) = '1') else ao_owner_next;
+
+        ao_sel_reg_p : process (CLK)
+        begin
+            if (rising_edge(CLK)) then
+                ao_sel <= ao_sel_next;
+                if (RST = '1') then
+                    ao_sel <= 0;
+                end if;
+            end if;
+        end process;
+
+        ao_dst_rdy_g : for i in 0 to 1 generate
+            ao_rx_dst_rdy(i) <= '1' when (ao_owner = i and (ao_vld(i) = '0' or (ao_sel = i and dst_rdy_tx = '1'))) else '0';
+            ao_rx_acc(i)     <= ao_rx_src_rdy(i) and ao_rx_dst_rdy(i);
+
+            ao_open_next_p : process (all)
+                variable open_v : std_logic;
+            begin
+                open_v := ao_open(i);
+                for r in 0 to REGIONS-1 loop
+                    open_v := frame_open_f(ao_rx_sof(i)(r), ao_rx_eof(i)(r), open_v);
+                end loop;
+                ao_open_next(i) <= open_v;
+            end process;
+
+            ao_vld_next(i) <= '0' when (RST = '1') else
+                              '1' when (ao_rx_acc(i) = '1') else
+                              '0' when (ao_sel = i and dst_rdy_tx = '1') else
+                              ao_vld(i);
+
+            ao_in_reg_p : process (CLK)
+            begin
+                if (rising_edge(CLK)) then
+                    if (ao_rx_acc(i) = '1') then
+                        ao_data(i)    <= ao_rx_data(i);
+                        ao_meta(i)    <= ao_rx_meta(i);
+                        ao_sof(i)     <= ao_rx_sof(i);
+                        ao_eof(i)     <= ao_rx_eof(i);
+                        ao_sof_pos(i) <= ao_rx_sof_pos(i);
+                        ao_eof_pos(i) <= ao_rx_eof_pos(i);
+                        ao_open(i)    <= ao_open_next(i);
+                    end if;
+                    ao_vld(i) <= ao_vld_next(i);
+                    if (RST = '1') then
+                        ao_open(i) <= '0';
+                    end if;
+                end if;
+            end process;
+        end generate;
+
+        -- Ownership passes only after a word that leaves no frame of the owner open and once the old owner's
+        -- register is empty, so the output order is the acceptance order and no word is ever split.
+        ao_owner_bound <= not ao_open_next(ao_owner) when (ao_rx_acc(ao_owner) = '1') else not ao_open(ao_owner);
+        ao_owner_chg   <= ao_owner_bound and ao_rx_src_rdy(ao_other) and not ao_vld(ao_other) and
+                          (ao_cnt_reached or not ao_rx_src_rdy(ao_owner));
+
+        ao_cnt_reached <= '0' when (ao_cnt < CNT_MAX-1) else '1';
+
+        ao_owner_p : process (CLK)
+        begin
+            if (rising_edge(CLK)) then
+                if (ao_owner_chg = '1') then
+                    ao_owner <= ao_other;
+                    ao_cnt   <= (others => '0');
+                elsif (TX_MFB_DST_RDY = '1' and ao_rx_src_rdy(ao_other) = '1' and ao_cnt_reached = '0') then
+                    ao_cnt <= ao_cnt + 1;
+                end if;
+                if (RST = '1') then
+                    ao_owner <= 0;
+                    ao_cnt   <= (others => '0');
+                end if;
+            end if;
+        end process;
+
+        data_tx     <= ao_data(ao_sel);
+        meta_tx     <= ao_meta(ao_sel);
+        sof_tx      <= ao_sof(ao_sel);
+        eof_tx      <= ao_eof(ao_sel);
+        sof_pos_tx  <= ao_sof_pos(ao_sel);
+        eof_pos_tx  <= ao_eof_pos(ao_sel);
+        src_rdy_out <= ao_vld(ao_sel);
+
+        -- psl assert_ao_sel_oldest :
+        --      assert always (ao_sel = ao_sel_formula) abort (RST)
+        --      report "MFB_MERGER_SIMPLE: the output does not take the oldest registered word!";
+
+        -- psl assert_ao_one_input_accepted :
+        --      assert always (ao_rx_dst_rdy /= "11") abort (RST)
+        --      report "MFB_MERGER_SIMPLE: both inputs ready in the arrival order mode!";
+
+        ao_owner_q_p : process (CLK)
+        begin
+            if (rising_edge(CLK)) then
+                ao_owner_q <= ao_owner;
+            end if;
+        end process;
+
+        ao_handover_open <= '1' when (ao_owner /= ao_owner_q and ao_open(ao_owner_q) = '1') else '0';
+
+        -- psl assert_ao_handover_at_frame_end :
+        --      assert always (ao_handover_open = '0') abort (RST)
+        --      report "MFB_MERGER_SIMPLE: ownership passed while a frame of the previous owner was open!";
+
+    end generate;
 
 end architecture;
