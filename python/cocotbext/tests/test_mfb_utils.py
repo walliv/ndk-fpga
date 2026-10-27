@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from cocotbext.ofm.mfb.protocol import MfbParams
-from cocotbext.ofm.mfb.utils import region_frame_event
+from cocotbext.ofm.mfb.utils import get_mfb_params, region_frame_event
 from stubs import StubSignal, mfb_widths
 
 
@@ -43,3 +43,19 @@ def test_params_of_a_bus_without_position_signals():
     bus = SimpleNamespace(sof=StubSignal(2), data=StubSignal(64))
 
     assert MfbParams.from_bus(bus) == MfbParams(2, 1, 1, 32)
+
+
+@pytest.mark.parametrize("geometry", [(1, 1, 8, 32), (2, 1, 8, 32), (1, 4, 8, 8), (1, 8, 8, 8), (4, 8, 8, 8)])
+def test_inferred_geometry(geometry):
+    assert get_mfb_params(_bus(*geometry, meta_width=12), None) == (*geometry, 12, "sof")
+
+
+def test_explicit_parameters_override_the_inferred_ones():
+    params = dict(meta_width=3, os_vld_with="eof")
+
+    assert get_mfb_params(_bus(2, 4, 8, 8, meta_width=12), params) == (2, 4, 8, 8, 3, "eof")
+
+
+def test_parameters_that_disagree_with_the_signals_are_rejected():
+    with pytest.raises(Exception):
+        get_mfb_params(_bus(2, 4, 8, 8), dict(regions=3))
