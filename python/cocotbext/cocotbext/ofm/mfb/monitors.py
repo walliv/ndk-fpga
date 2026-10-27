@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # Copyright (C) 2024-2026 CESNET z. s. p. o.
+# Copyright (C) 2026 Universitaet Heidelberg, Institut fuer Technische Informatik (ZITI)
 # Author(s): Jakub Cabal <cabal@cesnet.cz>
 #            Ondrej Schwarz <ondrejschwarz@cesnet.cz>
+#            Vladislav Valek <vladislav.valek@stud.uni-heidelberg.de>
 
 from cocotb.triggers import RisingEdge
-from cocotb.types import LogicArray
-from cocotbext.ofm.base.types import LogicArray2D
 from cocotbext.ofm.base.monitors import BusMonitor
 from cocotbext.ofm.mfb.utils import get_mfb_params, region_frame_event
 from cocotbext.ofm.mfb.transaction import MfbTransaction
-from math import log2
+from cocotbext.ofm.utils.signals import signal_binstr
 from copy import copy
 
 
@@ -25,10 +25,6 @@ class MFBMonitor(BusMonitor):
         trans_type: The desired type for the transactions returned by the monitor.
                     Defaults to `bytes` for backward compatibility.
                     Consider using a child class of `MfbTransaction` for more structured data.
-
-        meta_valid_with: Specifies which signal indicates the validity of metadata
-                         if the 'meta' or similar signal is present. Must be either "sof" (start of frame)
-                         or "eof" (end of frame).
 
         start: Whether the monitor samples the bus in a task of its own. With False, the bench calls
                `monitor_cycle()` once per clock instead, e.g. from one task that samples many monitors.
@@ -55,72 +51,96 @@ class MFBMonitor(BusMonitor):
         self._trans_type  = trans_type
         self._transaction = MfbTransaction() if self._trans_type is bytes else trans_type()
 
-        self._data    = LogicArray2D(self._regions)(self._region_items * self._item_width)
-        self._sof_pos = LogicArray2D(self._regions)(int(log2(self._region_size)))
-        self._eof_pos = LogicArray2D(self._regions)(int(log2(self._region_size*self._block_size)))
-        self._sof     = LogicArray(0, self._regions)
-        self._eof     = LogicArray(0, self._regions)
-        self._os_data = {s: LogicArray2D(self._regions)(self._os_widths[s]) for s in self._os}
+        # The per-region field widths come from the signals, so they hold for inferred and explicit mfb_params.
+        self._sof_pos_w = (self._region_size - 1).bit_length()
+        self._eof_pos_w = len(self.bus.eof_pos) // self._regions
+
+        # The bit strings are read from the simulator handles under the BusProxy; with an array_idx a handle holds
+        # the whole array, so that case reads the proxied values instead.
+        if array_idx is None:
+            self._rbus = getattr(self.bus, "_bus", self.bus)
+            self._binstr = signal_binstr
+        else:
+            self._rbus = self.bus
+            self._binstr = lambda sig: str(sig.value)
+
+        self._data    = 0
+        self._sof_pos = 0
+        self._eof_pos = 0
+        self._sof     = [0] * self._regions
+        self._eof     = [0] * self._regions
+        self._os_data = {s: 0 for s in self._os}
 
         self.frame_cnt = 0
         self.item_cnt  = 0
         self._in_frame = False
 
     def _is_valid_word(self, signal_src_rdy, signal_dst_rdy):
-        if signal_dst_rdy is None:
-            return (signal_src_rdy.value == 1)
-        else:
-            return (signal_src_rdy.value == 1) and (signal_dst_rdy.value == 1)
-
-    def _read_control_signals(self):
-        self._data.deserialize(self.bus.data.value)
-
-        if self._sof_pos is not None:
-            self._sof_pos.deserialize(self.bus.sof_pos.value)
-
-        if self._eof_pos is not None:
-            self._eof_pos.deserialize(self.bus.eof_pos.value)
-
-        self._sof = self.bus.sof.value
-        self._eof = self.bus.eof.value
-
-        for s in self._os:
-            sig_val = getattr(self.bus, s).value
-
-            if len(sig_val) > 0:
-                self._os_data[s].deserialize(sig_val)
+        if str(signal_src_rdy.value) != "1":
+            return False
+        return signal_dst_rdy is None or str(signal_dst_rdy.value) == "1"
 
     def _word_valid(self):
-        return self._is_valid_word(self.bus.src_rdy, self.bus.dst_rdy)
+        bus = self._rbus
+        if self._binstr(bus.src_rdy) != "1":
+            return False
+        return bus.dst_rdy is None or self._binstr(bus.dst_rdy) == "1"
+
+    def _int_or_logic(self, sig):
+        """A signal's value as an int, or as a LogicArray when it holds a bit but 0 or 1."""
+        try:
+            return int(self._binstr(sig), 2)
+        except ValueError:
+            return sig.value
+
+    def _read_control_signals(self):
+        # Plain ints slice per region far cheaper than LogicArrays. A field holding any bit but 0 or 1 keeps its
+        # LogicArray, which _field and _data_bytes decode on their own, so X on META or the positions spares DATA.
+        bus = self._rbus
+        self._data = self._int_or_logic(bus.data)
+        self._sof_pos = self._int_or_logic(bus.sof_pos)
+        self._eof_pos = self._int_or_logic(bus.eof_pos)
+        sof = self._int_or_logic(bus.sof)
+        eof = self._int_or_logic(bus.eof)
+        self._sof = [(sof >> r) & 1 for r in range(self._regions)] if isinstance(sof, int) else [int(sof[r]) for r in range(self._regions)]
+        self._eof = [(eof >> r) & 1 for r in range(self._regions)] if isinstance(eof, int) else [int(eof[r]) for r in range(self._regions)]
+
+        for s in self._os:
+            self._os_data[s] = self._int_or_logic(getattr(bus, s))
+
+    def _field(self, vec, r, width):
+        """Unsigned value of the per-region `width`-bit field `r` of `vec`, an int or a LogicArray."""
+        if width <= 0:
+            return 0
+        if isinstance(vec, int):
+            return (vec >> (r * width)) & ((1 << width) - 1)
+        return vec[(r + 1) * width - 1:r * width].to_unsigned()
 
     def _region_ctrl(self, r):
         """SOF, EOF, SOF_POS and EOF_POS of region `r`, a position 0 where its flag is not set."""
         sof = self._sof[r]
         eof = self._eof[r]
-
-        if self._sof_pos is not None:
-            sof_pos = self._sof_pos[r].to_unsigned() if sof else 0
-        else:
-            sof_pos = 0
-
-        if self._eof_pos is not None:
-            eof_pos = self._eof_pos[r].to_unsigned() if eof else 0
-        else:
-            eof_pos = 0
-
+        sof_pos = self._field(self._sof_pos, r, self._sof_pos_w) if sof else 0
+        eof_pos = self._field(self._eof_pos, r, self._eof_pos_w) if eof else 0
         return sof, eof, sof_pos, eof_pos
 
     def _data_bytes(self, r, lo, hi):
         """Little-endian bytes of region `r` data bits [lo:hi), counted from the LSB."""
-        return self._data[r][hi - 1:lo].to_bytes(byteorder="little")
+        if hi <= lo:
+            return b""
+        base = r * self._region_data_w
+        if isinstance(self._data, int):
+            n = hi - lo
+            return ((self._data >> (base + lo)) & ((1 << n) - 1)).to_bytes((n + 7) // 8, byteorder="little")
+        return self._data[base + hi - 1:base + lo].to_bytes(byteorder="little")
 
     def _set_os(self, r, vld_with=None):
         """Read the optional signals of region `r` when they are valid with `vld_with`, or unconditionally when None."""
         if vld_with is not None and vld_with != self._os_vld_with:
             return
         for s in self._os:
-            if self._os_data[s] is not None:
-                setattr(self._transaction, s, self._os_data[s][r].to_unsigned())
+            if self._os_widths[s] > 0:
+                setattr(self._transaction, s, self._field(self._os_data[s], r, self._os_widths[s]))
 
     def _recv_trans(self):
         self.log.debug("received transaction: %s", self._transaction)
@@ -131,6 +151,7 @@ class MFBMonitor(BusMonitor):
             self._recv(copy(self._transaction))
 
     def _frame_received(self):
+        self._transaction.data = bytes(self._transaction.data)
         self._recv_trans()
         self.frame_cnt += 1
         self.item_cnt += (len(self._transaction.data) * 8) // self._item_width
@@ -172,7 +193,7 @@ class MFBMonitor(BusMonitor):
                     self._frame_received()
 
                     # start of another packet, in_frame stays True
-                    self._transaction.data = self._data_bytes(r, pkt_start, self._region_data_w)
+                    self._transaction.data = bytearray(self._data_bytes(r, pkt_start, self._region_data_w))
                     self._set_os(r, "sof")
 
                 elif event == "start":
@@ -199,7 +220,7 @@ class MFBMonitor(BusMonitor):
 
                 elif event == "start":
                     # packet starts in this regions and ends in another one
-                    self._transaction.data = self._data_bytes(r, pkt_start, self._region_data_w)
+                    self._transaction.data = bytearray(self._data_bytes(r, pkt_start, self._region_data_w))
                     self._set_os(r, "sof")
                     self._in_frame = True
 
