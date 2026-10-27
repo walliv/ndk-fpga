@@ -13,6 +13,7 @@ set BARREL_SHIFTER_BASE "$OFM_PATH/comp/base/logic/barrel_shifter"
 # Packages
 lappend PACKAGES "$PKG_BASE/math_pack.vhd"
 lappend PACKAGES "$PKG_BASE/type_pack.vhd"
+lappend PACKAGES "$ENTITY_BASE/tx_dma_pcie_trans_buffer_pkg.vhd"
 
 # Components
 lappend COMPONENTS [ list "SDP_BRAM"            $SDP_BRAM_BASE          "FULL" ]
