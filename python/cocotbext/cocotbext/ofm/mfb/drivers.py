@@ -110,6 +110,13 @@ class MFBDriver(ModularBusDriver):
         self.append(transaction, event=accepted)
         await accepted.wait()
 
+    def clear(self):
+        """Drop the queued transactions that the driver has not started; the frame being sent goes on."""
+        self._appended -= sum(not isinstance(t, IdleTransaction) for t in self._queue)
+        self._queue.clear()
+        while self._waiters and self._waiters[-1][0] > self._appended:
+            self._waiters.pop()
+
     def abort(self):
         """Drop the queued frames and the one being sent and park the bus, e.g. for a DUT reset mid-frame. A send()
         awaiting a dropped frame never returns, so its task is to be cancelled."""

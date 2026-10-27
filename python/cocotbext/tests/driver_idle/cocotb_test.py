@@ -528,6 +528,34 @@ async def run_mfb_abort_test(dut):
         f"{(hex(words[0][0]), words[0][1]) if words else None}"
 
 
+@cocotb.test()
+async def run_mfb_clear_test(dut):
+    """clear() drops the frames the driver has not started; the one on the bus is sent whole."""
+    await start(dut)
+    geo = mfb_geometry(dut)
+    word_bytes = geo.word_width // 8
+    rng = random.Random(random.getrandbits(64))
+    drv = MFBDriver(dut, "RX_MFB", dut.CLK, generics_prefix="MFB", idle_generator=IdleGenerator())
+    words = []
+    cocotb.start_soon(collect_sof_words(dut, words))
+
+    started = rng.randbytes(2 * word_bytes)
+    drv.append(MfbTransaction(data=started))
+    for _ in range(3):
+        drv.append(MfbTransaction(data=rng.randbytes(word_bytes)), event=Event())
+    await ClockCycles(dut.CLK, 2)
+    assert drv.queued == 3
+    drv.clear()
+    assert drv.queued == 0 and drv.pending == 1 and not drv._waiters
+    dut.RX_MFB_DST_RDY.value = 1
+    await ClockCycles(dut.CLK, 6)
+
+    expected = [(int.from_bytes(started[:word_bytes], "little"), 1), (int.from_bytes(started[word_bytes:], "little"), 0)]
+    assert words == expected, f"{len(words)} word(s) after clear(), first as (DATA, SOF): " \
+        f"{(hex(words[0][0]), words[0][1]) if words else None}"
+    assert drv.pending == 0
+
+
 async def count_eofs(dut, eofs):
     """The count of accepted EOFs in eofs[0], sampled at ReadOnly before the edge that accepts them."""
     while True:
