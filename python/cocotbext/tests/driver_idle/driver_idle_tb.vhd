@@ -9,7 +9,8 @@ use ieee.std_logic_1164.all;
 
 use work.math_pack.all;
 
--- Only inputs: the bench plays the sink, so it decides DST_RDY in every cycle while the drivers send.
+-- The bench plays the sink, so it decides DST_RDY in every cycle while the drivers send. DLY_MFB_DST_RDY is a register
+-- on CLK and CLK_DLY is CLK a delta later, as a clock buffered in a DUT, so the register changes in the delta of that edge.
 entity DRIVER_IDLE_TB is
     generic (
         MFB_REGIONS     : natural := 2;
@@ -20,7 +21,8 @@ entity DRIVER_IDLE_TB is
         MVB_ITEM_WIDTH  : natural := 16
     );
     port (
-        CLK : in    std_logic;
+        CLK     : in    std_logic;
+        CLK_DLY : out   std_logic;
 
         RX_MFB_DATA    : in    std_logic_vector(MFB_REGIONS * MFB_REGION_SIZE * MFB_BLOCK_SIZE * MFB_ITEM_WIDTH - 1 downto 0);
         RX_MFB_SOF     : in    std_logic_vector(MFB_REGIONS - 1 downto 0);
@@ -34,12 +36,30 @@ entity DRIVER_IDLE_TB is
         RX_MVB_DATA    : in    std_logic_vector(MVB_ITEMS * MVB_ITEM_WIDTH - 1 downto 0);
         RX_MVB_VLD     : in    std_logic_vector(MVB_ITEMS - 1 downto 0);
         RX_MVB_SRC_RDY : in    std_logic;
-        RX_MVB_DST_RDY : in    std_logic
+        RX_MVB_DST_RDY : in    std_logic;
+
+        DLY_MFB_DATA         : in    std_logic_vector(MFB_REGIONS * MFB_REGION_SIZE * MFB_BLOCK_SIZE * MFB_ITEM_WIDTH - 1 downto 0);
+        DLY_MFB_SOF          : in    std_logic_vector(MFB_REGIONS - 1 downto 0);
+        DLY_MFB_EOF          : in    std_logic_vector(MFB_REGIONS - 1 downto 0);
+        DLY_MFB_SOF_POS      : in    std_logic_vector(MFB_REGIONS * max(1, log2(MFB_REGION_SIZE)) - 1 downto 0);
+        DLY_MFB_EOF_POS      : in    std_logic_vector(MFB_REGIONS * max(1, log2(MFB_REGION_SIZE * MFB_BLOCK_SIZE)) - 1 downto 0);
+        DLY_MFB_SRC_RDY      : in    std_logic;
+        DLY_MFB_DST_RDY      : out   std_logic;
+        DLY_MFB_DST_RDY_NEXT : in    std_logic
     );
 end entity;
 
 architecture FULL of DRIVER_IDLE_TB is
 
 begin
+
+    CLK_DLY <= CLK;
+
+    dly_mfb_dst_rdy_p : process (CLK)
+    begin
+        if rising_edge(CLK) then
+            DLY_MFB_DST_RDY <= DLY_MFB_DST_RDY_NEXT;
+        end if;
+    end process;
 
 end architecture;

@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import cocotb
 from cocotb.handle import LogicArrayObject, LogicObject
-from cocotb.triggers import Event
+from cocotb.triggers import Event, ReadOnly
 from cocotb.types import Logic, LogicArray
 from cocotb.utils import get_sim_time
 
@@ -35,6 +35,12 @@ class MFBDriver(ModularBusDriver):
 
     A word is staged as plain integers and per-region lists and only the signals whose value differs from the last
     write are written. With nothing queued, the driver parks the bus and sleeps until the next append().
+
+    A word is written after a rising edge and accepted by an edge where DST_RDY is 1, read at that edge or, with
+    read_only, at ReadOnly before it; an idle word lasts one clock whatever DST_RDY is.
+
+    Set read_only only where DST_RDY can change in the edge's timestep before the edge read: a clock deltas behind the
+    register driving DST_RDY, a write outside the scheduler.
 
     An idle generator with frame_gaps set, e.g. OnOffIdleGenerator, counts blocks: its gap before a frame leaves blocks
     empty, inside a frame it is asked before each later word for whole idle words. Others put idle transactions first.
@@ -60,9 +66,11 @@ class MFBDriver(ModularBusDriver):
         META    : LogicArray2D           = 0
 
     def __init__(self, dut, name, clock, protocol=MfbProtocol, no_inner_idles: bool = False,
-                 mfb_params: dict | MfbParams | None = None, hold_on_idle: bool = False, **kwargs):
+                 mfb_params: dict | MfbParams | None = None, hold_on_idle: bool = False, read_only: bool = False,
+                 **kwargs):
         self._mfb_params = asdict(mfb_params) if isinstance(mfb_params, MfbParams) else mfb_params
         self._hold_on_idle = hold_on_idle
+        self._read_only = read_only
         super().__init__(dut, name, clock, protocol=protocol, **kwargs)
 
         self._no_inner_idles : bool = no_inner_idles
@@ -160,6 +168,7 @@ class MFBDriver(ModularBusDriver):
         self._init_signals()
 
         self._queue    : deque = deque()
+        self._ro_trigger       = ReadOnly()
         self._wake     : Event = Event()
         self._sleeping : bool  = False
         self._period   : int   = 0
@@ -278,13 +287,23 @@ class MFBDriver(ModularBusDriver):
         put("SRC_RDY", src_rdy)
 
     async def _send_word(self):
-        """Offer the staged word until DST_RDY accepts it, then count it and empty the stage."""
+        """Offer the staged word until an edge accepts it, then count it and empty the stage. With read_only, DST_RDY is
+        read at ReadOnly, where it has settled to the value the DUT samples at the next edge."""
         self._write_word(1)
-        await self._edge()
-
         dst_rdy = self._dst_rdy
-        while not dst_rdy():
+
+        if self._read_only:
+            read_only = self._ro_trigger
+            while True:
+                await read_only
+                accepted = dst_rdy()
+                await self._edge()
+                if accepted:
+                    break
+        else:
             await self._edge()
+            while not dst_rdy():
+                await self._edge()
 
         self._item_cnt += self._w_items
         self._run_items += self._w_items

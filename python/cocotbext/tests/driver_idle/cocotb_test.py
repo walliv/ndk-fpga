@@ -4,10 +4,13 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 """Each driver sends whole words split by scripted idle words while the sink drops DST_RDY at random. Words
-must arrive once, in order and held while waiting, and each gap must last exactly its idle words."""
+must arrive once, in order and held while waiting, and each gap must last exactly its idle words. The MFB driver
+is also checked for in-frame gaps, placement, geometry, BE, transaction forms, send(), clear(), abort() and read_only,
+the MFB monitor for ReadOnly sampling, and the throughput probe."""
 
 import itertools
 import random
+from collections import Counter
 from dataclasses import asdict
 
 import cocotb
@@ -86,16 +89,23 @@ def check(cycles, words, gaps_after):
     return errors
 
 
-async def run(dut, prefix, words, gaps_after):
+async def collect(dut, prefix, words, gaps_after, sink=None):
+    """The cycles of the words the driver of `prefix` sends while the bench drops `sink`, by default its DST_RDY, at
+    random, and the errors check() finds in them."""
     cycles = []
     rng = random.Random(random.getrandbits(64))
-    cocotb.start_soon(apply_backpressure(getattr(dut, f"{prefix}_DST_RDY"), dut.CLK,
+    cocotb.start_soon(apply_backpressure(getattr(dut, f"{prefix}_DST_RDY") if sink is None else sink, dut.CLK,
                                          BackpressureConfig(1, 1, 1 - DST_RDY_HIGH), rng))
     cocotb.start_soon(sample(dut, prefix, cycles))
     limit = len(words) * CYCLES_PER_WORD_MAX
     while sum(1 for s, d, _ in cycles if s and d) < len(words) and len(cycles) < limit:
         await ClockCycles(dut.CLK, 100)
-    errors = check(cycles, words, gaps_after)
+    return cycles, check(cycles, words, gaps_after)
+
+
+async def run(dut, prefix, words, gaps_after, sink=None):
+    """Check the words the driver of `prefix` sends while the bench drops `sink`, by default its DST_RDY, at random."""
+    cycles, errors = await collect(dut, prefix, words, gaps_after, sink)
     # The hit counter: idle words offered while DST_RDY was low, the case the drivers must not wait in.
     hits = sum(1 for s, d, _ in cycles if not s and not d)
     dut._log.info(f"{prefix}: {len(words)} words in {len(cycles)} cycles, {hits} idle cycles with DST_RDY low, "
@@ -115,6 +125,7 @@ async def start(dut):
     dut.RX_MFB_DST_RDY.value = 0
     dut.RX_MFB_BE.value = 0
     dut.RX_MVB_DST_RDY.value = 0
+    dut.DLY_MFB_DST_RDY_NEXT.value = 0
     # The MVB driver writes its data signals only with its first word, so they start defined here, one clock
     # ahead: a write of the bench in the timestep of the driver's first word would replace that word.
     dut.RX_MVB_DATA.value = 0
@@ -134,6 +145,47 @@ async def run_mfb_idle_words_test(dut):
     for f in frames:
         drv.append(MfbTransaction(data=f))
     await run(dut, "RX_MFB", [int.from_bytes(f, "little") for f in frames], gaps[1:] + [0])
+
+
+async def delayed_clock_bus(dut, read_only):
+    """One-word frames over DLY_MFB with the driver and the monitor on CLK_DLY; returns the errors check() finds and
+    the words the monitor received that the bus did not transfer or the other way round."""
+    await start(dut)
+    geo = mfb_geometry(dut)
+    rng = random.Random(random.getrandbits(64))
+    gaps = [rng.randint(0, GAP_MAX) for _ in range(WORDS)]
+    drv = MFBDriver(dut, "DLY_MFB", dut.CLK_DLY, generics_prefix="MFB", idle_factory=IdleTransactionFactory(1, 1),
+                    idle_generator=ScriptedIdles(gaps), read_only=read_only)
+    mon = MFBMonitor(dut, "DLY_MFB", dut.CLK_DLY, mfb_params=asdict(geo), read_only=read_only)
+    received = Counter()
+    mon.add_callback(lambda frame: received.update([int.from_bytes(frame, "little")]))
+    frames = [rng.randbytes(geo.word_width // 8) for _ in range(WORDS)]
+    for f in frames:
+        drv.append(MfbTransaction(data=f))
+    cycles, errors = await collect(dut, "DLY_MFB", [int.from_bytes(f, "little") for f in frames], gaps[1:] + [0],
+                                   sink=dut.DLY_MFB_DST_RDY_NEXT)
+    transferred = Counter(data for src, dst, data in cycles if src and dst)
+    misread = sum(((received - transferred) + (transferred - received)).values())
+    dut._log.info(f"read_only={read_only}: {len(errors)} error(s) in the driver's words, {misread} word(s) misread by the monitor")
+    return errors, misread
+
+
+@cocotb.test()
+async def run_mfb_delayed_clock_test(dut):
+    """DLY_MFB_DST_RDY, a register on CLK, changes in the delta in which CLK_DLY rises, so the driver and the monitor on
+    CLK_DLY read it at ReadOnly, where it is the value the next edge samples."""
+    errors, misread = await delayed_clock_bus(dut, read_only=True)
+    assert not errors, f"{len(errors)} error(s), first: {errors[0]}"
+    assert misread == 0
+
+
+@cocotb.test()
+async def run_mfb_delayed_clock_edge_read_test(dut):
+    """At their edge, the driver and the monitor on CLK_DLY read the DST_RDY of the next cycle, so the driver takes
+    words for accepted that the bus did not transfer, or offers them again, and the monitor reports them the same."""
+    errors, misread = await delayed_clock_bus(dut, read_only=False)
+    assert errors
+    assert misread > 0
 
 
 @cocotb.test()
