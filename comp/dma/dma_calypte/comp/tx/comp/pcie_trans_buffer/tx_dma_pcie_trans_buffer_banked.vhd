@@ -123,8 +123,20 @@ architecture BANKED of TX_DMA_PCIE_TRANS_BUFFER_IMPL is
     signal rd_data_bram_bank   : slv_array_3d_t(1 downto 0)(MEM_ARRAYS -1 downto 0)(MFB_REGIONS -1 downto 0)(MFB_LENGTH -1 downto 0);
 
     -- ==== Read path signals ====
-    -- XPM read latency: 2 with its output register (READ_LATENCY => 2), else 1.
+    -- READ_LATENCY's third cycle, when asked for, is spent HERE and not in the memory: the XPM
+    -- output register stays at 2 (XPM_RD_LATENCY) and rd_req_reg_g adds the request stage.
+    constant RD_REQ_REG     : boolean := (READ_LATENCY = 3);
     constant XPM_RD_LATENCY : natural := tsel(READ_LATENCY >= 2, 2, 1);
+
+    -- The read request as the rest of this architecture sees it: the ports themselves, or their
+    -- registered copies at READ_LATENCY => 3 (see rd_req_reg_g). Every downstream stage is fed
+    -- from these, so the internal pipeline alignment is the same at 2 and 3.
+    signal rd_addr_a_q : std_logic_vector(RD_ADDR_A'range);
+    signal rd_addr_b_q : std_logic_vector(RD_ADDR_B'range);
+    signal rd_chan_a_q : std_logic_vector(RD_CHAN_A'range);
+    signal rd_chan_b_q : std_logic_vector(RD_CHAN_B'range);
+    signal rd_en_a_q   : std_logic;
+    signal rd_en_b_q   : std_logic;
 
     -- Effective RD_ADDR/RD_CHAN per region-slot: with SPLIT_READ_PORTS, slot P maps 1:1 to a port;
     -- else both broadcast from port A and race the same read (the unstalled one succeeds).
@@ -260,15 +272,15 @@ begin
         report "TX_DMA_PCIE_TRANS_BUFFER: READ_BARREL_SHIFTER_EN must have exactly MFB_REGIONS elements!"
         severity FAILURE;
 
-    assert (READ_LATENCY >= 1 and READ_LATENCY <= 2)
-        report "TX_DMA_PCIE_TRANS_BUFFER: READ_LATENCY must be 1 (no output register) or 2 (XPM output register)!"
+    assert (READ_LATENCY >= 1 and READ_LATENCY <= 3)
+        report "TX_DMA_PCIE_TRANS_BUFFER: READ_LATENCY must be 1 (no output register), 2 (XPM output register) or 3 (plus a request register)!"
         severity FAILURE;
 
     -- The extra stage of READ_LATENCY >= 2 only exists on the TDP (2-region) read-valid/pipe registers
     -- (rd_vld_p/rd_pipe_reg_p); the SDP path (MFB_REGIONS=1) keeps a fixed 1-cycle RD_DATA_VLD_A,
     -- so this combination is unsupported.
     assert (not (READ_LATENCY >= 2 and MFB_REGIONS = 1))
-        report "TX_DMA_PCIE_TRANS_BUFFER: READ_LATENCY => 2 is only implemented for the 2-region (TDP) read path!"
+        report "TX_DMA_PCIE_TRANS_BUFFER: READ_LATENCY => 2 or 3 is only implemented for the 2-region (TDP) read path!"
         severity FAILURE;
 
     wr_front_i : entity work.TX_DMA_PCIE_TRANS_BUFFER_WR_FRONT
@@ -744,7 +756,8 @@ begin
         end generate;
 
         -- READ_LATENCY >= 2: one register re-aligns rd_data_valid_arr with the XPM output
-        -- register's extra cycle.
+        -- register's extra cycle. READ_LATENCY => 3's third cycle is on the request side, so it
+        -- reaches this point already applied.
         rd_vld_lat2_g : if (READ_LATENCY >= 2) generate
             rd_vld_extra_reg_p : process (CLK)
             begin
@@ -755,31 +768,62 @@ begin
         end generate;
     end generate;
 
+    -- ==== Read request register (READ_LATENCY => 3 only) ====
+    -- Everything from here to ENA/ADDRA is address decode (bank geometry, channel demux,
+    -- write-collision compare); registering the REQUEST splits it from whatever built the address.
+    rd_req_reg_g : if (RD_REQ_REG) generate
+        rd_req_reg_p : process (CLK) is
+        begin
+            if (rising_edge(CLK)) then
+                rd_addr_a_q <= RD_ADDR_A;
+                rd_addr_b_q <= RD_ADDR_B;
+                rd_chan_a_q <= RD_CHAN_A;
+                rd_chan_b_q <= RD_CHAN_B;
+                rd_en_a_q   <= RD_EN_A;
+                rd_en_b_q   <= RD_EN_B;
+                if (RESET = '1') then
+                    rd_en_a_q <= '0';
+                    rd_en_b_q <= '0';
+                end if;
+            end if;
+        end process;
+
+    -- Plain wires otherwise, so READ_LATENCY 1 and 2 keep the netlist they had before this stage
+    -- existed.
+    else generate
+        rd_addr_a_q <= RD_ADDR_A;
+        rd_addr_b_q <= RD_ADDR_B;
+        rd_chan_a_q <= RD_CHAN_A;
+        rd_chan_b_q <= RD_CHAN_B;
+        rd_en_a_q   <= RD_EN_A;
+        rd_en_b_q   <= RD_EN_B;
+    end generate;
+
     -- ==== Read address / channel sources ====
     -- SPLIT_READ_PORTS maps P to a port; else broadcast from port A.
     rd_eff_split_g : if (SPLIT_READ_PORTS and MFB_REGIONS = 2) generate
-        rd_addr_eff(0) <= RD_ADDR_A(POINTER_WIDTH -1 downto 0);
-        rd_addr_eff(1) <= RD_ADDR_B(POINTER_WIDTH -1 downto 0);
+        rd_addr_eff(0) <= rd_addr_a_q(POINTER_WIDTH -1 downto 0);
+        rd_addr_eff(1) <= rd_addr_b_q(POINTER_WIDTH -1 downto 0);
 
         rd_chan_split_flat_g : if (FLAT) generate
-            rd_chan_eff(0) <= RD_ADDR_A(POINTER_WIDTH + log2(CHANNELS) -1 downto POINTER_WIDTH);
-            rd_chan_eff(1) <= RD_ADDR_B(POINTER_WIDTH + log2(CHANNELS) -1 downto POINTER_WIDTH);
+            rd_chan_eff(0) <= rd_addr_a_q(POINTER_WIDTH + log2(CHANNELS) -1 downto POINTER_WIDTH);
+            rd_chan_eff(1) <= rd_addr_b_q(POINTER_WIDTH + log2(CHANNELS) -1 downto POINTER_WIDTH);
         else generate
-            rd_chan_eff(0) <= RD_CHAN_A;
-            rd_chan_eff(1) <= RD_CHAN_B;
+            rd_chan_eff(0) <= rd_chan_a_q;
+            rd_chan_eff(1) <= rd_chan_b_q;
         end generate;
     else generate
         rd_addr_bcast_g : for p in 0 to (MFB_REGIONS -1) generate
-            rd_addr_eff(p) <= RD_ADDR_A(POINTER_WIDTH -1 downto 0);
+            rd_addr_eff(p) <= rd_addr_a_q(POINTER_WIDTH -1 downto 0);
         end generate;
 
         rd_chan_bcast_flat_g : if (FLAT) generate
             rd_chan_bcast_flat_p_g : for p in 0 to (MFB_REGIONS -1) generate
-                rd_chan_eff(p) <= RD_ADDR_A(POINTER_WIDTH + log2(CHANNELS) -1 downto POINTER_WIDTH);
+                rd_chan_eff(p) <= rd_addr_a_q(POINTER_WIDTH + log2(CHANNELS) -1 downto POINTER_WIDTH);
             end generate;
         else generate
             rd_chan_bcast_part_p_g : for p in 0 to (MFB_REGIONS -1) generate
-                rd_chan_eff(p) <= RD_CHAN_A;
+                rd_chan_eff(p) <= rd_chan_a_q;
             end generate;
         end generate;
     end generate;
@@ -863,8 +907,8 @@ begin
         bram_demux_p : process (all) is
         begin
             rd_en_bram_demux                                                                                                                    <= (others => (others => '0'));
-            rd_en_bram_demux(to_integer(unsigned(rd_chan_eff(0)(log2(MEM_ARRAYS) + log2(CHANS_PER_ARRAY) -1 downto log2(CHANS_PER_ARRAY)))))(0) <= RD_EN_A;
-            rd_en_bram_demux(to_integer(unsigned(rd_chan_eff(1)(log2(MEM_ARRAYS) + log2(CHANS_PER_ARRAY) -1 downto log2(CHANS_PER_ARRAY)))))(1) <= RD_EN_B;
+            rd_en_bram_demux(to_integer(unsigned(rd_chan_eff(0)(log2(MEM_ARRAYS) + log2(CHANS_PER_ARRAY) -1 downto log2(CHANS_PER_ARRAY)))))(0) <= rd_en_a_q;
+            rd_en_bram_demux(to_integer(unsigned(rd_chan_eff(1)(log2(MEM_ARRAYS) + log2(CHANS_PER_ARRAY) -1 downto log2(CHANS_PER_ARRAY)))))(1) <= rd_en_b_q;
         end process;
 
         RD_DATA_VLD_A <= rd_data_valid_arr(0);
@@ -880,7 +924,7 @@ begin
         bram_demux_p : process (all) is
         begin
             rd_en_bram_demux                                                                                                                 <= (others => (others => '0'));
-            rd_en_bram_demux(to_integer(unsigned(rd_chan_eff(0)(log2(MEM_ARRAYS) + log2(CHANS_PER_ARRAY) -1 downto log2(CHANS_PER_ARRAY))))) <= (others => RD_EN_A);
+            rd_en_bram_demux(to_integer(unsigned(rd_chan_eff(0)(log2(MEM_ARRAYS) + log2(CHANS_PER_ARRAY) -1 downto log2(CHANS_PER_ARRAY))))) <= (others => rd_en_a_q);
         end process;
 
         rd_data_sel_g : if (MFB_REGIONS = 1) generate
@@ -907,7 +951,7 @@ begin
             rd_data_vld_reg_p : process (CLK) is
             begin
                 if (rising_edge(CLK)) then
-                    RD_DATA_VLD_A <= RD_EN_A and (not (or rd_1rgn_collision));
+                    RD_DATA_VLD_A <= rd_en_a_q and (not (or rd_1rgn_collision));
                 end if;
             end process;
 
