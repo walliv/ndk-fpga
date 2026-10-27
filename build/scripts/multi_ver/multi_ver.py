@@ -9,7 +9,7 @@ import os
 from os import system
 from importlib.machinery import SourceFileLoader
 import time
-from multi_ver_utils import reduce_combinations, create_setting_from_combination
+from multi_ver_utils import expand_combinations, create_setting_from_combination
 
 
 FAIL = False
@@ -114,31 +114,7 @@ def main():
     # Define settings combinations
     ##########
 
-    COMBINATIONS = dict()
-
-    if "_combinations_" in SETTINGS.keys():
-        # User defined combinations
-        if type(SETTINGS["_combinations_"]) is dict:
-            COMBINATIONS = SETTINGS["_combinations_"]
-        if type(SETTINGS["_combinations_"]) is tuple:
-            for it, comb in enumerate(SETTINGS["_combinations_"]):
-                COMBINATIONS[f"test_name_{it}"] = comb
-
-        del SETTINGS["_combinations_"]
-
-    else:
-        # Default combinations
-        for key in SETTINGS.keys():
-            COMBINATIONS[key] = (key, )
-
-    if args.run_percantage:
-        # Randomly reduce number of combinations based on command argument
-        COMBINATIONS = reduce_combinations(COMBINATIONS, int(args.run_percantage))
-        del SETTINGS["_combinations_run_percentage_"]
-    elif "_combinations_run_percentage_" in SETTINGS.keys():
-        # Randomly reduce number of combinations based on SETTINGS
-        COMBINATIONS = reduce_combinations(COMBINATIONS, SETTINGS["_combinations_run_percentage_"])
-        del SETTINGS["_combinations_run_percentage_"]
+    COMBINATIONS = expand_combinations(SETTINGS, args.run_percantage)
 
     #print(COMBINATIONS)
 
