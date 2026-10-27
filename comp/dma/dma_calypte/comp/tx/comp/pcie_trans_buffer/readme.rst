@@ -14,12 +14,13 @@ The entity selects one of two implementations:
   byte lane of the MFB word
   (``SDP_BRAM_BE`` for 1 region, ``DP_BRAM_BEHAV`` for 2 regions), serves every Intel device and
   every AMD instance that needs none of the features below. On Intel, :vhdl:genconstant:`RAM_TYPE`
-  must be ``"BRAM"``; an elaboration assertion rejects anything else.
+  must be ``"AUTO"`` or ``"BRAM"``; an elaboration assertion rejects anything else.
 * the ``BANKED`` architecture of ``TX_DMA_PCIE_TRANS_BUFFER_IMPL``, two even/odd row banks of
   XPM memories, serves an AMD
-  instance (7SERIES, ULTRASCALE, VERSAL) with ``RAM_TYPE => "URAM"``. Its architecture instantiates
-  XPM macros, so ``Modules.tcl`` adds it only with the ``xilinx`` PLATFORM_TAG and an empty
-  architecture otherwise; an Intel build never analyses XPM.
+  instance (7SERIES, ULTRASCALE, VERSAL) when the resolved primitive is URAM (``RAM_TYPE => "URAM"``,
+  or ``"AUTO"`` as described below). Its architecture instantiates XPM macros, so ``Modules.tcl``
+  adds it only with the ``xilinx`` PLATFORM_TAG and an empty architecture otherwise; an Intel build
+  never analyses XPM.
 
 Even/odd row banking (AMD)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -43,9 +44,12 @@ single-bank URAM array overwrites data; with banking the two DWords always fall 
 
    The write conflict of a single-bank URAM array, which the banking removes
 
-:vhdl:genconstant:`RAM_TYPE` selects the primitive: ``"URAM"`` puts each bank into URAM, ``"BRAM"``,
-the default, keeps the per-byte buffer. URAM banks hold up to 16384 rows, BRAM arrays 4096, which
-sets how many channels share one memory array.
+:vhdl:genconstant:`RAM_TYPE` selects the primitive of each bank. ``"AUTO"`` resolves to URAM on an
+UltraScale+ or Versal device for 2 regions when a bank is at least 2048 rows deep, BRAM otherwise;
+``"URAM"`` forces URAM; ``"BRAM"``, like a resolved BRAM, keeps the per-byte buffer. URAM banks
+hold up to 16384 rows, BRAM arrays 4096, which sets how many channels share one memory array.
+TX_DMA_CALYPTE with 32 or more channels at ``POINTER_WIDTH => 13`` therefore uses the banked URAM
+buffer, with 16 channels the per-byte one.
 
 PCIe never addresses a lone byte: a sub-DWord access is expressed by FirstBE/LastBE, and the write
 barrel shifters rotate by whole DWords, so a byte's row and bank follow from its DWord lane and its
@@ -70,10 +74,11 @@ read colliding with the other region's write was withheld. Every test reseeds fr
 element ``p``), since nvc cannot set an array generic from the command line::
 
     cd cocotb
-    make                                                    # defaults: per-byte, two memory arrays
-    make NVC_ELAB_ARGS="-gRAM_TYPE=URAM"                    # banked URAM
+    make                                                    # defaults, AUTO -> banked URAM
+    make NVC_ELAB_ARGS="-gRAM_TYPE=BRAM"                    # per-byte, two memory arrays
+    make NVC_ELAB_ARGS="-gCHANNELS=32 -gPOINTER_WIDTH=13"   # 32 channels: banked URAM
     make NVC_ELAB_ARGS="-gREAD_BARREL_SHIFTER_MASK=1 -gCHANNELS=16 -gPOINTER_WIDTH=13"  # as TX_DMA_CALYPTE: per-byte
-    make NVC_ELAB_ARGS="-gREAD_BARREL_SHIFTER_MASK=1 -gCHANNELS=32 -gPOINTER_WIDTH=13 -gRAM_TYPE=URAM"  # as TX_DMA_CALYPTE with 32 channels: banked URAM
+    make NVC_ELAB_ARGS="-gREAD_BARREL_SHIFTER_MASK=1 -gCHANNELS=32 -gPOINTER_WIDTH=13"  # as TX_DMA_CALYPTE with 32 channels: banked URAM
     make NVC_ELAB_ARGS="-gDEVICE=AGILEX"                    # per-byte on Intel, 2 regions
 
 ``cocotb_test.py`` drives the 2-region geometry only. ``cocotb_1region_smoke.py`` checks a 1-region

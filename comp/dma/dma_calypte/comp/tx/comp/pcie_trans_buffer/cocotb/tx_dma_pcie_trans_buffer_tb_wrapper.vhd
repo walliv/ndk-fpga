@@ -29,7 +29,7 @@ entity TX_DMA_PCIE_TRANS_BUFFER_TB_WRAPPER is
         -- Bit p is READ_BARREL_SHIFTER_EN(p); bits from MFB_REGIONS up are ignored.
         READ_BARREL_SHIFTER_MASK : natural := 3;
 
-        RAM_TYPE : string := "BRAM"
+        RAM_TYPE : string := "AUTO"
     );
     port (
         CLK   : in std_logic;

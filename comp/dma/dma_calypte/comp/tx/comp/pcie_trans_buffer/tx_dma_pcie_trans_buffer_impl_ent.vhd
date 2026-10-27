@@ -41,7 +41,7 @@ entity TX_DMA_PCIE_TRANS_BUFFER_IMPL is
         -- port A serves every read and index 0 is used.
         READ_BARREL_SHIFTER_EN : b_array_t(MFB_REGIONS -1 downto 0) := (others => TRUE);
 
-        -- XPM memory primitive: URAM or BRAM.
+        -- XPM memory primitive as resolved by TX_DMA_PCIE_TRANS_BUFFER: URAM or BRAM.
         RAM_TYPE : string := "BRAM"
     );
     port (
