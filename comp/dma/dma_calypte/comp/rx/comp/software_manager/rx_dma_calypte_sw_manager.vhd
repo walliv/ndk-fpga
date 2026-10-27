@@ -1403,6 +1403,7 @@ begin
         end if;
     end process;
 
+    -- HDP/HHP move once a write has left, so these count a buffer becoming full when its last write left.
     DATA_BUFF_FULL_CNTR_INCR    <= '1' when
             (unsigned(buff_full_sdp_compare) -1) = unsigned(buff_full_hdp_compare)
             and (buff_full_hdp_compare /= buff_full_hdp_compare_reg) else

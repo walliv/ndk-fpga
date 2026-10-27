@@ -76,7 +76,8 @@ entity RX_DMA_CALYPTE_HDR_MANAGER is
         ADDR_HEADER_P2P_EN     : in  std_logic;
 
         -- =====================================================================
-        -- HW POINTER UPDATE INTERFACE
+        -- HW POINTER UPDATE INTERFACE: a pointer is updated once the header insertor has taken the PCIe header of
+        -- the block or DMA header it covers, i.e. once that transaction has left the component.
         -- =====================================================================
         -- Update data pointers
         HDP_UPDATE_CHAN : out std_logic_vector(log2(CHANNELS)-1 downto 0);
@@ -212,8 +213,8 @@ architecture FULL of RX_DMA_CALYPTE_HDR_MANAGER is
     -- =============================================================================================
     -- PCIe header FIFOs
     -- =============================================================================================
-    -- Each PCIe header carries the channel of its request
-    constant HDR_TAG_W                    : natural := log2(CHANNELS);
+    -- Each PCIe header carries the channel of its request and the pointer value it moves the channel's pointer to
+    constant HDR_TAG_W                    : natural := log2(CHANNELS) + POINTER_WIDTH;
     -- Width of data in the FIFO for PCIe headers of transactions carrying DMA header
     constant PCIE_HDR_DMA_TRAN_FIFO_W     : natural := HDR_TAG_W + 128 + 1 + 1;
     constant PCIE_HDR_DMA_TRAN_FIFO_SIZE  : natural := 8;
@@ -343,19 +344,25 @@ architecture FULL of RX_DMA_CALYPTE_HDR_MANAGER is
 
     -- =============================================================================================
     -- Tracking of the requests of every channel
-    --
-    -- Per kind (0: data, 1: DMA header), the requests are numbered in their write order, which is also the order of
-    -- serving and of their headers' pops. A channel is pending from its request write until the pop of the header of
-    -- its last request.
     -- =============================================================================================
-    -- Request FIFO + header register + PCIe header FIFO entries in flight per kind, below 2**TRK_SEQ_W
-    constant TRK_SEQ_W : natural := log2(DATA_ADDR_NEXT_FIFO_SIZE + PCIE_HDR_DATA_TRAN_FIFO_SIZE + 2) + 1;
+    -- Request FIFO + header register + PCIe header FIFO + pop register entries in flight per kind, below 2**TRK_SEQ_W
+    constant TRK_SEQ_W : natural := log2(DATA_ADDR_NEXT_FIFO_SIZE + PCIE_HDR_DATA_TRAN_FIFO_SIZE + 3) + 1;
 
+    -- Per kind (0: data, 1: DMA header) requests are numbered in write order, also their pop order. A channel is
+    -- pending until its last request's pointer is written, a cycle after that header's pop.
     signal data_hdr_tag    : std_logic_vector(HDR_TAG_W -1 downto 0);
     signal dma_hdr_tag     : std_logic_vector(HDR_TAG_W -1 downto 0);
     signal trk_wr          : std_logic_vector(1 downto 0);
     signal trk_pop         : std_logic_vector(1 downto 0);
-    signal trk_pop_chan    : slv_array_t(1 downto 0)(HDR_TAG_W -1 downto 0);
+    signal trk_pop_now     : std_logic_vector(1 downto 0);
+    signal trk_pop_tag     : slv_array_t(1 downto 0)(HDR_TAG_W -1 downto 0);
+    signal data_alloc_chan : std_logic_vector(log2(CHANNELS) -1 downto 0);
+    signal data_alloc_ptr  : std_logic_vector(POINTER_WIDTH -1 downto 0);
+    signal data_alloc_en   : std_logic;
+    signal dma_alloc_chan  : std_logic_vector(log2(CHANNELS) -1 downto 0);
+    signal dma_alloc_ptr   : std_logic_vector(POINTER_WIDTH -1 downto 0);
+    signal dma_alloc_en    : std_logic;
+    signal trk_pop_chan    : slv_array_t(1 downto 0)(log2(CHANNELS) -1 downto 0);
     signal trk_wr_seq      : u_array_t(1 downto 0)(TRK_SEQ_W -1 downto 0);
     signal trk_pop_seq     : u_array_t(1 downto 0)(TRK_SEQ_W -1 downto 0);
     signal trk_last_seq    : slv_array_t(1 downto 0)(TRK_SEQ_W -1 downto 0);
@@ -862,9 +869,9 @@ begin
         ADDR_SW_POINTER => ADDR_DATA_SW_POINTER,
         ADDR_P2P_EN     => '0',
 
-        POINTER_UPDATE_CHAN => HDP_UPDATE_CHAN,
-        POINTER_UPDATE_DATA => HDP_UPDATE_DATA,
-        POINTER_UPDATE_EN   => HDP_UPDATE_EN,
+        POINTER_UPDATE_CHAN => data_alloc_chan,
+        POINTER_UPDATE_DATA => data_alloc_ptr,
+        POINTER_UPDATE_EN   => data_alloc_en,
 
         CHANNEL     => data_addr_chan,
         CHANNEL_VLD => data_addr_next,
@@ -916,9 +923,9 @@ begin
         ADDR_SW_POINTER => ADDR_HEADER_SW_POINTER,
         ADDR_P2P_EN     => ADDR_HEADER_P2P_EN,
 
-        POINTER_UPDATE_CHAN => HHP_UPDATE_CHAN,
-        POINTER_UPDATE_DATA => HHP_UPDATE_DATA,
-        POINTER_UPDATE_EN   => HHP_UPDATE_EN,
+        POINTER_UPDATE_CHAN => dma_alloc_chan,
+        POINTER_UPDATE_DATA => dma_alloc_ptr,
+        POINTER_UPDATE_EN   => dma_alloc_en,
 
         CHANNEL     => dma_hdr_addr_chan,
         CHANNEL_VLD => dma_hdr_addr_next,
@@ -981,8 +988,8 @@ begin
         end if;
     end process;
 
-    -- The channel of the served request, registered in the same cycle as the header that is written to the FIFO
-    pcie_hdr_dma_hdr_tran_fifo_in <= HHP_UPDATE_CHAN & pcie_hdr_dma_hdr_tran & vld_bit_sel & dma_hdr_p2p_en_reg;
+    -- The channel and new pointer of the served request, registered in the same cycle as the header written to the FIFO
+    pcie_hdr_dma_hdr_tran_fifo_in <= dma_alloc_chan & dma_alloc_ptr & pcie_hdr_dma_hdr_tran & vld_bit_sel & dma_hdr_p2p_en_reg;
 
     pcie_hdr_dma_hdr_tran_fifo_i : entity work.FIFOX
     generic map (
@@ -1023,7 +1030,7 @@ begin
         end if;
     end process;
 
-    pcie_hdr_data_tran_fifo_in <= HDP_UPDATE_CHAN & pcie_hdr_data_tran;
+    pcie_hdr_data_tran_fifo_in <= data_alloc_chan & data_alloc_ptr & pcie_hdr_data_tran;
 
     pcie_hdr_data_tran_fifo_i : entity work.FIFOX
     generic map (
@@ -1198,10 +1205,31 @@ begin
     -- Tracking of the requests of every channel
     -- =============================================================================================
     trk_wr          <= dma_hdr_addr_next_wr & data_addr_next_wr;
-    trk_pop(0)      <= pcie_hdr_data_tran_fifo_rd and not pcie_hdr_data_tran_fifo_empty;
-    trk_pop(1)      <= pcie_hdr_dma_hdr_tran_fifo_rd and not pcie_hdr_dma_hdr_tran_fifo_empty;
-    trk_pop_chan(0) <= data_hdr_tag;
-    trk_pop_chan(1) <= dma_hdr_tag;
+    trk_pop_now(0)  <= pcie_hdr_data_tran_fifo_rd and not pcie_hdr_data_tran_fifo_empty;
+    trk_pop_now(1)  <= pcie_hdr_dma_hdr_tran_fifo_rd and not pcie_hdr_dma_hdr_tran_fifo_empty;
+
+    -- The pop comes from the insertor's DST_RDY, so it is registered before it writes a pointer register.
+    trk_pop_reg_p : process (CLK) is
+    begin
+        if (rising_edge(CLK)) then
+            trk_pop        <= trk_pop_now;
+            trk_pop_tag(0) <= data_hdr_tag;
+            trk_pop_tag(1) <= dma_hdr_tag;
+            if (RESET = '1') then
+                trk_pop <= (others => '0');
+            end if;
+        end if;
+    end process;
+
+    trk_pop_chan(0) <= trk_pop_tag(0)(HDR_TAG_W -1 downto POINTER_WIDTH);
+    trk_pop_chan(1) <= trk_pop_tag(1)(HDR_TAG_W -1 downto POINTER_WIDTH);
+
+    HDP_UPDATE_EN   <= trk_pop(0);
+    HDP_UPDATE_CHAN <= trk_pop_chan(0);
+    HDP_UPDATE_DATA <= trk_pop_tag(0)(POINTER_WIDTH -1 downto 0);
+    HHP_UPDATE_EN   <= trk_pop(1);
+    HHP_UPDATE_CHAN <= trk_pop_chan(1);
+    HHP_UPDATE_DATA <= trk_pop_tag(1)(POINTER_WIDTH -1 downto 0);
 
     trk_g : for k in 0 to 1 generate
         trk_last_seq_i : entity work.GEN_LUTRAM
