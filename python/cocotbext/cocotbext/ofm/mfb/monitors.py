@@ -29,13 +29,20 @@ class MFBMonitor(BusMonitor):
         meta_valid_with: Specifies which signal indicates the validity of metadata
                          if the 'meta' or similar signal is present. Must be either "sof" (start of frame)
                          or "eof" (end of frame).
+
+        start: Whether the monitor samples the bus in a task of its own. With False, the bench calls
+               `monitor_cycle()` once per clock instead, e.g. from one task that samples many monitors.
     """
 
     _signals = ["data", "sof_pos", "eof_pos", "sof", "eof", "src_rdy", "dst_rdy"]
     _optional_signals = ["meta"]
 
-    def __init__(self, entity, name, clock, array_idx=None, mfb_params=None, trans_type: MfbTransaction | bytes = bytes):
+    def __init__(self, entity, name, clock, array_idx=None, mfb_params=None, trans_type: MfbTransaction | bytes = bytes,
+                 start: bool = True):
         super().__init__(entity, name, clock, array_idx=array_idx)
+        if not start:
+            self._thread.cancel()
+            self._thread = None
 
         self._regions, self._region_size, self._block_size, self._item_width, self._meta_width, self._os_vld_with = get_mfb_params(
             self.bus, mfb_params
@@ -137,7 +144,7 @@ class MFBMonitor(BusMonitor):
             self.monitor_cycle()
 
     def monitor_cycle(self):
-        """One cycle's sampling of the bus."""
+        """One cycle's sampling of the bus, for a monitor constructed with start=False."""
         if self.in_reset:
             return
 
