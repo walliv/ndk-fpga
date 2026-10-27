@@ -26,6 +26,9 @@ class MFBMonitor(BusMonitor):
                     Defaults to `bytes` for backward compatibility.
                     Consider using a child class of `MfbTransaction` for more structured data.
 
+        meta_vld_with: Which signal qualifies META, "sof" (start of frame) or "eof" (end of frame); defaults to the
+                       `os_vld_with` of `mfb_params`, which qualifies the other optional signals.
+
         start: Whether the monitor samples the bus in a task of its own. With False, the bench calls
                `monitor_cycle()` once per clock instead, e.g. from one task that samples many monitors.
 
@@ -36,7 +39,7 @@ class MFBMonitor(BusMonitor):
     _optional_signals = ["meta"]
 
     def __init__(self, entity, name, clock, array_idx=None, mfb_params=None, trans_type: MfbTransaction | bytes = bytes,
-                 start: bool = True):
+                 start: bool = True, meta_vld_with: str | None = None):
         super().__init__(entity, name, clock, array_idx=array_idx)
         if not start:
             self._thread.cancel()
@@ -49,6 +52,10 @@ class MFBMonitor(BusMonitor):
         self._region_data_w = self._region_items * self._item_width
         self._os = [s for s in self._optional_signals if hasattr(self.bus, s)]
         self._os_widths = {s: len(getattr(self.bus, s)) // self._regions for s in self._os}
+
+        self._meta_vld_with = meta_vld_with or self._os_vld_with
+        if self._meta_vld_with not in ["sof", "eof"]:
+            raise ValueError(f"Invalid value of {self._meta_vld_with} of 'meta_vld_with'. Supported values are: \"sof\", \"eof\".")
 
         self._trans_type  = trans_type
         self._transaction = MfbTransaction() if self._trans_type is bytes else trans_type()
@@ -138,10 +145,9 @@ class MFBMonitor(BusMonitor):
 
     def _set_os(self, r, vld_with=None):
         """Read the optional signals of region `r` when they are valid with `vld_with`, or unconditionally when None."""
-        if vld_with is not None and vld_with != self._os_vld_with:
-            return
         for s in self._os:
-            if self._os_widths[s] > 0 and hasattr(self._transaction, s):
+            qualifier = self._meta_vld_with if s == "meta" else self._os_vld_with
+            if vld_with in (None, qualifier) and self._os_widths[s] > 0 and hasattr(self._transaction, s):
                 setattr(self._transaction, s, self._field(self._os_data[s], r, self._os_widths[s]))
 
     def _recv_trans(self):

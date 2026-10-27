@@ -115,6 +115,15 @@ def test_x_outside_the_fields_in_use_spares_the_frame():
     assert [(bytes(f.data), f.meta) for f in frames] == [(data, 3)]
 
 
+def test_meta_valid_with_eof():
+    entity, mon, frames = make(trans_type=MfbTransactionWithMeta, meta_vld_with="eof")
+    data = bytes(range(2 * REGION_BYTES))
+    word(entity, mon, data, sof="01", eof="10", sof_pos=fields(w=2, r0=0), eof_pos=fields(w=3, r1=7),
+         meta=fields(w=4, r0=1, r1=6))
+
+    assert [(bytes(f.data), f.meta) for f in frames] == [(data, 6)]
+
+
 def test_a_transaction_without_meta_ignores_it():
     entity, mon, frames = make(trans_type=MfbTransaction)
     data = bytes(range(4))
