@@ -17,7 +17,7 @@ from cocotbext.ofm.utils.signals import signal_binstr, signal_int
 
 from checkers import BenchError
 from cocotb_test import _now
-from rx_start_stop import CHAN_FSM, PKT_FSM, S_PACKET_PROCESS, STOP_FSM, RxStartStopBench
+from rx_start_stop import CHAN_FSM, PKT_FSM, S_PACKET_PROCESS, STOP_FSM, RxStartStopBench, fsm_state
 
 # A 64-entry ring is full after 63 one-block packets (the address manager keeps one slot free); a userspace
 # consumer flushes its pointers only after 32 packets, so a smaller ring would never be freed by it.
@@ -89,7 +89,7 @@ class RxHolBench(RxStartStopBench):
                         self.hol_hits["stop of an idle c taken while X's request is held"] += 1
                 elif c in list(self.shadow[kind])[1:]:
                     self.hol_hits["stop of c taken while its request is queued behind X's"] += 1
-                pst = int(h.pkt_process_pst.value)
+                pst = fsm_state(h.pkt_process_pst)
                 w["c_eof_passed"] = not (pst == S_PACKET_PROCESS and signal_int(h.pkt_chan_reg) == c)
             if stop == x and w["x_take"] is None:
                 w["x_take"] = _now()
@@ -101,9 +101,9 @@ class RxHolBench(RxStartStopBench):
         """Where the stop path sits: SW manager stop FSM, header manager channel and packet FSMs, address
         managers, header insertor and the shadowed request FIFOs."""
         sw, h, ins = self.swm, self.hdrm, self.rx_dma_i.rx_dma_hdr_insertor_i
-        parts = [f"SW stop FSM {STOP_FSM[int(sw.stop_fsm_pst.value)]} on ch{signal_int(sw.stop_fsm_channel_reg)}",
-                 f"header manager channel FSM {CHAN_FSM[int(h.chan_state_change_pst.value)]}, packet FSM "
-                 f"{PKT_FSM[int(h.pkt_process_pst.value)]} on ch{signal_int(h.pkt_chan_reg)}, input FIFO "
+        parts = [f"SW stop FSM {STOP_FSM[fsm_state(sw.stop_fsm_pst)]} on ch{signal_int(sw.stop_fsm_channel_reg)}",
+                 f"header manager channel FSM {CHAN_FSM[fsm_state(h.chan_state_change_pst)]}, packet FSM "
+                 f"{PKT_FSM[fsm_state(h.pkt_process_pst)]} on ch{signal_int(h.pkt_chan_reg)}, input FIFO "
                  f"{'empty' if signal_binstr(h.input_fifo_empty) == '1' else f'head ch{signal_int(h.input_channel)}'}"]
         if h._get("stop_req_q_vld") is not None:
             q_stop, q_start = signal_binstr(h.stop_req_q_vld) == "1", signal_binstr(h.start_req_q_vld) == "1"
@@ -112,7 +112,7 @@ class RxHolBench(RxStartStopBench):
         for kind in KINDS:
             parts.append(f"{kind} address manager holds {'-' if self.held[kind] is None else f'ch{self.held[kind]}'}, "
                          f"request FIFO {list(self.shadow[kind])}")
-        parts.append(f"header insertor {INS_FSM[int(ins.tprocess_pst.value)]}")
+        parts.append(f"header insertor {INS_FSM[fsm_state(ins.tprocess_pst)]}")
         return "; ".join(parts)
 
 
