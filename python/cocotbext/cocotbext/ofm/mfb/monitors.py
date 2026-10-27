@@ -123,7 +123,7 @@ class MFBMonitor(BusMonitor):
                 setattr(self._transaction, s, self._os_data[s][r].to_unsigned())
 
     def _recv_trans(self):
-        self.log.debug(f"received transaction: {self._transaction}")
+        self.log.debug("received transaction: %s", self._transaction)
 
         if self._trans_type is bytes:
             self._recv(self._transaction.data)
