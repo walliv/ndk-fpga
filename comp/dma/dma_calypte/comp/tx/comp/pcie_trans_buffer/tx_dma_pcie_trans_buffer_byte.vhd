@@ -54,9 +54,9 @@ architecture BYTE of TX_DMA_PCIE_TRANS_BUFFER_IMPL is
     constant MFB_BYTES       : natural := MFB_LENGTH/8;
     -- The Address is restricted by BAR_APERTURE (IP_core setting)
     constant BUFFER_DEPTH    : natural := trbuf_buffer_depth_f(POINTER_WIDTH, MFB_LENGTH);
-    -- Number of input registers
+    -- Number of registers between the barrel shifters and the BRAMs
     constant BRAM_REG_NUM    : natural := 2;
-    -- Number of registers between BRAMs and barrel shifter
+    -- Number of input registers
     constant INP_REG_NUM     : natural := 1;
     constant IS_INTEL_DEV    : boolean := (DEVICE = "STRATIX10" or DEVICE = "AGILEX");
     -- a maximum depth of a BRAM block (in 1B items) depends on a vendor
@@ -66,42 +66,25 @@ architecture BYTE of TX_DMA_PCIE_TRANS_BUFFER_IMPL is
     -- Number of memory arrays since one array can contain multiple channels
     constant MEM_ARRAYS      : natural := CHANNELS/CHANS_PER_ARRAY;
 
-    -- =============================================================================================
-    -- Defining ranges for meta signal
-    -- =============================================================================================
-    constant META_CHAN_NUM_W   : natural := log2(CHANNELS);
-    constant META_BE_W         : natural := (MFB_LENGTH/MFB_REGIONS)/8;
-    constant META_BE_O         : natural := trbuf_meta_be_o_f(CHANNELS);
-
-    subtype META_CHAN_NUM   is natural range TRBUF_META_CHAN_NUM_O + META_CHAN_NUM_W -1 downto TRBUF_META_CHAN_NUM_O;
-    subtype META_BE         is natural range META_BE_O + META_BE_W -1 downto META_BE_O;
-
-    subtype META_MEM_ARR_IDX is natural range log2(MEM_ARRAYS) + log2(CHANS_PER_ARRAY) + TRBUF_META_CHAN_NUM_O -1 downto log2(CHANS_PER_ARRAY) + TRBUF_META_CHAN_NUM_O;
-
-    -- Input register
-    signal pcie_mfb_data_inp_reg    : slv_array_t(INP_REG_NUM downto 0)(PCIE_MFB_DATA'range);
-    signal pcie_mfb_meta_inp_reg    : slv_array_2d_t(INP_REG_NUM downto 0)(MFB_REGIONS -1 downto 0)(trbuf_meta_width_f(CHANNELS, MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH)-1 downto 0);
-    signal pcie_mfb_sof_inp_reg     : slv_array_t(INP_REG_NUM downto 0)(PCIE_MFB_SOF'range);
-    signal pcie_mfb_src_rdy_inp_reg : std_logic_vector(INP_REG_NUM downto 0);
+    -- The input word behind the input registers of the write front end and the fields of its META
+    signal wr_src_rdy               : std_logic;
+    signal wr_sof                   : std_logic_vector(MFB_REGIONS -1 downto 0);
+    signal wr_addr                  : slv_array_t(MFB_REGIONS -1 downto 0)(TRBUF_META_PCIE_ADDR_W -1 downto 0);
+    signal wr_chan                  : slv_array_t(MFB_REGIONS -1 downto 0)(log2(CHANNELS) -1 downto 0);
 
     -- counter of the address for each valid word following the beginning of the transaction
+    signal wr_addr_cntr             : std_logic_vector(TRBUF_META_PCIE_ADDR_W -1 downto 0);
     signal addr_cntr_pst            : unsigned(TRBUF_META_PCIE_ADDR_W -1 downto 0);
-    signal addr_cntr_nst            : unsigned(TRBUF_META_PCIE_ADDR_W -1 downto 0);
 
     -- Stores the index of the packet that get currently stored
-    signal chan_num_reg             : std_logic_vector(META_CHAN_NUM_W -1 downto 0);
-    signal chan_num_next            : std_logic_vector(META_CHAN_NUM_W -1 downto 0);
-
-    -- control of the amount of shift on the writing barrel shifters
-    signal wr_shift_sel             : slv_array_t(MFB_REGIONS - 1 downto 0)(log2(MFB_LENGTH/32) -1 downto 0);
+    signal chan_num_reg             : std_logic_vector(log2(CHANNELS) -1 downto 0);
 
     signal wr_be_bram_bshifter      : slv_array_t(MFB_REGIONS - 1 downto 0)((PCIE_MFB_DATA'length/8) -1 downto 0);
     signal wr_be_bram_demux         : slv_array_2d_t(MEM_ARRAYS -1 downto 0)(MFB_REGIONS - 1 downto 0)((PCIE_MFB_DATA'length/8) -1 downto 0);
     signal wr_addr_bram_by_shift    : slv_array_2d_t(MFB_REGIONS - 1 downto 0)((PCIE_MFB_DATA'length/32) -1 downto 0)(log2(BUFFER_DEPTH*CHANS_PER_ARRAY) -1 downto 0);
     signal wr_data_bram_bshifter    : slv_array_t(MFB_REGIONS - 1 downto 0)(MFB_LENGTH -1 downto 0);
 
-    signal mem_arr_idx_reg          : std_logic_vector(log2(MEM_ARRAYS) -1 downto 0);
-    signal mem_arr_idx_next         : std_logic_vector(log2(MEM_ARRAYS) -1 downto 0);
+    signal mem_arr_idx_reg          : std_logic_vector(max(1, log2(MEM_ARRAYS)) -1 downto 0);
 
     signal rd_en_bram_demux         : slv_array_t(MEM_ARRAYS -1 downto 0)(MFB_REGIONS -1 downto 0);
     signal rd_data_bram_mux         : slv_array_t(MFB_REGIONS -1 downto 0)(MFB_LENGTH -1 downto 0);
@@ -111,9 +94,6 @@ architecture BYTE of TX_DMA_PCIE_TRANS_BUFFER_IMPL is
     -- ================= --
     -- 2 regions support --
     -- ================= --
-    -- Meta array
-    signal pcie_mfb_meta_arr        : slv_array_t(MFB_REGIONS - 1 downto 0)(trbuf_meta_width_f(CHANNELS, MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH)-1 downto 0);
-
     -- Converter signal: PCIE_MFB_DATA'length/32 => PCIE_MFB_DATA'length/ 8
     -- Address the item in a BRAM for each byte for each region
     signal wr_addr_bram_by_multi    : slv_array_2d_t(MFB_REGIONS - 1 downto 0)((PCIE_MFB_DATA'length/8) -1 downto 0)(log2(BUFFER_DEPTH*CHANS_PER_ARRAY) -1 downto 0);
@@ -126,9 +106,6 @@ architecture BYTE of TX_DMA_PCIE_TRANS_BUFFER_IMPL is
 
     -- Read enable per memory array per BRAM port
     signal rd_en_pch                : slv_array_t(MEM_ARRAYS - 1 downto 0)(MFB_REGIONS - 1 downto 0);
-
-    -- Meta signal for whole MFB word
-    signal pcie_meta_be_per_port  : slv_array_t(MFB_REGIONS - 1 downto 0)(MFB_LENGTH/8 - 1 downto 0);
 
     -- BRAM registers
     signal wr_be_bram_demux_reg      : slv_array_3d_t(BRAM_REG_NUM downto 0)(MEM_ARRAYS -1 downto 0)(MFB_REGIONS - 1 downto 0)((PCIE_MFB_DATA'length/8) -1 downto 0);
@@ -165,215 +142,46 @@ begin
         report "TX_DMA_PCIE_TRANS_BUFFER: The configuration with split ports is only allowed for a 2-region setting!"
         severity FAILURE;
 
-    -- =============================================================================================
-    -- Input shift registers
-    -- =============================================================================================
-    pcie_mfb_data_inp_reg   (0) <= PCIE_MFB_DATA;
-    pcie_mfb_meta_inp_reg   (0) <= PCIE_MFB_META;
-    pcie_mfb_sof_inp_reg    (0) <= PCIE_MFB_SOF;
-    pcie_mfb_src_rdy_inp_reg(0) <= PCIE_MFB_SRC_RDY;
+    wr_front_i : entity work.TX_DMA_PCIE_TRANS_BUFFER_WR_FRONT
+    generic map (
+        CHANNELS => CHANNELS,
 
-    inp_shift_reg_mult_g: if (INP_REG_NUM > 0) generate
-        input_shift_reg_g: for i in 0 to (INP_REG_NUM - 1) generate
-            input_shift_reg_p : process (CLK) is
-            begin
-                if rising_edge(CLK) then
-                    if (RESET = '1') then
-                        pcie_mfb_src_rdy_inp_reg(i + 1) <= '0';
-                    else
-                        pcie_mfb_data_inp_reg   (i + 1) <= pcie_mfb_data_inp_reg   (i);
-                        pcie_mfb_meta_inp_reg   (i + 1) <= pcie_mfb_meta_inp_reg   (i);
-                        pcie_mfb_sof_inp_reg    (i + 1) <= pcie_mfb_sof_inp_reg    (i);
-                        pcie_mfb_src_rdy_inp_reg(i + 1) <= pcie_mfb_src_rdy_inp_reg(i);
-                    end if;
-                end if;
-            end process;
-        end generate;
-    end generate;
+        MFB_REGIONS     => MFB_REGIONS,
+        MFB_REGION_SIZE => MFB_REGION_SIZE,
+        MFB_BLOCK_SIZE  => MFB_BLOCK_SIZE,
+        MFB_ITEM_WIDTH  => MFB_ITEM_WIDTH,
 
-    -- Meta array
-    pcie_mfb_meta_arr   <= pcie_mfb_meta_inp_reg(INP_REG_NUM);
+        CHANS_PER_ARRAY => CHANS_PER_ARRAY,
+        MEM_ARRAYS      => MEM_ARRAYS,
 
-    -- =============================================================================================
-    -- Assertions for verification
-    -- =============================================================================================
+        INP_REG_NUM => INP_REG_NUM
+    )
+    port map (
+        CLK   => CLK,
+        RESET => RESET,
+
+        PCIE_MFB_DATA    => PCIE_MFB_DATA,
+        PCIE_MFB_META    => PCIE_MFB_META,
+        PCIE_MFB_SOF     => PCIE_MFB_SOF,
+        PCIE_MFB_SRC_RDY => PCIE_MFB_SRC_RDY,
+
+        WR_SRC_RDY => wr_src_rdy,
+        WR_SOF     => wr_sof,
+        WR_ADDR    => wr_addr,
+        WR_CHAN    => wr_chan,
+
+        WR_SHIFT     => open,
+        WR_DATA      => wr_data_bram_bshifter,
+        WR_BE        => wr_be_bram_bshifter,
+
+        ADDR_CNTR   => wr_addr_cntr,
+        CHAN_NUM    => chan_num_reg,
+        MEM_ARR_IDX => mem_arr_idx_reg
+    );
+
+    addr_cntr_pst <= unsigned(wr_addr_cntr);
 
     -- psl default clock is rising_edge(CLK);
-
-    captured_dma_hdr_assert_g : for it in 0 to (MFB_REGIONS -1) generate
-    begin
-        -- psl assert_captured_dma_header :
-        --      assert always ((not (PCIE_MFB_SRC_RDY = '1' or PCIE_MFB_META(it)(META_BE) /= (META_BE_W -1 downto 0 => '0'))) or
-        --              (PCIE_MFB_META(it)(TRBUF_META_IS_DMA_HDR) = "0")) abort(RESET)
-        --      report "TX_DMA_PCIE_TRANS_BUFFER: captured DMA header on a region. Danger of data overwrite!";
-    end generate;
-
-    -- =============================================================================================
-    -- Address storage
-    -- =============================================================================================
-    addr_cntr_reg_p : process (CLK) is
-    begin
-        if (rising_edge(CLK)) then
-            if (RESET = '1') then
-                addr_cntr_pst <= (others => '0');
-                chan_num_reg  <= (others => '0');
-            else
-                addr_cntr_pst <= addr_cntr_nst;
-                chan_num_reg  <= chan_num_next;
-            end if;
-        end if;
-    end process;
-
-    addr_cntr_nst_logic_p : process (all) is
-    begin
-        addr_cntr_nst <= addr_cntr_pst;
-        chan_num_next <= chan_num_reg;
-
-        -- Increment the address for a next word by 8 (the number of DWs in the
-        -- word) to be written to the BRAMs.  When the new packet arrives, its
-        -- address is stored and incremented by one region size
-
-        -- Be careful! The number '8' is only correct for one region
-        if (pcie_mfb_src_rdy_inp_reg(INP_REG_NUM) = '1') then
-            -- Address Increment
-            -- +16 (amount of DWs for two regions)
-            addr_cntr_nst <= addr_cntr_pst + MFB_REGIONS*MFB_BLOCK_SIZE;
-
-            -- Last SOF - Higher takes
-            for i in 0 to (MFB_REGIONS - 1) loop
-                if (pcie_mfb_sof_inp_reg(INP_REG_NUM)(i) = '1') then
-                    -- First SOF does +16, the second makes +8
-                    -- When second SOF is present, this automatically takes the address from the
-                    -- second region and adds increment of 8 to that. If there is only one SOF and
-                    -- particularly in the first region, then increment by 16 because the frame
-                    -- continues in the next word.
-                    addr_cntr_nst   <= unsigned(pcie_mfb_meta_arr(i)(TRBUF_META_PCIE_ADDR)) + (MFB_REGIONS - i)*MFB_BLOCK_SIZE;
-                    chan_num_next   <= pcie_mfb_meta_arr(i)(META_CHAN_NUM);
-                end if;
-            end loop;
-        end if;
-    end process;
-
-    -- =============================================================================================
-    -- META(BE) select
-    -- =============================================================================================
-    -- This process selects which bytes are enabled in which BS based on the SOF status in the second region
-    meta_be_g: if (MFB_REGIONS = 1) generate
-        pcie_meta_be_per_port(0) <= pcie_mfb_meta_arr(0)(META_BE);
-    else generate
-        meta_sel_p : process (all)
-        begin
-            if (pcie_mfb_sof_inp_reg(INP_REG_NUM)(1) = '1') then
-                pcie_meta_be_per_port(0) <= (META_BE_W -1 downto 0 => '0') & pcie_mfb_meta_arr(0)(META_BE);
-                pcie_meta_be_per_port(1) <= pcie_mfb_meta_arr(1)(META_BE) & (META_BE_W -1 downto 0 => '0');
-            else
-                -- The problem is that we only get half the information in metadata for each region
-                pcie_meta_be_per_port(0) <= pcie_mfb_meta_arr(1)(META_BE) & pcie_mfb_meta_arr(0)(META_BE);
-                pcie_meta_be_per_port(1) <= (others => '0');
-            end if;
-        end process;
-    end generate;
-
-    -- =============================================================================================
-    -- Data shift - Port A
-    -- =============================================================================================
-    -- This process controls the shift of the input word and the corresponding byte enable signal to it.
-    -- When beginning of a transaction is captured, the shift is taken directly from the current address,
-    -- but when it continues, then select shift from the counter of addresses.
-
-    -- The previous "2 downto 0" is specification of address - now generic for more regions
-    -- The address system here is divided into two parts due to the dual-port BRAM configuration
-    wr_bshifter_0_ctrl_p : process (all) is
-        variable pcie_mfb_meta_addr_v : std_logic_vector(TRBUF_META_PCIE_ADDR_W -1 downto 0);
-    begin
-        wr_shift_sel(0) <= (others => '0');
-
-        if (pcie_mfb_src_rdy_inp_reg(INP_REG_NUM) = '1') then
-            if (pcie_mfb_sof_inp_reg(INP_REG_NUM)(0) = '1') then
-                pcie_mfb_meta_addr_v    := pcie_mfb_meta_arr(0)(TRBUF_META_PCIE_ADDR);
-                wr_shift_sel(0)         <= pcie_mfb_meta_addr_v(log2(MFB_DWORDS) - 1  downto 0);
-            else
-                -- Shared address when the processing is in the middle of a frame - last saved address
-                wr_shift_sel(0)         <= std_logic_vector(addr_cntr_pst(log2(MFB_DWORDS) - 1 downto 0));
-            end if;
-        end if;
-    end process;
-
-    -- Data - Port A
-    wr_data_barrel_shifter_0_i: entity work.BARREL_SHIFTER_GEN
-    generic map (
-        BLOCKS     => MFB_REGIONS*MFB_BLOCK_SIZE,
-        BLOCK_SIZE => MFB_ITEM_WIDTH,
-        SHIFT_LEFT => TRUE
-    )
-    port map (
-        DATA_IN  => pcie_mfb_data_inp_reg(INP_REG_NUM),
-        DATA_OUT => wr_data_bram_bshifter(0),
-        SEL      => wr_shift_sel(0)
-    );
-
-    -- Byte enable - port A
-    wr_be_barrel_shifter_0_i: entity work.BARREL_SHIFTER_GEN
-    generic map (
-        BLOCKS     => MFB_REGIONS*MFB_BLOCK_SIZE,
-        BLOCK_SIZE => 4,
-        SHIFT_LEFT => TRUE
-    )
-    port map (
-        DATA_IN  => pcie_meta_be_per_port(0),
-        DATA_OUT => wr_be_bram_bshifter(0),
-        SEL      => wr_shift_sel(0)
-    );
-
-    -- =============================================================================================
-    -- Data shift - Port B
-    -- =============================================================================================
-    -- This packet starts at the beginning of the second region, so we need to correct the address
-    -- by the number of DWords in region
-
-    tworeg_bs_g: if (MFB_REGIONS = 2) generate
-        wr_bshifter_1_ctrl_p : process (all) is
-            variable pcie_mfb_meta_addr_v : std_logic_vector(TRBUF_META_PCIE_ADDR_W -1 downto 0);
-        begin
-            wr_shift_sel(1) <= (others => '0');
-
-            if (pcie_mfb_src_rdy_inp_reg(INP_REG_NUM) = '1') then
-                if (pcie_mfb_sof_inp_reg(INP_REG_NUM)(1) = '1') then
-                    -- The '+8' is MFB_BLOCK_SIZE (same as length of a REGION in Dwords) and is
-                    -- only used when the SOF is in the second region
-                    -- NOTE: that -8 can be a source of error. Was +8 previously.
-                    pcie_mfb_meta_addr_v    := std_logic_vector(unsigned(pcie_mfb_meta_arr(1)(TRBUF_META_PCIE_ADDR)) - 8);
-                    wr_shift_sel(1)         <= pcie_mfb_meta_addr_v(log2(MFB_DWORDS) - 1  downto 0);
-                end if;
-            end if;
-        end process;
-
-        -- Data - Port B
-        wr_data_barrel_shifter_1_i: entity work.BARREL_SHIFTER_GEN
-        generic map (
-            BLOCKS     => MFB_REGIONS*MFB_BLOCK_SIZE,
-            BLOCK_SIZE => MFB_ITEM_WIDTH,
-            SHIFT_LEFT => TRUE
-        )
-        port map (
-            DATA_IN  => pcie_mfb_data_inp_reg(INP_REG_NUM),
-            DATA_OUT => wr_data_bram_bshifter(1),
-            SEL      => wr_shift_sel(1)
-        );
-
-        -- Byte enable - port B
-        wr_be_barrel_shifter_1_i: entity work.BARREL_SHIFTER_GEN
-        generic map (
-            BLOCKS     => MFB_REGIONS*MFB_BLOCK_SIZE,
-            BLOCK_SIZE => 4,
-            SHIFT_LEFT => TRUE
-        )
-        port map (
-            DATA_IN  => pcie_meta_be_per_port(1),
-            DATA_OUT => wr_be_bram_bshifter(1),
-            SEL      => wr_shift_sel(1)
-        );
-    end generate;
 
     -- =============================================================================================
     -- Address correction
@@ -398,12 +206,12 @@ begin
     begin
         wr_addr_bram_by_shift(0) <= (others => (others => '0'));
 
-        if (pcie_mfb_src_rdy_inp_reg(INP_REG_NUM) = '1') then
-            if (pcie_mfb_sof_inp_reg(INP_REG_NUM)(0) = '1') then
+        if (wr_src_rdy = '1') then
+            if (wr_sof(0) = '1') then
                 -- Pass address to variable
-                pcie_mfb_meta_addr_v := pcie_mfb_meta_arr(0)(TRBUF_META_PCIE_ADDR);
+                pcie_mfb_meta_addr_v := wr_addr(0);
                 buff_addr_v          := pcie_mfb_meta_addr_v(log2(BUFFER_DEPTH)+log2(MFB_DWORDS) -1 downto log2(MFB_DWORDS));
-                chan_addr_v          := pcie_mfb_meta_arr(0)(log2(CHANS_PER_ARRAY) + TRBUF_META_CHAN_NUM_O -1 downto TRBUF_META_CHAN_NUM_O);
+                chan_addr_v          := wr_chan(0)(log2(CHANS_PER_ARRAY) -1 downto 0);
 
                 wr_addr_bram_by_shift(0) <= (others => (chan_addr_v & buff_addr_v));
 
@@ -438,12 +246,12 @@ begin
         begin
             wr_addr_bram_by_shift(1) <= (others => (others => '0'));
 
-            if (pcie_mfb_src_rdy_inp_reg(INP_REG_NUM) = '1') then
-                if (pcie_mfb_sof_inp_reg(INP_REG_NUM)(1) = '1') then
+            if (wr_src_rdy = '1') then
+                if (wr_sof(1) = '1') then
                     -- Pass address to variable
-                    pcie_mfb_meta_addr_v := pcie_mfb_meta_arr(1)(TRBUF_META_PCIE_ADDR);
+                    pcie_mfb_meta_addr_v := wr_addr(1);
                     buff_addr_v          := pcie_mfb_meta_addr_v(log2(BUFFER_DEPTH)+log2(MFB_DWORDS) -1 downto log2(MFB_DWORDS));
-                    chan_addr_v          := pcie_mfb_meta_arr(1)(log2(CHANS_PER_ARRAY) + TRBUF_META_CHAN_NUM_O -1 downto TRBUF_META_CHAN_NUM_O);
+                    chan_addr_v          := wr_chan(1)(log2(CHANS_PER_ARRAY) -1 downto 0);
 
                     wr_addr_bram_by_shift(1) <= (others => (chan_addr_v & buff_addr_v));
 
@@ -468,38 +276,6 @@ begin
     -- because the channel number is already extracted in METADATA_EXTRACTOR and the index of a
     -- channel is held through the duration of a whole packet.
     mem_arr_indx_hold_g: if (MEM_ARRAYS > 1) generate
-        mem_arr_idx_hold_reg_p : process (CLK) is
-        begin
-            if (rising_edge(CLK)) then
-                if (RESET = '1') then
-                    mem_arr_idx_reg <= (others => '0');
-                else
-                    mem_arr_idx_reg <= mem_arr_idx_next;
-                end if;
-            end if;
-        end process;
-
-        -- This FSM stores a part of a channel number to determine the memory array
-        -- to which the data ought to be send. It stores channel number for the last
-        -- valid SOF in the word.
-        mem_arr_idx_hold_nst_logic_p : process (all) is
-            variable mem_arr_idx_v : std_logic_vector(log2(CHANNELS) -1 downto 0);
-        begin
-            mem_arr_idx_next <= mem_arr_idx_reg;
-
-            -- Higher takes
-            if (pcie_mfb_src_rdy_inp_reg(INP_REG_NUM) = '1') then
-                for i in 0 to (MFB_REGIONS - 1) loop
-                    if (pcie_mfb_sof_inp_reg(INP_REG_NUM)(i) = '1') then
-
-                        mem_arr_idx_v    := pcie_mfb_meta_arr(i)(META_CHAN_NUM);
-                        mem_arr_idx_next <= mem_arr_idx_v(log2(MEM_ARRAYS) + log2(CHANS_PER_ARRAY) -1 downto log2(CHANS_PER_ARRAY));
-
-                    end if;
-                end loop;
-            end if;
-        end process;
-
         -- =============================================================================================
         -- Demultiplexers - Byte enable
         -- =============================================================================================
@@ -514,9 +290,9 @@ begin
             wr_be_bram_demux <= (others => (others => (others => '0')));
 
             for i in 0 to (MFB_REGIONS - 1) loop
-                if (pcie_mfb_src_rdy_inp_reg(INP_REG_NUM) = '1') then
-                    if (pcie_mfb_sof_inp_reg(INP_REG_NUM)(i) = '1') then
-                        wr_be_bram_demux(to_integer(unsigned(pcie_mfb_meta_arr(i)(META_MEM_ARR_IDX))))(i) <= wr_be_bram_bshifter(i);
+                if (wr_src_rdy = '1') then
+                    if (wr_sof(i) = '1') then
+                        wr_be_bram_demux(to_integer(unsigned(wr_chan(i)(log2(MEM_ARRAYS) + log2(CHANS_PER_ARRAY) -1 downto log2(CHANS_PER_ARRAY)))))(i) <= wr_be_bram_bshifter(i);
                     else
                         wr_be_bram_demux(to_integer(unsigned(mem_arr_idx_reg)))(i)                        <= wr_be_bram_bshifter(i);
                     end if;
@@ -530,7 +306,7 @@ begin
             wr_be_bram_demux <= (others => (others => (others => '0')));
 
             for i in 0 to (MFB_REGIONS - 1) loop
-                if (pcie_mfb_src_rdy_inp_reg(INP_REG_NUM) = '1') then
+                if (wr_src_rdy = '1') then
                     wr_be_bram_demux(0)(i) <= wr_be_bram_bshifter(i);
                 end if;
             end loop;
