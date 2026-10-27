@@ -6,7 +6,8 @@
 #            Vladislav Valek <vladislav.valek@stud.uni-heidelberg.de>
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from types import SimpleNamespace
 
 import cocotb
 from cocotb.handle import LogicArrayObject, LogicObject
@@ -17,8 +18,9 @@ from cocotb.utils import get_sim_time
 from cocotbext.ofm.base.drivers import ModularBusDriver
 from cocotbext.ofm.base.transaction import IdleTransaction
 from cocotbext.ofm.base.types import LogicArray2D
-from cocotbext.ofm.mfb.protocol import MfbProtocol
+from cocotbext.ofm.mfb.protocol import MfbParams, MfbProtocol
 from cocotbext.ofm.mfb.transaction import MfbTransaction
+from cocotbext.ofm.mfb.utils import get_mfb_params
 
 
 class _Aborted(Exception):
@@ -27,6 +29,9 @@ class _Aborted(Exception):
 
 class MFBDriver(ModularBusDriver):
     """Driver of an MFB bus built on the signals of an :class:`MfbProtocol`.
+
+    The geometry comes from `mfb_params` (a dict as get_mfb_params takes it, or MfbParams) where given, else from the
+    generics of the protocol (see `generics_prefix`), else from the widths of the signals.
 
     A word is staged as plain integers and per-region lists and only the signals whose value differs from the last
     write are written. With nothing queued, the driver parks the bus and sleeps until the next append().
@@ -51,7 +56,9 @@ class MFBDriver(ModularBusDriver):
         SRC_RDY : Logic                  = 0
         META    : LogicArray2D           = 0
 
-    def __init__(self, dut, name, clock, protocol=MfbProtocol, no_inner_idles: bool = False, **kwargs):
+    def __init__(self, dut, name, clock, protocol=MfbProtocol, no_inner_idles: bool = False,
+                 mfb_params: dict | MfbParams | None = None, **kwargs):
+        self._mfb_params = asdict(mfb_params) if isinstance(mfb_params, MfbParams) else mfb_params
         super().__init__(dut, name, clock, protocol=protocol, **kwargs)
 
         self._no_inner_idles : bool = no_inner_idles
@@ -118,6 +125,11 @@ class MFBDriver(ModularBusDriver):
         super()._init_bus(protocol, *args, **kwargs)
 
         bus = self.bus
+        if self._mfb_params is not None or None in (bus.REGIONS, bus.REGION_SIZE, bus.BLOCK_SIZE, bus.ITEM_WIDTH):
+            signals = SimpleNamespace(**{name.lower(): bus.signals[name].target(bus) for name in
+                                         ("DATA", "SOF", "SOF_POS", "EOF_POS", "META") if name in bus.signals})
+            bus.REGIONS, bus.REGION_SIZE, bus.BLOCK_SIZE, bus.ITEM_WIDTH, _, _ = get_mfb_params(signals, self._mfb_params)
+
         self._regions        : int = bus.REGIONS
         self._region_items   : int = bus.REGION_SIZE * bus.BLOCK_SIZE
         self._item_width     : int = bus.ITEM_WIDTH

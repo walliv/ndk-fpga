@@ -8,6 +8,7 @@ must arrive once, in order and held while waiting, and each gap must last exactl
 
 import itertools
 import random
+from dataclasses import asdict
 
 import cocotb
 from cocotb.clock import Clock
@@ -243,6 +244,39 @@ async def run_mfb_byte_enable_test(dut):
         f"{next((k for k, (a, b) in enumerate(zip(words, expected)) if a != b), min(len(words), len(expected)))}"
     await ReadOnly()
     assert int(dut.RX_MFB_BE.value) == 0, "BE left set on the parked bus"
+
+
+async def collect_eof_pos(dut, regions, words):
+    """Every accepted MFB word as (DATA, the EOF_POS of region 0), from the word on the bus in the timestep it is
+    started in."""
+    while True:
+        await ReadOnly()
+        if int(dut.RX_MFB_SRC_RDY.value) and int(dut.RX_MFB_DST_RDY.value):
+            eof_pos = str(dut.RX_MFB_EOF_POS.value)
+            words.append((int(dut.RX_MFB_DATA.value), int(eof_pos[-(len(eof_pos) // regions):], 2)))
+        await RisingEdge(dut.CLK)
+
+
+@cocotb.test()
+async def run_mfb_geometry_test(dut):
+    """The geometry comes from mfb_params, as MfbParams or a dict, or from the generics, or without either from the
+    signal widths. The given mfb_params have 16-bit items, so a frame of four bytes ends in item 1, not 3."""
+    await start(dut)
+    geo = mfb_geometry(dut)
+    wide = MfbParams(geo.regions, geo.region_size, geo.block_size // 2, geo.item_width * 2)
+    dut.RX_MFB_DST_RDY.value = 1
+    rng = random.Random(random.getrandbits(64))
+    forms = {"MfbParams": (dict(mfb_params=wide), 1), "dict": (dict(mfb_params=asdict(wide)), 1),
+             "generics": (dict(generics_prefix="MFB"), 3), "widths": ({}, 3)}
+
+    for form, (kwargs, eof_pos) in forms.items():
+        drv = MFBDriver(dut, "RX_MFB", dut.CLK, idle_generator=IdleGenerator(), **kwargs)
+        words = []
+        cocotb.start_soon(collect_eof_pos(dut, geo.regions, words))
+        frame = rng.randbytes(4)
+        await drv.send(MfbTransaction(data=frame))
+        await ClockCycles(dut.CLK, 2)
+        assert words == [(int.from_bytes(frame, "little"), eof_pos)], f"geometry from {form}: words {words}"
 
 
 @cocotb.test()
