@@ -8,6 +8,7 @@ import pytest
 from cocotb.types import LogicArray
 
 from cocotbext.ofm.utils.signals import (align_read_request, align_request, align_write_request,
+                                         binstr_bit, binstr_resolvable, binstr_resolved,
                                          get_signal_value_in_bytes, signal_binstr, signal_int)
 from stubs import StubSignal
 
@@ -21,6 +22,12 @@ def test_signal_is_read_as_the_bit_string_of_the_simulator():
     sig.binstr = "0010X101"
     with pytest.raises(ValueError):
         signal_int(sig)
+
+
+def test_bit_string_predicates():
+    assert binstr_bit("0110", 1) and binstr_bit("0110", 2) and not binstr_bit("0110", 0)
+    assert binstr_resolvable("01LH") and not binstr_resolvable("0X1")
+    assert binstr_resolved("0110") and not binstr_resolved("01H0")
 
 
 def test_signal_value_is_little_endian_by_default():

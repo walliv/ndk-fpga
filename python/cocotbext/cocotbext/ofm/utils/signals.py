@@ -37,6 +37,21 @@ def signal_int(handle) -> int:
     return int(signal_binstr(handle), 2)
 
 
+def binstr_resolvable(binstr: str) -> bool:
+    """cocotb's is_resolvable on a bit string: every bit a 0, 1, L or H."""
+    return not binstr.strip("01LH")
+
+
+def binstr_resolved(binstr: str) -> bool:
+    """True when a bit string holds only 0s and 1s."""
+    return not (set(binstr) - {"0", "1"})
+
+
+def binstr_bit(binstr: str, idx: int) -> bool:
+    """True when bit `idx`, counted from the LSB, of an MSB-first bit string is a 1."""
+    return binstr[len(binstr) - 1 - idx] == "1"
+
+
 def get_signal_value_in_bytes(signal, big_endian: bool = False) -> bytes:
     """
     Get value of a OUT signals in bytes.

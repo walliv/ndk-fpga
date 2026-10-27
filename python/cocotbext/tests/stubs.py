@@ -34,3 +34,16 @@ class StubSignal:
 
     def __len__(self):
         return self.width
+
+
+def mfb_widths(regions, region_size, block_size, item_width):
+    """Signal widths of an MFB interface, each position field at least one bit per region as the RTL declares it."""
+    return {
+        "DATA": regions * region_size * block_size * item_width,
+        "SOF": regions,
+        "EOF": regions,
+        "SRC_RDY": 1,
+        "DST_RDY": 1,
+        "SOF_POS": regions * max(1, (region_size - 1).bit_length()),
+        "EOF_POS": regions * max(1, (region_size * block_size - 1).bit_length()),
+    }
