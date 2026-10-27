@@ -96,6 +96,10 @@ clean_build:
 	-@$(RM) -r *.dcp *.prm
 	-@$(RM) -r *.data *.runs *.cache *.filter *.hw *.sim .Xil *.ip_user_files
 	-@$(RM) -r $(OUTPUT_NAME).vivado.mk
+	-@if [ -f ipcfg_dirs.txt ]; then \
+		while IFS= read -r d; do case "$$d" in */ipcfg_*) $(RM) -r -- "$$d";; esac; done < ipcfg_dirs.txt; \
+		$(RM) ipcfg_dirs.txt; \
+	fi
 
 # User's chance to add own cleaning stuff
 clean: clean_build clean_common $(CLEAN_DEPENDS)

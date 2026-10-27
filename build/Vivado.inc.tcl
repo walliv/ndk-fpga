@@ -35,9 +35,9 @@ source $OFM_PATH/build/scripts/vivado/msg_filter/tcl_msg_filters.tcl
 # ---------------------------------------------------------------------
 
 # -----------------------------------------------------------------------------
-# Procedure ip_dir_prepare / ip_dir_finish
+# Procedure ip_dir_prepare / ip_dir_finish / ip_dir_record
 # create_ip -dir needs its keyed directory to exist, but not every IP script passes -dir. The directory is made before
-# the script runs, then removed if empty.
+# the script runs, then removed if empty or else recorded for "make clean".
 #
 proc ip_dir_prepare {dir} {
     file mkdir $dir
@@ -47,6 +47,21 @@ proc ip_dir_finish {dir} {
     if {![llength [glob -nocomplain -directory $dir *]]} {
         file delete $dir
     }
+}
+
+proc ip_dir_record {dir list_file} {
+    set dir [file normalize $dir]
+    if {[file exists $list_file]} {
+        set fh [open $list_file r]
+        set known [split [read $fh] "\n"]
+        close $fh
+        if {$dir in $known} {
+            return
+        }
+    }
+    set fh [open $list_file a]
+    puts $fh $dir
+    close $fh
 }
 
 # -----------------------------------------------------------------------------
@@ -139,6 +154,9 @@ proc EvalFile {FNAME OPT} {
             source_with_vars $FNAME $vars
             if {$keyed_ip_dir ne ""} {
                 ip_dir_finish $keyed_ip_dir
+                if {[file isdirectory $keyed_ip_dir]} {
+                    ip_dir_record $keyed_ip_dir ipcfg_dirs.txt
+                }
             }
         }
     }

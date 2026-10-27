@@ -33,6 +33,7 @@ apps/*/build/*/*.dcp
 apps/*/build/*/*.nfw
 apps/*/build/*/*.log
 apps/*/build/*/filelist.tcl
+ipcfg_dirs.txt
 
 # Per-configuration IP output directories created by the Vivado IP flow (see core/ip/common.tcl),
 # wherever the card places its IP build directory.

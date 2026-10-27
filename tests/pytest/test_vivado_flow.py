@@ -228,3 +228,28 @@ def test_keyed_ip_dir(tmp_path, write):
 def test_unkeyed_ip_dir_is_left_alone(tmp_path):
     assert "exists 0" in eval_ip_script(tmp_path, tmp_path / "ipcfg_0123abcd", False, keyed=False)
     assert not (tmp_path / "ipcfg_0123abcd").exists()
+
+
+def test_keyed_ip_dir_is_listed_for_make_clean(tmp_path):
+    ip_dir = tmp_path / "ipcfg_0123abcd"
+    for _ in range(2):
+        eval_ip_script(tmp_path, ip_dir, True)
+    assert (tmp_path / "ipcfg_dirs.txt").read_text().splitlines() == [str(ip_dir)]
+
+
+def test_make_clean_removes_the_listed_ip_dirs(tmp_path):
+    """Only the directories named ipcfg_* go, whatever else the list holds."""
+    keyed = tmp_path / "ip" / "ipcfg_0123abcd"
+    other = tmp_path / "ip" / "other"
+    for ip_dir in (keyed, other):
+        ip_dir.mkdir(parents=True)
+        (ip_dir / "stub.xci").touch()
+    build = tmp_path / "build"
+    build.mkdir()
+    (build / "ipcfg_dirs.txt").write_text(f"{keyed}\n{other}\n")
+    write_makefile(build, "stub", build)
+    result = make(build, "clean")
+    assert result.returncode == 0, result.stderr
+    assert not keyed.exists()
+    assert other.exists()
+    assert not (build / "ipcfg_dirs.txt").exists()
