@@ -52,7 +52,10 @@ entity TX_DMA_PCIE_TRANS_BUFFER_IMPL is
         -- Cycles from RD_EN_* to RD_DATA_VLD_*: 1 (default); 2 adds XPM's output register; 3 also
         -- registers the REQUEST (rd_req_reg_g), keeping the address decode out of the requester's
         -- cycle. 2 and 3 exist on the TDP (2-region) read path only.
-        READ_LATENCY : natural := 1
+        READ_LATENCY : natural := 1;
+
+        -- Number of input registers
+        INP_REG_NUM   : natural := 1
     );
     port (
         CLK   : in std_logic;

@@ -31,8 +31,6 @@ architecture BANKED of TX_DMA_PCIE_TRANS_BUFFER_IMPL is
     constant BUFFER_DEPTH       : natural := trbuf_buffer_depth_f(POINTER_WIDTH, MFB_LENGTH);
     -- Number of registers between BARREL_SHIFTERs and memory arrays
     constant BRAM_REG_NUM       : natural := 2;
-    -- Number of input registers
-    constant INP_REG_NUM        : natural := 1;
     -- Every AMD device this component can be built for (see the DEVICE assertion below).
     constant IS_AMD_DEV         : boolean := (DEVICE = "7SERIES" or DEVICE = "ULTRASCALE" or DEVICE = "VERSAL");
 

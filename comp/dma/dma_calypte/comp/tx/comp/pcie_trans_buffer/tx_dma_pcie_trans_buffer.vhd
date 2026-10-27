@@ -14,8 +14,8 @@ use work.type_pack.all;
 use work.tx_dma_pcie_trans_buffer_pkg.all;
 
 -- Buffers the PCIe writes of every channel at byte alignment in a per-byte BRAM array. On AMD
--- devices, URAM, flat addressing or READ_LATENCY > 1 select two even/odd row banks of XPM memories
--- instead.
+-- devices, URAM, flat addressing, READ_LATENCY > 1 or more input registers select two even/odd row
+-- banks of XPM memories instead.
 entity TX_DMA_PCIE_TRANS_BUFFER is
     generic (
         DEVICE : string := "ULTRASCALE";
@@ -52,7 +52,10 @@ entity TX_DMA_PCIE_TRANS_BUFFER is
         -- Cycles from RD_EN_* to RD_DATA_VLD_*: 1 (default); 2 adds XPM's output register; 3 also
         -- registers the REQUEST (rd_req_reg_g), keeping the address decode out of the requester's
         -- cycle. 2 and 3 exist on the TDP (2-region) read path only.
-        READ_LATENCY : natural := 1
+        READ_LATENCY : natural := 1;
+
+        -- Number of input registers
+        INP_REG_NUM   : natural := 1
     );
     port (
         CLK   : in std_logic;
@@ -96,14 +99,14 @@ architecture FULL of TX_DMA_PCIE_TRANS_BUFFER is
         "URAM", "BRAM");
     -- The banked buffer only where the per-byte one cannot serve the generics.
     constant USE_BANKED        : boolean := (not IS_INTEL_DEV) and
-        (RES_RAM_TYPE = "URAM" or (not MEM_PARTITIONING) or READ_LATENCY /= 1);
+        (RES_RAM_TYPE = "URAM" or (not MEM_PARTITIONING) or READ_LATENCY /= 1 or INP_REG_NUM /= 1);
 
 begin
 
     impl_g : if (not USE_BANKED) generate
 
-        assert ((RAM_TYPE = "AUTO" or RAM_TYPE = "BRAM") and MEM_PARTITIONING and READ_LATENCY = 1)
-            report "TX_DMA_PCIE_TRANS_BUFFER: on an Intel DEVICE, RAM_TYPE must be AUTO or BRAM and MEM_PARTITIONING and READ_LATENCY must keep their defaults!"
+        assert ((RAM_TYPE = "AUTO" or RAM_TYPE = "BRAM") and MEM_PARTITIONING and READ_LATENCY = 1 and INP_REG_NUM = 1)
+            report "TX_DMA_PCIE_TRANS_BUFFER: on an Intel DEVICE, RAM_TYPE must be AUTO or BRAM and MEM_PARTITIONING, READ_LATENCY and INP_REG_NUM must keep their defaults!"
             severity FAILURE;
 
         trans_buffer_i : entity work.TX_DMA_PCIE_TRANS_BUFFER_IMPL(BYTE)
@@ -123,7 +126,8 @@ begin
 
             RAM_TYPE         => RES_RAM_TYPE,
             MEM_PARTITIONING => MEM_PARTITIONING,
-            READ_LATENCY     => READ_LATENCY
+            READ_LATENCY     => READ_LATENCY,
+            INP_REG_NUM      => INP_REG_NUM
         )
         port map (
             CLK   => CLK,
@@ -166,7 +170,8 @@ begin
 
             RAM_TYPE         => RES_RAM_TYPE,
             MEM_PARTITIONING => MEM_PARTITIONING,
-            READ_LATENCY     => READ_LATENCY
+            READ_LATENCY     => READ_LATENCY,
+            INP_REG_NUM      => INP_REG_NUM
         )
         port map (
             CLK   => CLK,
