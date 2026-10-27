@@ -11,6 +11,7 @@ use IEEE.numeric_std.all;
 
 use work.math_pack.all;
 use work.type_pack.all;
+use work.tx_dma_pcie_trans_buffer_pkg.all;
 
 -- Buffers the PCIe writes of every channel at byte alignment in a per-byte BRAM array.
 entity TX_DMA_PCIE_TRANS_BUFFER is
@@ -45,7 +46,7 @@ entity TX_DMA_PCIE_TRANS_BUFFER is
         -- Input MFB bus (quasi BRAM writing interface)
         -- =========================================================================================
         PCIE_MFB_DATA    : in  std_logic_vector(MFB_REGIONS*MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH-1 downto 0);
-        PCIE_MFB_META    : in  slv_array_t(MFB_REGIONS -1 downto 0)(((MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH)/8+log2(CHANNELS)+62+1)-1 downto 0);
+        PCIE_MFB_META    : in  slv_array_t(MFB_REGIONS -1 downto 0)(trbuf_meta_width_f(CHANNELS, MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH)-1 downto 0);
         PCIE_MFB_SOF     : in  std_logic_vector(MFB_REGIONS -1 downto 0);
         PCIE_MFB_SRC_RDY : in  std_logic;
 

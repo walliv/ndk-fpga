@@ -12,6 +12,7 @@ use IEEE.numeric_std.all;
 -- Note:
 use work.math_pack.all;
 use work.type_pack.all;
+use work.tx_dma_pcie_trans_buffer_pkg.all;
 
 -- This component instantiaties data buffer for every channel.Each buffer consists from an array of
 -- BRAMs which total to the size of the input MFB bus in bytes, i.e. 32 \* *MFB_REGIONS*. This buffer
@@ -52,48 +53,40 @@ architecture BYTE of TX_DMA_PCIE_TRANS_BUFFER_IMPL is
     -- Number of bytes in MFB word
     constant MFB_BYTES       : natural := MFB_LENGTH/8;
     -- The Address is restricted by BAR_APERTURE (IP_core setting)
-    constant BUFFER_DEPTH    : natural := (2**POINTER_WIDTH)/(MFB_LENGTH/8);
+    constant BUFFER_DEPTH    : natural := trbuf_buffer_depth_f(POINTER_WIDTH, MFB_LENGTH);
     -- Number of input registers
     constant BRAM_REG_NUM    : natural := 2;
     -- Number of registers between BRAMs and barrel shifter
     constant INP_REG_NUM     : natural := 1;
     constant IS_INTEL_DEV    : boolean := (DEVICE = "STRATIX10" or DEVICE = "AGILEX");
     -- a maximum depth of a BRAM block (in 1B items) depends on a vendor
-    constant MAX_BRAM_DEPTH  : natural := tsel(IS_INTEL_DEV, 2048, 4096);
+    constant MAX_BRAM_DEPTH  : natural := tsel(IS_INTEL_DEV, TRBUF_DEPTH_M20K, TRBUF_DEPTH_BRAM);
     -- The amount of channels that fits to one array
-    constant CHANS_PER_ARRAY : natural := minimum(CHANNELS, MAX_BRAM_DEPTH/BUFFER_DEPTH);
+    constant CHANS_PER_ARRAY : natural := trbuf_chans_per_array_f(CHANNELS, BUFFER_DEPTH, MAX_BRAM_DEPTH);
     -- Number of memory arrays since one array can contain multiple channels
     constant MEM_ARRAYS      : natural := CHANNELS/CHANS_PER_ARRAY;
 
     -- =============================================================================================
     -- Defining ranges for meta signal
     -- =============================================================================================
-    constant META_IS_DMA_HDR_W : natural := 1;
-    constant META_PCIE_ADDR_W  : natural := 62;
     constant META_CHAN_NUM_W   : natural := log2(CHANNELS);
     constant META_BE_W         : natural := (MFB_LENGTH/MFB_REGIONS)/8;
+    constant META_BE_O         : natural := trbuf_meta_be_o_f(CHANNELS);
 
-    constant META_IS_DMA_HDR_O : natural := 0;
-    constant META_PCIE_ADDR_O  : natural := META_IS_DMA_HDR_O + META_IS_DMA_HDR_W;
-    constant META_CHAN_NUM_O   : natural := META_PCIE_ADDR_O + META_PCIE_ADDR_W;
-    constant META_BE_O         : natural := META_CHAN_NUM_O + META_CHAN_NUM_W;
+    subtype META_CHAN_NUM   is natural range TRBUF_META_CHAN_NUM_O + META_CHAN_NUM_W -1 downto TRBUF_META_CHAN_NUM_O;
+    subtype META_BE         is natural range META_BE_O + META_BE_W -1 downto META_BE_O;
 
-    subtype META_IS_DMA_HDR is natural range META_IS_DMA_HDR_O + META_IS_DMA_HDR_W -1 downto META_IS_DMA_HDR_O;
-    subtype META_PCIE_ADDR  is natural range   META_PCIE_ADDR_O + META_PCIE_ADDR_W -1 downto META_PCIE_ADDR_O;
-    subtype META_CHAN_NUM   is natural range     META_CHAN_NUM_O + META_CHAN_NUM_W -1 downto META_CHAN_NUM_O;
-    subtype META_BE         is natural range                 META_BE_O + META_BE_W -1 downto META_BE_O;
-
-    subtype META_MEM_ARR_IDX is natural range log2(MEM_ARRAYS) + log2(CHANS_PER_ARRAY) + META_CHAN_NUM_O -1 downto log2(CHANS_PER_ARRAY) + META_CHAN_NUM_O;
+    subtype META_MEM_ARR_IDX is natural range log2(MEM_ARRAYS) + log2(CHANS_PER_ARRAY) + TRBUF_META_CHAN_NUM_O -1 downto log2(CHANS_PER_ARRAY) + TRBUF_META_CHAN_NUM_O;
 
     -- Input register
     signal pcie_mfb_data_inp_reg    : slv_array_t(INP_REG_NUM downto 0)(PCIE_MFB_DATA'range);
-    signal pcie_mfb_meta_inp_reg    : slv_array_2d_t(INP_REG_NUM downto 0)(MFB_REGIONS -1 downto 0)(((MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH)/8+log2(CHANNELS)+62+1)-1 downto 0);
+    signal pcie_mfb_meta_inp_reg    : slv_array_2d_t(INP_REG_NUM downto 0)(MFB_REGIONS -1 downto 0)(trbuf_meta_width_f(CHANNELS, MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH)-1 downto 0);
     signal pcie_mfb_sof_inp_reg     : slv_array_t(INP_REG_NUM downto 0)(PCIE_MFB_SOF'range);
     signal pcie_mfb_src_rdy_inp_reg : std_logic_vector(INP_REG_NUM downto 0);
 
     -- counter of the address for each valid word following the beginning of the transaction
-    signal addr_cntr_pst            : unsigned(META_PCIE_ADDR_W -1 downto 0);
-    signal addr_cntr_nst            : unsigned(META_PCIE_ADDR_W -1 downto 0);
+    signal addr_cntr_pst            : unsigned(TRBUF_META_PCIE_ADDR_W -1 downto 0);
+    signal addr_cntr_nst            : unsigned(TRBUF_META_PCIE_ADDR_W -1 downto 0);
 
     -- Stores the index of the packet that get currently stored
     signal chan_num_reg             : std_logic_vector(META_CHAN_NUM_W -1 downto 0);
@@ -119,7 +112,7 @@ architecture BYTE of TX_DMA_PCIE_TRANS_BUFFER_IMPL is
     -- 2 regions support --
     -- ================= --
     -- Meta array
-    signal pcie_mfb_meta_arr        : slv_array_t(MFB_REGIONS - 1 downto 0)((MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH)/8+log2(CHANNELS)+62+1-1 downto 0);
+    signal pcie_mfb_meta_arr        : slv_array_t(MFB_REGIONS - 1 downto 0)(trbuf_meta_width_f(CHANNELS, MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH)-1 downto 0);
 
     -- Converter signal: PCIE_MFB_DATA'length/32 => PCIE_MFB_DATA'length/ 8
     -- Address the item in a BRAM for each byte for each region
@@ -211,7 +204,7 @@ begin
     begin
         -- psl assert_captured_dma_header :
         --      assert always ((not (PCIE_MFB_SRC_RDY = '1' or PCIE_MFB_META(it)(META_BE) /= (META_BE_W -1 downto 0 => '0'))) or
-        --              (PCIE_MFB_META(it)(META_IS_DMA_HDR) = "0")) abort(RESET)
+        --              (PCIE_MFB_META(it)(TRBUF_META_IS_DMA_HDR) = "0")) abort(RESET)
         --      report "TX_DMA_PCIE_TRANS_BUFFER: captured DMA header on a region. Danger of data overwrite!";
     end generate;
 
@@ -254,7 +247,7 @@ begin
                     -- second region and adds increment of 8 to that. If there is only one SOF and
                     -- particularly in the first region, then increment by 16 because the frame
                     -- continues in the next word.
-                    addr_cntr_nst   <= unsigned(pcie_mfb_meta_arr(i)(META_PCIE_ADDR)) + (MFB_REGIONS - i)*MFB_BLOCK_SIZE;
+                    addr_cntr_nst   <= unsigned(pcie_mfb_meta_arr(i)(TRBUF_META_PCIE_ADDR)) + (MFB_REGIONS - i)*MFB_BLOCK_SIZE;
                     chan_num_next   <= pcie_mfb_meta_arr(i)(META_CHAN_NUM);
                 end if;
             end loop;
@@ -291,13 +284,13 @@ begin
     -- The previous "2 downto 0" is specification of address - now generic for more regions
     -- The address system here is divided into two parts due to the dual-port BRAM configuration
     wr_bshifter_0_ctrl_p : process (all) is
-        variable pcie_mfb_meta_addr_v : std_logic_vector(META_PCIE_ADDR_W -1 downto 0);
+        variable pcie_mfb_meta_addr_v : std_logic_vector(TRBUF_META_PCIE_ADDR_W -1 downto 0);
     begin
         wr_shift_sel(0) <= (others => '0');
 
         if (pcie_mfb_src_rdy_inp_reg(INP_REG_NUM) = '1') then
             if (pcie_mfb_sof_inp_reg(INP_REG_NUM)(0) = '1') then
-                pcie_mfb_meta_addr_v    := pcie_mfb_meta_arr(0)(META_PCIE_ADDR);
+                pcie_mfb_meta_addr_v    := pcie_mfb_meta_arr(0)(TRBUF_META_PCIE_ADDR);
                 wr_shift_sel(0)         <= pcie_mfb_meta_addr_v(log2(MFB_DWORDS) - 1  downto 0);
             else
                 -- Shared address when the processing is in the middle of a frame - last saved address
@@ -340,7 +333,7 @@ begin
 
     tworeg_bs_g: if (MFB_REGIONS = 2) generate
         wr_bshifter_1_ctrl_p : process (all) is
-            variable pcie_mfb_meta_addr_v : std_logic_vector(META_PCIE_ADDR_W -1 downto 0);
+            variable pcie_mfb_meta_addr_v : std_logic_vector(TRBUF_META_PCIE_ADDR_W -1 downto 0);
         begin
             wr_shift_sel(1) <= (others => '0');
 
@@ -349,7 +342,7 @@ begin
                     -- The '+8' is MFB_BLOCK_SIZE (same as length of a REGION in Dwords) and is
                     -- only used when the SOF is in the second region
                     -- NOTE: that -8 can be a source of error. Was +8 previously.
-                    pcie_mfb_meta_addr_v    := std_logic_vector(unsigned(pcie_mfb_meta_arr(1)(META_PCIE_ADDR)) - 8);
+                    pcie_mfb_meta_addr_v    := std_logic_vector(unsigned(pcie_mfb_meta_arr(1)(TRBUF_META_PCIE_ADDR)) - 8);
                     wr_shift_sel(1)         <= pcie_mfb_meta_addr_v(log2(MFB_DWORDS) - 1  downto 0);
                 end if;
             end if;
@@ -399,7 +392,7 @@ begin
 
     -- Port A
     wr_addr_correction_a_p : process (all) is
-        variable pcie_mfb_meta_addr_v : std_logic_vector(META_PCIE_ADDR_W -1 downto 0);
+        variable pcie_mfb_meta_addr_v : std_logic_vector(TRBUF_META_PCIE_ADDR_W -1 downto 0);
         variable buff_addr_v          : std_logic_vector(log2(BUFFER_DEPTH) -1 downto 0);
         variable chan_addr_v          : std_logic_vector(log2(CHANS_PER_ARRAY) -1 downto 0);
     begin
@@ -408,9 +401,9 @@ begin
         if (pcie_mfb_src_rdy_inp_reg(INP_REG_NUM) = '1') then
             if (pcie_mfb_sof_inp_reg(INP_REG_NUM)(0) = '1') then
                 -- Pass address to variable
-                pcie_mfb_meta_addr_v := pcie_mfb_meta_arr(0)(META_PCIE_ADDR);
+                pcie_mfb_meta_addr_v := pcie_mfb_meta_arr(0)(TRBUF_META_PCIE_ADDR);
                 buff_addr_v          := pcie_mfb_meta_addr_v(log2(BUFFER_DEPTH)+log2(MFB_DWORDS) -1 downto log2(MFB_DWORDS));
-                chan_addr_v          := pcie_mfb_meta_arr(0)(log2(CHANS_PER_ARRAY) + META_CHAN_NUM_O -1 downto META_CHAN_NUM_O);
+                chan_addr_v          := pcie_mfb_meta_arr(0)(log2(CHANS_PER_ARRAY) + TRBUF_META_CHAN_NUM_O -1 downto TRBUF_META_CHAN_NUM_O);
 
                 wr_addr_bram_by_shift(0) <= (others => (chan_addr_v & buff_addr_v));
 
@@ -439,7 +432,7 @@ begin
     -- Port B
     wr_addr_correction_b_g: if (MFB_REGIONS = 2) generate
         wr_addr_correction_b_p : process (all) is
-            variable pcie_mfb_meta_addr_v : std_logic_vector(META_PCIE_ADDR_W -1 downto 0);
+            variable pcie_mfb_meta_addr_v : std_logic_vector(TRBUF_META_PCIE_ADDR_W -1 downto 0);
             variable buff_addr_v          : std_logic_vector(log2(BUFFER_DEPTH) -1 downto 0);
             variable chan_addr_v          : std_logic_vector(log2(CHANS_PER_ARRAY) -1 downto 0);
         begin
@@ -448,9 +441,9 @@ begin
             if (pcie_mfb_src_rdy_inp_reg(INP_REG_NUM) = '1') then
                 if (pcie_mfb_sof_inp_reg(INP_REG_NUM)(1) = '1') then
                     -- Pass address to variable
-                    pcie_mfb_meta_addr_v := pcie_mfb_meta_arr(1)(META_PCIE_ADDR);
+                    pcie_mfb_meta_addr_v := pcie_mfb_meta_arr(1)(TRBUF_META_PCIE_ADDR);
                     buff_addr_v          := pcie_mfb_meta_addr_v(log2(BUFFER_DEPTH)+log2(MFB_DWORDS) -1 downto log2(MFB_DWORDS));
-                    chan_addr_v          := pcie_mfb_meta_arr(1)(log2(CHANS_PER_ARRAY) + META_CHAN_NUM_O -1 downto META_CHAN_NUM_O);
+                    chan_addr_v          := pcie_mfb_meta_arr(1)(log2(CHANS_PER_ARRAY) + TRBUF_META_CHAN_NUM_O -1 downto TRBUF_META_CHAN_NUM_O);
 
                     wr_addr_bram_by_shift(1) <= (others => (chan_addr_v & buff_addr_v));
 
