@@ -10,6 +10,7 @@ import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import ClockCycles, RisingEdge
 from cocotbext.ofm.mfb.monitors import MFBMonitor
+from cocotbext.ofm.mfb.properties import attach_mfb_properties, final_check_all
 from cocotbext.ofm.mfb.transaction import MfbTransactionWithMeta
 from cocotbext.ofm.ver.backpressure import BackpressureConfig, apply_backpressure
 
@@ -86,6 +87,8 @@ async def test_headers(dut):
     mac_dst = random.getrandbits(48)
     mac_src = random.getrandbits(48)
     scoreboard = Scoreboard(mac_dst, mac_src, length_width)
+    # Attached before the monitor so that a bus violation is reported by the checker before the monitor trips over it.
+    props = attach_mfb_properties(dut, dut.CLK, reset=dut.RST, include=["TX_MFB"])
     monitor = MFBMonitor(dut, "TX_MFB", dut.CLK, trans_type=MfbTransactionWithMeta)
     monitor.add_callback(scoreboard.on_frame)
 
@@ -115,4 +118,5 @@ async def test_headers(dut):
     dut.CTRL_EN.value = 0
     await ClockCycles(dut.CLK, 100)
     scoreboard.check()
+    final_check_all(props)
     assert scoreboard.frames > 400
