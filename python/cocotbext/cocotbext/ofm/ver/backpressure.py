@@ -43,6 +43,7 @@ async def apply_backpressure(
     signal,
     clock,
     cfg: Optional[BackpressureConfig] = None,
+    rng: Optional[random.Random] = None,
 ) -> None:
     """Drive a ready signal with random backpressure.
 
@@ -55,12 +56,14 @@ async def apply_backpressure(
         clock: The cocotb clock signal associated with the interface.
         cfg: Backpressure configuration. If ``None``, a default instance
             (``BackpressureConfig()``) is used.
+        rng: Random generator of the decisions, the global ``random`` if ``None``.
     """
     cfg = cfg or BackpressureConfig()
+    rng = rng or random
 
     while True:
-        hold_cycles = random.randint(cfg.min_hold, cfg.max_hold)
-        signal.value = 0 if random.random() < cfg.low_prob else 1
+        hold_cycles = rng.randint(cfg.min_hold, cfg.max_hold)
+        signal.value = 0 if rng.random() < cfg.low_prob else 1
         await ClockCycles(clock, hold_cycles)
 
 
@@ -82,14 +85,16 @@ class BackpressureGenerator:
         bp.start(gen)
     """
 
-    def __init__(self, cfg: Optional[BackpressureConfig] = None) -> None:
+    def __init__(self, cfg: Optional[BackpressureConfig] = None, rng: Optional[random.Random] = None) -> None:
         """Initialize the generator.
 
         Args:
             cfg: Backpressure configuration. If ``None``, a default instance
                 (``BackpressureConfig()``) is used.
+            rng: Random generator of the decisions, the global ``random`` if ``None``.
         """
         self.cfg = cfg or BackpressureConfig()
+        self.rng = rng or random
 
     def __iter__(self):
         return self
@@ -100,8 +105,8 @@ class BackpressureGenerator:
         ``on``  = cycles with signal = 1 (ready asserted).
         ``off`` = cycles with signal = 0 (ready deasserted / backpressure).
         """
-        cycles = random.randint(self.cfg.min_hold, self.cfg.max_hold)
-        if random.random() < self.cfg.low_prob:
+        cycles = self.rng.randint(self.cfg.min_hold, self.cfg.max_hold)
+        if self.rng.random() < self.cfg.low_prob:
             return 0, cycles  # ready=0 for ``cycles``
         return cycles, 0    # ready=1 for ``cycles``
 
