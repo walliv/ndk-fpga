@@ -605,6 +605,11 @@ architecture FULL of RX_DMA_CALYPTE_SW_MANAGER is
     signal stop_settle_cntr : unsigned(log2(PTR_CMP_LATENCY+1) -1 downto 0);
     -- The comparator results reflect the current pointer registers of the stopping channel
     signal stop_ptr_fresh   : std_logic;
+    -- HDP/HHP of the stopping channel moved since the last dispatch read them
+    signal stop_moved_reg   : std_logic;
+    signal stop_moved_set   : std_logic;
+    signal stop_dispatched  : std_logic;
+    signal stop_ack_err     : std_logic;
     -- The pointer registers of the stopping channel themselves, not the comparator result, differ
     signal stop_ptr_ne_now  : std_logic;
     -- =====================================================================
@@ -1161,8 +1166,14 @@ begin
                     end if;
                 end if;
 
+                if (stop_quiescent = '1' and stop_moved_reg = '1') then
+                    -- The last update missed a pointer move: send the current pointers at once.
+                    stop_fsm_nst <= WAIT_FOR_PTR_UPDATE_DISPATCH;
+                end if;
+
                 -- This takes priority if this would occur at the same time with timeout counter runout
-                if (stop_chan_ok = '1' and stop_ptr_ok = '1' and stop_ptr_fresh = '1' and stop_quiescent = '1') then
+                if (stop_chan_ok = '1' and stop_ptr_ok = '1' and stop_ptr_fresh = '1' and stop_quiescent = '1' and
+                    stop_moved_reg = '0') then
                     stop_fsm_nst                                                 <= IDLE;
                     stop_acked                                                   <= '1';
                     enabled_chan_rst(to_integer(unsigned(stop_fsm_channel_reg))) <= '1';
@@ -1188,6 +1199,11 @@ begin
 
     stop_ptr_fresh <= '1' when (stop_settle_cntr = PTR_CMP_LATENCY and stop_ptr_wr = '0') else '0';
 
+    -- A pointer write in the dispatch cycle is not in what the dispatch read.
+    stop_dispatched <= '1' when (stop_fsm_pst = WAIT_FOR_PTR_UPDATE_DISPATCH and PTR_UPD_DISP_ACK = '1') else '0';
+    stop_moved_set  <= '1' when (stop_hxp_wr = '1' and (stop_dispatched = '1' or stop_fsm_pst = WAIT_FOR_POINTERS)) else
+                       '0';
+
     stop_track_p : process (CLK)
     begin
         if (rising_edge(CLK)) then
@@ -1197,17 +1213,30 @@ begin
                 stop_settle_cntr <= stop_settle_cntr + 1;
             end if;
 
+            if (stop_moved_set = '1') then
+                stop_moved_reg <= '1';
+            elsif (stop_dispatched = '1') then
+                stop_moved_reg <= '0';
+            end if;
+
             if (RESET = '1') then
                 stop_settle_cntr <= (others => '0');
+                stop_moved_reg   <= '0';
             end if;
         end if;
     end process;
+
+    stop_ack_err <= stop_acked and not (stop_quiescent and stop_ptr_fresh and not stop_moved_reg);
 
     stop_ptr_ne_now <= '1' when (reg_dob_opt(R_HDP)(1)(POINTER_WIDTH-1 downto 0) /= reg_dob_opt(R_SDP)(1)(POINTER_WIDTH-1 downto 0) or
                                  reg_dob_opt(R_HHP)(1)(POINTER_WIDTH-1 downto 0) /= reg_dob_opt(R_SHP)(1)(POINTER_WIDTH-1 downto 0)) else
                        '0';
 
     -- psl default clock is rising_edge(CLK);
+
+    -- psl assert_stop_ack_quiescent_fresh :
+    --      assert always (stop_ack_err = '0') abort (RESET)
+    --      report "RX_DMA_SW_MANAGER: A stop acknowledged with requests pending, a stale comparison or unsent pointers!";
 
     -- psl assert_stop_ack_ptrs_equal :
     --      assert always (stop_acked = '1' -> stop_ptr_ne_now = '0') abort (RESET)
