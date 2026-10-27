@@ -223,8 +223,12 @@ any incoming data and drops them (however, every other enabled channel can still
 send its data to the host memory).
 
 .. NOTE:: Although many channels can be deactivated at once from the software,
-   the controller deactivates them sequentially. This also applies to the
-   execution of the start sequence.
+   the controller deactivates them sequentially. A stop whose channel still has
+   requests waiting, for example behind a full buffer of another channel, lets
+   the controller serve the stops of other channels after the update timeout
+   (at once with the timeout set to 0) and completes later. A taken stop always
+   completes, even if the Control register is set to 1 again meanwhile; the start
+   follows it. The start sequence is executed sequentially as well.
 
 Data transmission
 -----------------
