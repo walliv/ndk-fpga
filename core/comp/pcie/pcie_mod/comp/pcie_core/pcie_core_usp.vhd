@@ -10,6 +10,7 @@ use IEEE.numeric_std.all;
 
 use work.math_pack.all;
 use work.type_pack.all;
+use work.pcie_axi_meta_pack.all;
 
 library unisim;
 use unisim.vcomponents.all;
@@ -31,10 +32,10 @@ architecture USP of PCIE_CORE is
     constant AXI_DATA_WIDTH    : natural := CQ_MFB_REGIONS*256;
     -- FPGA_COMMON chooses the width of the AXI interface through CQ_MFB_REGIONS, the TUSER widths follow it.
     constant IS_FULL_EP        : boolean := (CQ_MFB_REGIONS = 2);
-    constant AXI_CQUSER_WIDTH  : natural := tsel(IS_FULL_EP, 183, 88);
-    constant AXI_CCUSER_WIDTH  : natural := tsel(IS_FULL_EP, 81, 33);
-    constant AXI_RQUSER_WIDTH  : natural := tsel(IS_FULL_EP, 137, 62);
-    constant AXI_RCUSER_WIDTH  : natural := tsel(IS_FULL_EP, 161, 75);
+    constant AXI_CQUSER_WIDTH  : natural := tsel(IS_FULL_EP, AXI_CQ512_USER_W, AXI_CQ256_USER_W);
+    constant AXI_CCUSER_WIDTH  : natural := tsel(IS_FULL_EP, AXI_CC512_USER_W, AXI_CC256_USER_W);
+    constant AXI_RQUSER_WIDTH  : natural := tsel(IS_FULL_EP, AXI_RQ512_USER_W, AXI_RQ256_USER_W);
+    constant AXI_RCUSER_WIDTH  : natural := tsel(IS_FULL_EP, AXI_RC512_USER_W, AXI_RC256_USER_W);
 
     component pcie4_uscale_plus is
         port (

@@ -19,6 +19,7 @@ set MI_ASYNC_BASE      "$OFM_PATH/comp/mi_tools/async"
 lappend PACKAGES "$OFM_PATH/comp/base/pkg/math_pack.vhd"
 lappend PACKAGES "$OFM_PATH/comp/base/pkg/type_pack.vhd"
 lappend PACKAGES "$OFM_PATH/comp/base/pkg/pcie_meta_pack.vhd"
+lappend PACKAGES "$OFM_PATH/comp/base/pkg/pcie_axi_meta_pack.vhd"
 lappend PACKAGES "$INTEL_BASE/config/core_const.vhd"
 
 # Components
