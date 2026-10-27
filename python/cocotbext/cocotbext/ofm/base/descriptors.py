@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # Copyright (C) 2026 CESNET z. s. p. o.
+# Copyright (C) 2026 Universitaet Heidelberg, Institut fuer Technische Informatik (ZITI)
 # Author(s): Ondřej Schwarz <ondrej.schwarz@cesnet.cz>
+#            Vladislav Valek <vladislav.valek@stud.uni-heidelberg.de>
 
 import warnings
 from cocotb.handle import ArrayObject
@@ -192,21 +194,44 @@ class SignalDescriptor(BaseDescriptor):
         return sigval
 
     def __set__(self, bus, value):
-        sig = self.resolve(bus)
+        sig = self.target(bus)
 
         if sig is None:
             return
-
-        if bus.array_idx is not None:
-            if isinstance(sig, ArrayObject):
-                sig = sig[bus.array_idx]
-            else:
-                sig = SignalProxy(sig, bus.array_idx)
 
         if self._write_func is not None:
             self._write_func(bus, sig, value)
         else:
             sig.value = value
+
+    def target(self, bus):
+        """The handle that a write of this signal on `bus` goes to: the element or bit of `bus.array_idx`, if set."""
+        sig = self.resolve(bus)
+
+        if sig is None or bus.array_idx is None:
+            return sig
+
+        if isinstance(sig, ArrayObject):
+            return sig[bus.array_idx]
+
+        return SignalProxy(sig, bus.array_idx)
+
+    def writer(self, bus):
+        """A function writing a value of this signal on `bus`, the same as assigning it, with the handle resolved once."""
+        sig = self.target(bus)
+        write_func = self._write_func
+
+        if sig is None:
+            return lambda value: None
+
+        if write_func is None:
+            def write(value):
+                sig.value = value
+        else:
+            def write(value):
+                write_func(bus, sig, value)
+
+        return write
 
     def resolve(self, bus):
         result = super().resolve(bus)
