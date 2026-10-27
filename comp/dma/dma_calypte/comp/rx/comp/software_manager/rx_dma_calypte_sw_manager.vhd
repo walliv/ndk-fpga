@@ -87,6 +87,8 @@ entity RX_DMA_CALYPTE_SW_MANAGER is
         STOP_REQ_ACK         : in  std_logic;
 
         ENABLED_CHAN         : out std_logic_vector(CHANNELS-1 downto 0);
+        -- Channels with an address request or a PCIe header pending in the header manager
+        PEND_CHAN            : in  std_logic_vector(CHANNELS-1 downto 0);
 
         -- =====================================================================
         -- Pointer update interface (from Header Manager)
@@ -595,6 +597,8 @@ architecture FULL of RX_DMA_CALYPTE_SW_MANAGER is
     constant PTR_CMP_REGS_EN : boolean := true;
     constant PTR_CMP_LATENCY : natural := tsel(PTR_CMP_REGS_EN, 1, 0) + 1;
 
+    -- Nothing of the stopping channel is pending in the header manager
+    signal stop_quiescent   : std_logic;
     -- A pointer register of the stopping channel was written, or the channel changed, in this cycle
     signal stop_ptr_wr      : std_logic;
     signal stop_hxp_wr      : std_logic;
@@ -1150,7 +1154,7 @@ begin
                 if (unsigned(reg_dob_opt(R_UPDATE_TIMEOUT)(1)) /= UPD_TIMEOUT_CNTR_NULL_VAL) then
                     if (upd_timeout_cntr_reg /= UPD_TIMEOUT_CNTR_NULL_VAL) then
                         upd_timeout_cntr_next <= upd_timeout_cntr_reg - 1;
-                    elsif (stop_ptr_ok = '0') then
+                    elsif (stop_ptr_ok = '0' and stop_quiescent = '1') then
                         -- If timeout runs out, do the pointer update one more time. Matching pointers wait here for
                         -- the channel's slot: a dispatch period dividing CHANNELS could keep the slot on the dispatch.
                         stop_fsm_nst <= WAIT_FOR_PTR_UPDATE_DISPATCH;
@@ -1158,7 +1162,7 @@ begin
                 end if;
 
                 -- This takes priority if this would occur at the same time with timeout counter runout
-                if (stop_chan_ok = '1' and stop_ptr_ok = '1' and stop_ptr_fresh = '1') then
+                if (stop_chan_ok = '1' and stop_ptr_ok = '1' and stop_ptr_fresh = '1' and stop_quiescent = '1') then
                     stop_fsm_nst                                                 <= IDLE;
                     stop_acked                                                   <= '1';
                     enabled_chan_rst(to_integer(unsigned(stop_fsm_channel_reg))) <= '1';
@@ -1169,6 +1173,8 @@ begin
     -- Detect Stop acknowledgement propagation to Status Register
     stop_chan_ok <= '1' when (stop_fsm_channel_reg = active_chan_reg) else '0';
     stop_ptr_ok  <= stop_hdp_ok_reg and stop_hhp_ok_reg;
+
+    stop_quiescent <= not PEND_CHAN(to_integer(unsigned(stop_fsm_channel_reg)));
 
     stop_hxp_wr <= '1' when ((HDP_WR_EN = '1' and HDP_WR_CHAN = stop_fsm_channel_reg) or
                              (HHP_WR_EN = '1' and HHP_WR_CHAN = stop_fsm_channel_reg)) else

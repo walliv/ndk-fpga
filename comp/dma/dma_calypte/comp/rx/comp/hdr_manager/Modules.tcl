@@ -11,5 +11,6 @@ lappend COMPONENTS [ list "RX_DMA_CALYPTE_ADDR_MANAGER" "$ENTITY_BASE/addr_manag
 lappend COMPONENTS [ list "FIFOX"                       "$OFM_PATH/comp/base/fifo/fifox"     "FULL" ]
 lappend COMPONENTS [ list "SH_FIFO"                     "$OFM_PATH/comp/base/fifo/sh_fifo"   "FULL" ]
 lappend COMPONENTS [ list "PCIE_RQ_HDR_GEN"             "$OFM_PATH/comp/pcie/others/hdr_gen" "FULL" ]
+lappend COMPONENTS [ list "GEN_LUTRAM"                  "$OFM_PATH/comp/base/mem/gen_lutram" "FULL" ]
 
 lappend MOD "$ENTITY_BASE/rx_dma_calypte_hdr_manager.vhd"
