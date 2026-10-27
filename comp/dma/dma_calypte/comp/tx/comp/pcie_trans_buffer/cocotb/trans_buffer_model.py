@@ -14,21 +14,32 @@ REGION_BYTES = 32   # bytes per region
 
 
 class TransBufferModel:
-    def __init__(self, channels: int, pointer_width: int):
+    def __init__(self, channels: int, pointer_width: int, partitioned: bool = True):
         self.channels = channels
         self.pointer_width = pointer_width
-        self.buf_size = 1 << pointer_width
-        self.buffers = [bytearray(self.buf_size) for _ in range(channels)]
+        # Partitioned: one 2**pointer_width-byte buffer per channel. Flat (MEM_PARTITIONING=FALSE): one buffer of
+        # channels*2**pointer_width bytes addressed by the address field alone, the channel forced to 0.
+        self.partitioned = partitioned
+        if partitioned:
+            self.buf_size = 1 << pointer_width
+            self.buffers = [bytearray(self.buf_size) for _ in range(channels)]
+        else:
+            self.buf_size = channels << pointer_width
+            self.buffers = [bytearray(self.buf_size)]
 
         # write-context registers (mirror addr_cntr_pst / chan_num_reg in the RTL)
         self.addr_cntr = 0  # in DWORDS, META_PCIE_ADDR_W = 62 bits wide
         self.chan_reg = 0
         self._addr_mask = (1 << 62) - 1
 
+    def _eff_chan(self, chan: int) -> int:
+        # In flat mode the channel field is ignored: everything lands in the single flat buffer.
+        return chan if self.partitioned else 0
+
     def write_bytes(self, chan: int, base_dw: int, be: int, data: bytes, region_len: int):
         """Writes up to region_len bytes of `data` from byte base_dw*4 of `chan`, gated by bit i of `be`, wrapping at
         the buffer size."""
-        buf = self.buffers[chan]
+        buf = self.buffers[self._eff_chan(chan)]
         base_byte = (base_dw * 4) & self._addr_mask
         for i in range(region_len):
             if (be >> i) & 1:
@@ -75,5 +86,5 @@ class TransBufferModel:
             self.chan_reg = meta1_chan
 
     def read(self, chan: int, byte_addr: int, length: int = MFB_BYTES) -> bytes:
-        buf = self.buffers[chan]
+        buf = self.buffers[self._eff_chan(chan)]
         return bytes(buf[(byte_addr + i) % self.buf_size] for i in range(length))

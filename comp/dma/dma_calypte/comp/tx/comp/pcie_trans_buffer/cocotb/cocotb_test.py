@@ -5,7 +5,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Directed and randomized write traffic into TX_DMA_PCIE_TRANS_BUFFER, checked against TransBufferModel by
-single, pipelined and write-concurrent reads."""
+single, pipelined and write-concurrent reads. MEM_PARTITIONING of the elaboration selects the flat or the partitioned
+tests."""
 
 import os
 import random
@@ -13,8 +14,12 @@ import random
 import cocotb
 from cocotb.triggers import RisingEdge, ReadOnly
 
+from cocotbext.ofm.utils.signals import generic_bool
 from trans_buffer_model import TransBufferModel, MFB_REGIONS, MFB_BYTES, REGION_BYTES
 from trans_buffer_tb import TransBufferTestbench, WRITE_SETTLE_MARGIN, collision_sweep
+
+# The toplevel is known when cocotb imports the test module, so the test selection can follow the elaboration.
+TB_FLAT = not generic_bool(cocotb.top.MEM_PARTITIONING)
 
 # The model/DUT persists for the whole run: @cocotb.test functions share one elaborated design and
 # BRAM content (RESET only clears pipeline registers), so keep one model object per run to stay in
@@ -55,8 +60,9 @@ def get_model(dut) -> TransBufferModel:
         cocotb.log.info(f"TX_DMA_PCIE_TRANS_BUFFER implementation under test: {buffer_impl(dut)}")
         channels = int(dut.CHANNELS.value)
         pointer_width = int(dut.POINTER_WIDTH.value)
-        _model = TransBufferModel(channels, pointer_width)
-        cocotb.log.info(f"Created TransBufferModel(channels={channels}, pointer_width={pointer_width})")
+        _model = TransBufferModel(channels, pointer_width, partitioned=not TB_FLAT)
+        cocotb.log.info(f"Created TransBufferModel(channels={channels}, pointer_width={pointer_width}, "
+                        f"partitioned={not TB_FLAT})")
     return _model
 
 
@@ -159,17 +165,18 @@ def make_alloc(slots: int, budget: int):
     return alloc
 
 
-def gen_transaction(tb, pattern, chan, length, alloc, offset_first=False):
-    """A random transaction of `length` bytes placed by alloc(): 'a' SOF0-anchored at a random byte offset (drawn before
-    alloc() if offset_first), 'd' SOF1-only, 'c' dual-SOF behind a short one on `chan`. Returns (words, checks) or None."""
+def gen_transaction(tb, pattern, chan, length, alloc, offset_first=False, flat=False):
+    """A random transaction of `length` bytes placed by alloc(): 'a' SOF0-anchored at a random byte offset (drawn first
+    if offset_first or flat), 'd' SOF1-only, 'c' dual-SOF behind a short one on `chan`; flat picks a random channel."""
     if pattern == 'a':
-        byte_offset = random.randrange(4) if offset_first else None
-        addr_dw = alloc(chan, length)
+        byte_offset = random.randrange(4) if offset_first or flat else None
+        addr_dw = alloc(chan, length + byte_offset if flat else length)
         if addr_dw is None:
             return None
         if byte_offset is None:
             byte_offset = random.randrange(4)
         data = rand_bytes(length)
+        chan = _noise_chan(tb.channels) if flat else chan
         words = gen_words(anchor=0, addr_dw=addr_dw, chan=chan, byte_offset=byte_offset, data=data)
         return words, [(chan, addr_dw * 4 + byte_offset, data)]
     if pattern == 'd':
@@ -177,6 +184,7 @@ def gen_transaction(tb, pattern, chan, length, alloc, offset_first=False):
         if addr_dw is None:
             return None
         data = rand_bytes(length)
+        chan = _noise_chan(tb.channels) if flat else chan
         words = gen_words(anchor=1, addr_dw=addr_dw, chan=chan, byte_offset=0, data=data, other=None)
         return words, [(chan, addr_dw * 4, data)]
     assert pattern == 'c'
@@ -314,9 +322,9 @@ class Testbench(TransBufferTestbench):
         return await self.capture(read_reqs, drain=max(0, nw - nr) + 1)
 
 
-async def soak(tb, name, next_transaction):
-    """About 2000 words of idle cycles, no-op words and next_transaction()'s (words, checks), None skipping one, checked
-    by single retried reads interleaved into the running write stream and by a final read-back sample."""
+async def soak(tb, name, next_transaction, flat=False):
+    """About 2000 words of idle cycles, no-op words and next_transaction()'s (words, checks), None skipping one (ending
+    the stream if flat), checked by retried reads, while writing and after; flat reads through a random channel."""
     dut = tb.dut
     master_words = []          # flat list of word dicts (+ None for an idle cycle)
     write_commit_index = []    # (word_index_of_last_word, chan, start_byte, data)
@@ -333,6 +341,8 @@ async def soak(tb, name, next_transaction):
 
         transaction = next_transaction()
         if transaction is None:
+            if flat:
+                break
             continue
         words, checks = transaction
         master_words.extend(words)
@@ -364,6 +374,7 @@ async def soak(tb, name, next_transaction):
             await RisingEdge(dut.CLK)
             continue
         commit_idx, chan, start_byte, data = random.choice(eligible)
+        chan = _noise_chan(tb.channels) if flat else chan
         got = await tb.read_range(chan, start_byte, len(data))
         assert got == data, f"{name}: interleaved read mismatch chan={chan} start={start_byte} len={len(data)}"
         checked += 1
@@ -376,6 +387,7 @@ async def soak(tb, name, next_transaction):
     # Final pass: read back a few hundred random settled windows/transactions.
     sample = random.sample(write_commit_index, min(300, len(write_commit_index)))
     for commit_idx, chan, start_byte, data in sample:
+        chan = _noise_chan(tb.channels) if flat else chan
         got = await tb.read_range(chan, start_byte, len(data))
         assert got == data, f"{name}: final read mismatch chan={chan} start={start_byte} len={len(data)}"
 
@@ -387,7 +399,7 @@ async def soak(tb, name, next_transaction):
 # Directed regression tests
 # =================================================================================================
 
-@cocotb.test()
+@cocotb.test(skip=TB_FLAT)
 async def test_smoke(dut):
     tb = await Testbench.setup(dut, 0)
 
@@ -405,7 +417,7 @@ async def test_smoke(dut):
     assert got == data
 
 
-@cocotb.test()
+@cocotb.test(skip=TB_FLAT)
 async def test_unaligned_sweep(dut):
     tb = await Testbench.setup(dut, 1)
 
@@ -448,7 +460,7 @@ async def test_unaligned_sweep(dut):
         assert got == exp
 
 
-@cocotb.test()
+@cocotb.test(skip=TB_FLAT)
 async def test_dual_sof(dut):
     tb = await Testbench.setup(dut, 2)
 
@@ -493,7 +505,7 @@ async def test_dual_sof(dut):
         assert got == data, f"dual_sof mismatch chan={chan} start={start_byte} len={len(data)}"
 
 
-@cocotb.test()
+@cocotb.test(skip=TB_FLAT)
 async def test_wraparound(dut):
     tb = await Testbench.setup(dut, 3)
 
@@ -519,7 +531,7 @@ async def test_wraparound(dut):
     assert got2 == exp2, f"wraparound read-window mismatch: got={got2.hex()} exp={exp2.hex()}"
 
 
-@cocotb.test()
+@cocotb.test(skip=TB_FLAT)
 async def test_random_soak(dut):
     """Pure random legal MFB write stimulus, modeled in lockstep, with single-shot retried reads
     interleaved into the still-running write stream (exercising the write-priority BRAM
@@ -540,7 +552,7 @@ async def test_random_soak(dut):
     await soak(tb, "test_random_soak", next_transaction)
 
 
-@cocotb.test()
+@cocotb.test(skip=TB_FLAT)
 async def test_random_read_patterns(dut):
     """Random writes checked through single retried reads, pipelined burst reads and burst reads concurrent with a
     second write stream on RD_*_A."""
@@ -617,7 +629,7 @@ async def test_random_read_patterns(dut):
     log_xrgn_collisions("test_random_read_patterns")
 
 
-@cocotb.test()
+@cocotb.test(skip=TB_FLAT)
 async def test_byte_overlap_line_rate(dut):
     """A 1 B write to byte X followed without a gap by a 64 B write to X+1, both on the same DWord: in one dual-SOF
     word, back to back on one channel, at a row-straddling base, and on different channels."""
@@ -668,7 +680,7 @@ async def test_byte_overlap_line_rate(dut):
         await check(chan_b, 0x41, d2, "d-cross-chan-t2")
 
 
-@cocotb.test()
+@cocotb.test(skip=TB_FLAT)
 async def test_odd_row_straddle(dut):
     """Read windows starting at every byte of an odd row and of the following even row, so each
     window straddles into the next row's opposite bank. Without split read ports, a read may be
@@ -694,6 +706,99 @@ async def test_odd_row_straddle(dut):
                     f"{base_row + 2} of chan {chan} verified")
 
 
+# MEM_PARTITIONING=FALSE (TB_FLAT): the whole array is one flat space, so a channel's
+# pointer addresses any region and the channel index does not select the physical region.
+
+def _noise_chan(channels):
+    return random.randrange(channels) if channels > 1 else 0
+
+
+@cocotb.test(skip=not TB_FLAT)
+async def test_flat_smoke(dut):
+    """Write 64 B into the physical region that would be 'channel 1' in partitioned terms, reached by
+    the flat address alone while driving channel-field = 0 (must be ignored). Read it back."""
+    tb = await Testbench.setup(dut, 100)
+
+    per_chan = 1 << tb.model.pointer_width
+    addr_byte = per_chan + 4096          # inside the second channel's physical region
+    addr_dw = addr_byte // 4
+    data = rand_bytes(MFB_BYTES)
+
+    # channel field deliberately 0 (would select the *first* region under partitioning) -- ignored
+    words = gen_words(anchor=0, addr_dw=addr_dw, chan=0, byte_offset=0, data=data)
+    await tb.write_transaction(words)
+    await tb.drive_idle(WRITE_SETTLE_MARGIN)
+
+    got = await tb.read_range(_noise_chan(tb.channels), addr_byte, len(data))
+    exp = tb.model.read(0, addr_byte, len(data))
+    assert got == data, f"flat_smoke mismatch: got={got.hex()} exp={data.hex()}"
+    assert got == exp
+
+
+@cocotb.test(skip=not TB_FLAT)
+async def test_flat_channel_ignored(dut):
+    """Write the SAME flat address three times, each with a different channel-field value; the last
+    write must win (they all target the identical physical location because the channel is ignored)."""
+    tb = await Testbench.setup(dut, 101)
+
+    per_chan = 1 << tb.model.pointer_width
+    addr_byte = 3 * (per_chan // 2)      # straddles into the upper region, arbitrary
+    addr_dw = addr_byte // 4
+
+    last = None
+    for ch in range(tb.channels):
+        data = rand_bytes(MFB_BYTES)
+        words = gen_words(anchor=0, addr_dw=addr_dw, chan=ch, byte_offset=0, data=data)
+        await tb.write_transaction(words)
+        await tb.drive_idle(WRITE_SETTLE_MARGIN)
+        last = data
+
+    got = await tb.read_range(_noise_chan(tb.channels), addr_byte, MFB_BYTES)
+    assert got == last, f"flat_channel_ignored: channel field not ignored (got={got.hex()} exp={last.hex()})"
+
+
+@cocotb.test(skip=not TB_FLAT)
+async def test_flat_cross_boundary(dut):
+    """Flat mode: one write frame streams across a 2**POINTER_WIDTH boundary, so the running address, not a latched
+    channel, carries it into the next channel slot; checked at several boundaries."""
+    tb = await Testbench.setup(dut, 102)
+
+    per_chan = 1 << tb.model.pointer_width
+    # every internal 2**POINTER_WIDTH boundary (there are `channels`-1 of them)
+    for b in range(1, tb.channels):
+        boundary = b * per_chan
+        for pre in (96, 32, 4):
+            start = boundary - pre
+            addr_dw = start // 4
+            data = rand_bytes(256)               # 256 B = 4 words: crosses the boundary mid-frame
+            words = gen_words(anchor=0, addr_dw=addr_dw, chan=_noise_chan(tb.channels),
+                              byte_offset=0, data=data)
+            await tb.write_transaction(words)
+            await tb.drive_idle(WRITE_SETTLE_MARGIN)
+
+            got = await tb.read_range(_noise_chan(tb.channels), start, len(data))
+            exp = tb.model.read(0, start, len(data))
+            assert got == data, (f"flat_cross_boundary mismatch at boundary {hex(boundary)} "
+                                 f"start={hex(start)}: got={got.hex()} exp={data.hex()}")
+            assert got == exp
+
+
+@cocotb.test(skip=not TB_FLAT)
+async def test_flat_random_soak(dut):
+    """Flat mode: random writes over the whole address space with a noise channel each, checked by reads during the
+    write stream and a final read-back."""
+    tb = await Testbench.setup(dut, 103)
+    # one bump allocator over the channels * 2**pointer_width flat space
+    alloc = make_alloc(1, int(tb.buf_size * 0.8))
+
+    def next_transaction():
+        length = random.randrange(1, 200)
+        pattern = random.choice(['a', 'a', 'd'])
+        return gen_transaction(tb, pattern, 0, length, alloc, flat=True)
+
+    await soak(tb, "test_flat_random_soak", next_transaction, flat=True)
+
+
 # ==== Collision probe, report-only ====
 # TB_COLLISION_PROBE=1 sweeps one read against a write to the same row and logs, per cycle offset, whether the read
 # returns the old data, the new data or no RD_DATA_VLD_A.
@@ -701,9 +806,18 @@ async def test_odd_row_straddle(dut):
 TB_COLLISION_PROBE = os.environ.get("TB_COLLISION_PROBE", "0") == "1"
 
 
-@cocotb.test(skip=not TB_COLLISION_PROBE)
+@cocotb.test(skip=(TB_FLAT or not TB_COLLISION_PROBE))
 async def test_collision_probe_partitioned(dut):
     """Report-only collision probe of a partitioned elaboration, at address 0 of channel 0."""
     tb = await Testbench.setup(dut, 200)
 
     await collision_sweep(tb, chan=0, addr_byte=0, label="partitioned")
+
+
+@cocotb.test(skip=((not TB_FLAT) or not TB_COLLISION_PROBE))
+async def test_collision_probe_flat(dut):
+    """Report-only collision probe of a flat elaboration, at a row-aligned address in channel 0's slice."""
+    tb = await Testbench.setup(dut, 201)
+
+    addr_byte = 4096  # inside channel 0's [0, 2**POINTER_WIDTH) physical slice, 64 B row-aligned
+    await collision_sweep(tb, chan=_noise_chan(tb.channels), addr_byte=addr_byte, label="flat")

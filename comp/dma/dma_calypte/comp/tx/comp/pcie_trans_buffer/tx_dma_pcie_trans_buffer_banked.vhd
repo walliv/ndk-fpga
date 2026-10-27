@@ -62,6 +62,14 @@ architecture BANKED of TX_DMA_PCIE_TRANS_BUFFER_IMPL is
     -- Width of the (registered) target-array index; at least 1 bit even when MEM_ARRAYS = 1
     constant ARR_IDX_W       : natural := max(1, log2(MEM_ARRAYS));
 
+    -- ==== Flat (unpartitioned) addressing -- see the MEM_PARTITIONING generic ====
+    constant FLAT             : boolean := (not MEM_PARTITIONING) and (CHANNELS > 1);
+    -- LSB, within the write META DWord-address, of the flat channel-select field (the read byte
+    -- address carries it starting at bit POINTER_WIDTH). It sits directly above the intra-channel row.
+    constant FLAT_CHAN_LSB_DW : natural := log2(BUFFER_DEPTH) + log2(MFB_DWORDS);
+    -- LSB of the memory-array-select sub-field within the flat channel-select field
+    constant FLAT_ARR_LSB_DW  : natural := FLAT_CHAN_LSB_DW + log2(CHANS_PER_ARRAY);
+
     -- The input word behind the input registers of the write front end and the fields of its META
     signal wr_src_rdy               : std_logic;
     signal wr_sof                   : std_logic_vector(MFB_REGIONS -1 downto 0);
@@ -154,6 +162,10 @@ architecture BANKED of TX_DMA_PCIE_TRANS_BUFFER_IMPL is
     -- =============================================================================================
     signal wr_addr_collision_detected : slv_array_t(MEM_ARRAYS -1 downto 0)(1 downto 0);
     signal rdwr_collision_detected    : slv_array_t(MEM_ARRAYS -1 downto 0)(MFB_REGIONS -1 downto 0);
+
+    -- Flat copy of wr_bank_addr(0)(0)'s chan_addr_v (see wr_bank_geom_p), for the PSL checks below:
+    -- nvc's prev() rejects a slice taken directly from a nested array-of-array-of-vector signal.
+    signal wr_chan_slot_r0     : std_logic_vector(log2(CHANS_PER_ARRAY) -1 downto 0);
 
     -- ==== Bank addressing ====
     -- The bank whose index equals the row's parity gets the row, the other bank the next row; the two always lie in
@@ -303,6 +315,13 @@ begin
                 end if;
                 buff_addr_v := pcie_mfb_meta_addr_v(log2(BUFFER_DEPTH)+log2(MFB_DWORDS) -1 downto log2(MFB_DWORDS));
 
+                -- FLAT: the intra-array channel slot comes from the address just above the row, which also lets a frame
+                -- cross a channel boundary; else from the channel field. buff_addr_v (the intra-channel row) is
+                -- unchanged either way.
+                if (FLAT) then
+                    chan_addr_v := pcie_mfb_meta_addr_v(FLAT_CHAN_LSB_DW + log2(CHANS_PER_ARRAY) -1 downto FLAT_CHAN_LSB_DW);
+                end if;
+
                 wr_bank_addr(rgn) <= bank_addr_f(chan_addr_v, buff_addr_v);
 
                 -- The row a byte's DWord belongs to follows the raw address: region 1's shift has the "-8" correction
@@ -331,6 +350,21 @@ begin
         end process;
     end generate;
 
+    -- Verify each mode reads the write channel-slot bits (chan_addr_v, upper log2(CHANS_PER_ARRAY)
+    -- bits of wr_bank_addr(0)) from its OWN field -- regression guard against the other mode's
+    -- field leaking in, checked at SOF.
+    wr_chan_slot_r0 <= wr_bank_addr(0)(0)(BANK_ADDR_W -1 downto BANK_ADDR_W - log2(CHANS_PER_ARRAY));
+
+    -- psl assert_flat_wr_chan_from_addr : assert always
+    -- ((FLAT and wr_src_rdy = '1' and wr_sof(0) = '1') ->
+    -- wr_chan_slot_r0 = wr_addr(0)(FLAT_CHAN_LSB_DW + log2(CHANS_PER_ARRAY) -1 downto FLAT_CHAN_LSB_DW))
+    -- report "flat mode: region 0's write channel-slot did not come from the address field";
+
+    -- psl assert_part_wr_chan_from_field : assert always
+    -- ((not FLAT and wr_src_rdy = '1' and wr_sof(0) = '1') ->
+    -- wr_chan_slot_r0 = wr_chan(0)(log2(CHANS_PER_ARRAY) -1 downto 0))
+    -- report "partitioned mode: region 0's write channel-slot did not come from the channel field";
+
     -- ==== Input-stream guard ====
     -- Quasi-BRAM-writing MFB variant: no EOF/DST_RDY, so EOF/SOF and DATA-META-stable checks don't
     -- apply; only checkable invariant: a deasserted (registered) SRC_RDY must never itself produce
@@ -349,17 +383,29 @@ begin
         -- Per-region target-array index (arr_idx_rgn); see its declaration above for why it is only
         -- ever compared, never indexed.
         arr_idx_rgn_logic_p : process (all) is
-            variable chan_v : std_logic_vector(log2(CHANNELS) -1 downto 0);
+            variable chan_v      : std_logic_vector(log2(CHANNELS) -1 downto 0);
+            variable pcie_addr_v : std_logic_vector(TRBUF_META_PCIE_ADDR_W -1 downto 0);
         begin
             arr_idx_rgn <= (others => (others => '0'));
 
             for i in 0 to (MFB_REGIONS - 1) loop
                 if (wr_src_rdy = '1') then
                     if (wr_sof(i) = '1') then
-                        chan_v         := wr_chan(i);
-                        arr_idx_rgn(i) <= chan_v(log2(MEM_ARRAYS) + log2(CHANS_PER_ARRAY) -1 downto log2(CHANS_PER_ARRAY));
+                        -- FLAT: memory-array select from the address; else from the channel field
+                        if (FLAT) then
+                            pcie_addr_v    := wr_addr(i);
+                            arr_idx_rgn(i) <= pcie_addr_v(FLAT_ARR_LSB_DW + log2(MEM_ARRAYS) -1 downto FLAT_ARR_LSB_DW);
+                        else
+                            chan_v         := wr_chan(i);
+                            arr_idx_rgn(i) <= chan_v(log2(MEM_ARRAYS) + log2(CHANS_PER_ARRAY) -1 downto log2(CHANS_PER_ARRAY));
+                        end if;
                     else
-                        arr_idx_rgn(i) <= mem_arr_idx_reg;
+                        -- FLAT: track the running address so a frame may cross array boundaries
+                        if (FLAT) then
+                            arr_idx_rgn(i) <= std_logic_vector(addr_cntr_pst(FLAT_ARR_LSB_DW + log2(MEM_ARRAYS) -1 downto FLAT_ARR_LSB_DW));
+                        else
+                            arr_idx_rgn(i) <= mem_arr_idx_reg;
+                        end if;
                     end if;
                 end if;
             end loop;
@@ -663,14 +709,29 @@ begin
     -- ==== Read address / channel sources ====
     -- SPLIT_READ_PORTS maps P to a port; else broadcast from port A.
     rd_eff_split_g : if (SPLIT_READ_PORTS and MFB_REGIONS = 2) generate
-        rd_addr_eff(0) <= RD_ADDR_A;
-        rd_chan_eff(0) <= RD_CHAN_A;
-        rd_addr_eff(1) <= RD_ADDR_B;
-        rd_chan_eff(1) <= RD_CHAN_B;
+        rd_addr_eff(0) <= RD_ADDR_A(POINTER_WIDTH -1 downto 0);
+        rd_addr_eff(1) <= RD_ADDR_B(POINTER_WIDTH -1 downto 0);
+
+        rd_chan_split_flat_g : if (FLAT) generate
+            rd_chan_eff(0) <= RD_ADDR_A(POINTER_WIDTH + log2(CHANNELS) -1 downto POINTER_WIDTH);
+            rd_chan_eff(1) <= RD_ADDR_B(POINTER_WIDTH + log2(CHANNELS) -1 downto POINTER_WIDTH);
+        else generate
+            rd_chan_eff(0) <= RD_CHAN_A;
+            rd_chan_eff(1) <= RD_CHAN_B;
+        end generate;
     else generate
-        rd_eff_bcast_g : for p in 0 to (MFB_REGIONS -1) generate
-            rd_addr_eff(p) <= RD_ADDR_A;
-            rd_chan_eff(p) <= RD_CHAN_A;
+        rd_addr_bcast_g : for p in 0 to (MFB_REGIONS -1) generate
+            rd_addr_eff(p) <= RD_ADDR_A(POINTER_WIDTH -1 downto 0);
+        end generate;
+
+        rd_chan_bcast_flat_g : if (FLAT) generate
+            rd_chan_bcast_flat_p_g : for p in 0 to (MFB_REGIONS -1) generate
+                rd_chan_eff(p) <= RD_ADDR_A(POINTER_WIDTH + log2(CHANNELS) -1 downto POINTER_WIDTH);
+            end generate;
+        else generate
+            rd_chan_bcast_part_p_g : for p in 0 to (MFB_REGIONS -1) generate
+                rd_chan_eff(p) <= RD_CHAN_A;
+            end generate;
         end generate;
     end generate;
 
@@ -790,7 +851,7 @@ begin
             rd_out_bank0(0) <= rd_data_bank0_mux(0);
             rd_out_bank1(0) <= rd_data_bank1_mux(0);
         else generate
-            -- The read is attempted on both region-slots simultaneously (see rd_eff_bcast_g above);
+            -- The read is attempted on both region-slots simultaneously (see rd_addr_bcast_g above);
             -- whichever one succeeds (was not stalled by a concurrent write) provides the data.
             rd_data_demux_p : process (all)
             begin

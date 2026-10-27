@@ -42,7 +42,12 @@ entity TX_DMA_PCIE_TRANS_BUFFER_IMPL is
         READ_BARREL_SHIFTER_EN : b_array_t(MFB_REGIONS -1 downto 0) := (others => TRUE);
 
         -- XPM memory primitive as resolved by TX_DMA_PCIE_TRANS_BUFFER: URAM or BRAM.
-        RAM_TYPE : string := "BRAM"
+        RAM_TYPE : string := "BRAM";
+
+        -- TRUE (default): each channel owns a 2**POINTER_WIDTH-byte region. FALSE: one flat
+        -- CHANNELS*2**POINTER_WIDTH-byte space addressed only by the address field; RD_ADDR_*
+        -- widens by log2(CHANNELS) bits.
+        MEM_PARTITIONING : boolean := TRUE
     );
     port (
         CLK   : in std_logic;
@@ -59,14 +64,14 @@ entity TX_DMA_PCIE_TRANS_BUFFER_IMPL is
         -- Output reading interface for port A of the TDP or the single read port of the SDP
         RD_CHAN_A     : in  std_logic_vector(log2(CHANNELS) -1 downto 0);
         RD_DATA_A     : out std_logic_vector(MFB_REGIONS*MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH-1 downto 0);
-        RD_ADDR_A     : in  std_logic_vector(POINTER_WIDTH -1 downto 0);
+        RD_ADDR_A     : in  std_logic_vector(POINTER_WIDTH + tsel(MEM_PARTITIONING, 0, log2(CHANNELS)) -1 downto 0);
         RD_EN_A       : in  std_logic;
         RD_DATA_VLD_A : out std_logic;
 
         -- Output reading interface for port B. Unused if SPLIT_READ_PORTS=FALSE or MFB configuration is (1,1,8,32).
         RD_CHAN_B     : in  std_logic_vector(log2(CHANNELS) -1 downto 0);
         RD_DATA_B     : out std_logic_vector(MFB_REGIONS*MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH-1 downto 0) := (others => '0');
-        RD_ADDR_B     : in  std_logic_vector(POINTER_WIDTH -1 downto 0);
+        RD_ADDR_B     : in  std_logic_vector(POINTER_WIDTH + tsel(MEM_PARTITIONING, 0, log2(CHANNELS)) -1 downto 0);
         RD_EN_B       : in  std_logic;
         RD_DATA_VLD_B : out std_logic := '0'
     );
