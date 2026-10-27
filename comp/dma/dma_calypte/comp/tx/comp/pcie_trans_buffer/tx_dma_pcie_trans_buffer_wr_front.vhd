@@ -224,6 +224,14 @@ begin
                 pcie_meta_be_per_port(1) <= (others => '0');
             end if;
         end process;
+
+        -- Byte-enable ownership: region 1's BE may only merge into region 0's write (else branch
+        -- above) when region 1 is NOT starting its own frame this cycle.
+
+        -- psl assert_be_ownership : assert always
+        -- (pcie_mfb_sof_inp_reg(INP_REG_NUM)(1) = '1' ->
+        -- pcie_meta_be_per_port(0)(MFB_LENGTH/8 -1 downto META_BE_W) = (MFB_LENGTH/8 - META_BE_W -1 downto 0 => '0'))
+        -- report "region 1 owns this SOF word, yet region 1's BE leaked into region 0's write enable";
     end generate;
 
     -- =============================================================================================

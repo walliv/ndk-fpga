@@ -61,7 +61,7 @@ internals /testbench/dut_i/vhdl_dut_i $META_IS_DMA_HDR_W $META_PCIE_ADDR_W $META
 ptr_updater /testbench/dut_i/dma_ptr_updater_i
 meta_extractor /testbench/dut_i/vhdl_dut_i/tx_dma_metadata_extractor_i $META_IS_DMA_HDR_W $META_PCIE_ADDR_W $META_CHAN_NUM_W $META_BE_W $META_BYTE_CNT_W $META_FBE_W $META_LBE_W $META_WHOLE_W $META_REDUCED_W $REGIONS $DEVICE
 chan_start_stop_ctrl /testbench/dut_i/vhdl_dut_i/tx_dma_chan_start_stop_ctrl_i $META_IS_DMA_HDR_W $META_PCIE_ADDR_W $META_CHAN_NUM_W $META_BE_W $META_BYTE_CNT_W $META_FBE_W $META_LBE_W $META_REDUCED_W $META_WO_BYTE_CNT_W $REGIONS
-trans_buffer /testbench/dut_i/vhdl_dut_i/tx_dma_pcie_trans_buffer_i/trans_buffer_i $META_IS_DMA_HDR_W $META_PCIE_ADDR_W $META_CHAN_NUM_W $META_BE_W $META_BYTE_CNT_W $META_FBE_W $META_LBE_W $META_WO_BYTE_CNT_W $REGIONS
+trans_buffer /testbench/dut_i/vhdl_dut_i/tx_dma_pcie_trans_buffer_i/impl_g/trans_buffer_i $META_IS_DMA_HDR_W $META_PCIE_ADDR_W $META_CHAN_NUM_W $META_BE_W $META_BYTE_CNT_W $META_FBE_W $META_LBE_W $META_WO_BYTE_CNT_W $REGIONS
 pkt_dispatcher /testbench/dut_i/vhdl_dut_i/tx_dma_pkt_dispatcher_i
 sw_mgr /testbench/dut_i/vhdl_dut_i/tx_dma_sw_manager_i
 conf_regs /testbench/dut_i/vhdl_dut_i/tx_dma_sw_manager_i $DEVICE
