@@ -236,6 +236,7 @@ class Testbench(TransBufferTestbench):
         (re-issuing RD_EN_A) while write-priority stalls RD_DATA_VLD_A."""
         for _ in range(timeout):
             await self.issue_read(chan, addr)
+            await self.read_latency_wait()
             await self.read_sample_point()
             vld, data = self.sample_read()
             # Leave the ReadOnly phase before returning control to the caller, which may want to
@@ -264,6 +265,7 @@ class Testbench(TransBufferTestbench):
         dut = self.dut
         results = [None] * len(reqs)
         await RisingEdge(dut.CLK)  # aligns with issuer's first edge (issues reqs[0])
+        await self.read_latency_wait()
         missed = []
         for idx in range(len(reqs)):
             await RisingEdge(dut.CLK)

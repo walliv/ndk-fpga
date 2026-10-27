@@ -123,6 +123,9 @@ architecture BANKED of TX_DMA_PCIE_TRANS_BUFFER_IMPL is
     signal rd_data_bram_bank   : slv_array_3d_t(1 downto 0)(MEM_ARRAYS -1 downto 0)(MFB_REGIONS -1 downto 0)(MFB_LENGTH -1 downto 0);
 
     -- ==== Read path signals ====
+    -- XPM read latency: 2 with its output register (READ_LATENCY => 2), else 1.
+    constant XPM_RD_LATENCY : natural := tsel(READ_LATENCY >= 2, 2, 1);
+
     -- Effective RD_ADDR/RD_CHAN per region-slot: with SPLIT_READ_PORTS, slot P maps 1:1 to a port;
     -- else both broadcast from port A and race the same read (the unstalled one succeeds).
     signal rd_addr_eff : slv_array_t(MFB_REGIONS -1 downto 0)(POINTER_WIDTH -1 downto 0);
@@ -143,6 +146,13 @@ architecture BANKED of TX_DMA_PCIE_TRANS_BUFFER_IMPL is
     signal rd_chan_p_reg  : slv_array_t(MFB_REGIONS -1 downto 0)(log2(CHANNELS) -1 downto 0);
     signal rd_off_reg     : slv_array_t(MFB_REGIONS -1 downto 0)(log2(MFB_BYTES) -1 downto 0);
     signal rd_row_lsb_reg : std_logic_vector(MFB_REGIONS -1 downto 0);
+
+    -- Cycle-1 copies of the above; at READ_LATENCY=1 these ARE rd_chan_p_reg/rd_off_reg/rd_row_lsb_reg
+    -- (rd_pipe_lat1_g); at =2 one more register (rd_pipe_lat2_g) re-aligns with the XPM output
+    -- register's extra BRAM cycle.
+    signal rd_chan_p_reg_stg1  : slv_array_t(MFB_REGIONS -1 downto 0)(log2(CHANNELS) -1 downto 0);
+    signal rd_off_reg_stg1     : slv_array_t(MFB_REGIONS -1 downto 0)(log2(MFB_BYTES) -1 downto 0);
+    signal rd_row_lsb_reg_stg1 : std_logic_vector(MFB_REGIONS -1 downto 0);
 
     signal rd_data_bank0_mux : slv_array_t(MFB_REGIONS -1 downto 0)(MFB_LENGTH -1 downto 0);
     signal rd_data_bank1_mux : slv_array_t(MFB_REGIONS -1 downto 0)(MFB_LENGTH -1 downto 0);
@@ -248,6 +258,17 @@ begin
     -- already forces exactly MFB_REGIONS elements; this just guards that contract explicitly.
     assert (READ_BARREL_SHIFTER_EN'length = MFB_REGIONS)
         report "TX_DMA_PCIE_TRANS_BUFFER: READ_BARREL_SHIFTER_EN must have exactly MFB_REGIONS elements!"
+        severity FAILURE;
+
+    assert (READ_LATENCY >= 1 and READ_LATENCY <= 2)
+        report "TX_DMA_PCIE_TRANS_BUFFER: READ_LATENCY must be 1 (no output register) or 2 (XPM output register)!"
+        severity FAILURE;
+
+    -- The extra stage of READ_LATENCY >= 2 only exists on the TDP (2-region) read-valid/pipe registers
+    -- (rd_vld_p/rd_pipe_reg_p); the SDP path (MFB_REGIONS=1) keeps a fixed 1-cycle RD_DATA_VLD_A,
+    -- so this combination is unsupported.
+    assert (not (READ_LATENCY >= 2 and MFB_REGIONS = 1))
+        report "TX_DMA_PCIE_TRANS_BUFFER: READ_LATENCY => 2 is only implemented for the 2-region (TDP) read path!"
         severity FAILURE;
 
     wr_front_i : entity work.TX_DMA_PCIE_TRANS_BUFFER_WR_FRONT
@@ -489,7 +510,10 @@ begin
                     READ_DATA_WIDTH_B  => MFB_LENGTH,
                     ADDR_WIDTH_B       => BANK_ADDR_W,
                     READ_RESET_VALUE_B => "0",
-                    READ_LATENCY_B     => 1,
+                    -- Fed from XPM_RD_LATENCY for consistency with the TDP array below; the
+                    -- elaboration assert guarantees this is always 1 here (READ_LATENCY >= 2 +
+                    -- MFB_REGIONS=1 is rejected), matching rd_data_vld_reg_p's fixed 1 cycle.
+                    READ_LATENCY_B     => XPM_RD_LATENCY,
                     WRITE_MODE_B       => XPM_WRITE_MODE
                 )
                 port map (
@@ -522,6 +546,12 @@ begin
     -- Memory array - Two regions (TDP, write priority stalls reads)
     -- =============================================================================================
     tdp_bram_g: if (MFB_REGIONS = 2) generate
+
+        -- Cycle-1 (pre-extra-stage) rd_data_valid_arr; see rd_vld_p/rd_vld_lat1_g/rd_vld_lat2_g
+        -- below for how READ_LATENCY selects between a plain wire and one extra register stage.
+        signal rd_data_valid_arr_stg1 : std_logic_vector(MFB_REGIONS -1 downto 0);
+
+    begin
 
         -- Region-r write stalls same-region reads (SDP ports are independent). Cross-region matters
         -- too: UG573 Table 3 NO_CHANGE leaves a port's read undefined when the OTHER port writes the
@@ -595,7 +625,10 @@ begin
                     BYTE_WRITE_WIDTH_A => 8,
                     ADDR_WIDTH_A       => BANK_ADDR_W,
                     READ_RESET_VALUE_A => "0",
-                    READ_LATENCY_A     => 1,
+                    -- 1 = no output register, 2 = XPM output register; rd_vld_p/rd_pipe_reg_p
+                    -- below gain a matching extra pipeline stage from READ_LATENCY >= 2 (see
+                    -- rd_vld_lat2_g/rd_pipe_lat2_g).
+                    READ_LATENCY_A     => XPM_RD_LATENCY,
                     WRITE_MODE_A       => XPM_WRITE_MODE,
 
                     WRITE_DATA_WIDTH_B => MFB_LENGTH,
@@ -603,7 +636,7 @@ begin
                     BYTE_WRITE_WIDTH_B => 8,
                     ADDR_WIDTH_B       => BANK_ADDR_W,
                     READ_RESET_VALUE_B => "0",
-                    READ_LATENCY_B     => 1,
+                    READ_LATENCY_B     => XPM_RD_LATENCY,
                     WRITE_MODE_B       => XPM_WRITE_MODE
                 )
                 port map (
@@ -658,12 +691,12 @@ begin
         begin
             if rising_edge(CLK) then
 
-                rd_data_valid_arr   <= (others => '0');
+                rd_data_valid_arr_stg1   <= (others => '0');
 
                 for ch in 0 to (MEM_ARRAYS -1) loop
                     for rgn in 0 to (MFB_REGIONS - 1) loop
                         if (rd_en_pch(ch)(rgn) = '1') then
-                            rd_data_valid_arr(rgn) <= '1';
+                            rd_data_valid_arr_stg1(rgn) <= '1';
                         end if;
                     end loop;
                 end loop;
@@ -704,6 +737,22 @@ begin
         -- psl assert_rdwr_collision :
         --      assert always (rdwr_collision = '0') abort (RESET)
         --      report "TX_DMA_PCIE_TRANS_BUFFER: A read and a write use one BRAM port at once!";
+        -- READ_LATENCY => 1: rd_data_valid_arr IS the cycle-1 result above, a plain wire with no
+        -- added register, so RD_DATA_VLD_* follows RD_EN_* by one cycle.
+        rd_vld_lat1_g : if (READ_LATENCY = 1) generate
+            rd_data_valid_arr <= rd_data_valid_arr_stg1;
+        end generate;
+
+        -- READ_LATENCY >= 2: one register re-aligns rd_data_valid_arr with the XPM output
+        -- register's extra cycle.
+        rd_vld_lat2_g : if (READ_LATENCY >= 2) generate
+            rd_vld_extra_reg_p : process (CLK)
+            begin
+                if rising_edge(CLK) then
+                    rd_data_valid_arr <= rd_data_valid_arr_stg1;
+                end if;
+            end process;
+        end generate;
     end generate;
 
     -- ==== Read address / channel sources ====
@@ -772,12 +821,33 @@ begin
     begin
         if (rising_edge(CLK)) then
             for p in 0 to (MFB_REGIONS -1) loop
-                rd_chan_p_reg(p)  <= rd_chan_eff(p);
-                rd_off_reg(p)     <= rd_addr_eff(p)(log2(MFB_BYTES) -1 downto 0);
-                rd_row_lsb_reg(p) <= rd_addr_eff(p)(log2(MFB_BYTES));
+                rd_chan_p_reg_stg1(p)  <= rd_chan_eff(p);
+                rd_off_reg_stg1(p)     <= rd_addr_eff(p)(log2(MFB_BYTES) -1 downto 0);
+                rd_row_lsb_reg_stg1(p) <= rd_addr_eff(p)(log2(MFB_BYTES));
             end loop;
         end if;
     end process;
+
+    -- READ_LATENCY => 1: rd_chan_p_reg/rd_off_reg/rd_row_lsb_reg ARE the cycle-1 results above,
+    -- plain wires with no added register.
+    rd_pipe_lat1_g : if (READ_LATENCY = 1) generate
+        rd_chan_p_reg  <= rd_chan_p_reg_stg1;
+        rd_off_reg     <= rd_off_reg_stg1;
+        rd_row_lsb_reg <= rd_row_lsb_reg_stg1;
+    end generate;
+
+    -- READ_LATENCY >= 2: one extra register stage on each, re-aligning them with the XPM output
+    -- register's additional cycle of BRAM latency (matching rd_vld_lat2_g above).
+    rd_pipe_lat2_g : if (READ_LATENCY >= 2) generate
+        rd_pipe_reg2_p : process (CLK) is
+        begin
+            if (rising_edge(CLK)) then
+                rd_chan_p_reg  <= rd_chan_p_reg_stg1;
+                rd_off_reg     <= rd_off_reg_stg1;
+                rd_row_lsb_reg <= rd_row_lsb_reg_stg1;
+            end if;
+        end process;
+    end generate;
 
     -- ==== Cycle 1: select array by channel, assemble word from even/odd banks ====
     rd_arr_mux_g : for p in 0 to (MFB_REGIONS -1) generate

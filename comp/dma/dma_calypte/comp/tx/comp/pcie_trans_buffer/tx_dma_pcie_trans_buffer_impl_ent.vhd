@@ -47,7 +47,11 @@ entity TX_DMA_PCIE_TRANS_BUFFER_IMPL is
         -- TRUE (default): each channel owns a 2**POINTER_WIDTH-byte region. FALSE: one flat
         -- CHANNELS*2**POINTER_WIDTH-byte space addressed only by the address field; RD_ADDR_*
         -- widens by log2(CHANNELS) bits.
-        MEM_PARTITIONING : boolean := TRUE
+        MEM_PARTITIONING : boolean := TRUE;
+
+        -- Cycles from RD_EN_* to RD_DATA_VLD_*: 1 (default); 2 adds XPM's output register, on the TDP
+        -- (2-region) read path only.
+        READ_LATENCY : natural := 1
     );
     port (
         CLK   : in std_logic;
