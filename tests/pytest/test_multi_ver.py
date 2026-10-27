@@ -48,3 +48,10 @@ def test_dry_run(tmp_path):
     (tmp_path / "ver_settings.py").write_text(
         'SETTINGS = {"default": {"A": "1"}, "b": {"A": "2"}, "_combinations_": ((), ("b",))}\n')
     assert dry_run("ver_settings.py", tmp_path) == ["test_name_0", "test_name_1"]
+
+
+def test_cocotb_params_env(utils):
+    setting = {"A": "1", "__cocotb_params__": {"FRAMES": "10"}}
+    assert utils.cocotb_params_env(setting) == {"COCOTB_FRAMES": "10"}
+    assert setting == {"A": "1"}
+    assert utils.cocotb_params_env(setting) == {}

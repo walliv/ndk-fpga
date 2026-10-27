@@ -77,3 +77,8 @@ def expand_combinations(settings, run_percentage=None):
         del settings["_combinations_run_percentage_"]
 
     return combinations
+
+
+# Environment of the cocotb test: each key K of "__cocotb_params__" (removed from the setting) becomes COCOTB_K
+def cocotb_params_env(setting):
+    return {f"COCOTB_{name}": value for name, value in setting.pop("__cocotb_params__", {}).items()}
