@@ -553,8 +553,10 @@ begin
                     channel_status_new(to_integer(unsigned(start_req_q_chan))) <= '1';
 
                     -- If the channel the request was sent on does not have a packet dropped on
-                    -- it, acknowledge the start immediately and do not wait for anything.
-                    if (pkt_chan_reg /= start_req_q_chan or pkt_process_pst /= S_PACKET_DISCARD) then
+                    -- it, acknowledge the start immediately and do not wait for anything. A header of
+                    -- this channel decided in this same cycle still sees the old status.
+                    if ((pkt_chan_reg /= start_req_q_chan or pkt_process_pst /= S_PACKET_DISCARD) and
+                        not (pkt_process_pst = S_IDLE and input_fifo_empty = '0' and input_channel = start_req_q_chan)) then
                         start_req_done_int <= '1';
                     else
                         -- If the channel to be started is dropping a packet, do not
