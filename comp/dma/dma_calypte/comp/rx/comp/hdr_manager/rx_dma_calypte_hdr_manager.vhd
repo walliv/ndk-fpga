@@ -141,7 +141,8 @@ entity RX_DMA_CALYPTE_HDR_MANAGER is
         -- =========================================================================================
         -- Stop support
         -- =========================================================================================
-        -- Channels with an address request queued, held or with a PCIe header not yet taken by the header insertor
+        -- Channels with an address request queued or held, or a PCIe header not yet taken by the header insertor,
+        -- which covers a packet in progress through its DMA header request
         PEND_CHAN : out std_logic_vector(CHANNELS -1 downto 0);
 
         -- =========================================================================================
@@ -172,10 +173,8 @@ architecture FULL of RX_DMA_CALYPTE_HDR_MANAGER is
     signal chan_state_change_pst : chan_state_change_t := S_IDLE;
     signal chan_state_change_nst : chan_state_change_t := S_IDLE;
 
-    -- Store register for the information if the start request is currently pending (set to 0 if a
-    -- stop request is currently pending). This is only used when there is a packet currently
-    -- processed in the pipeline that either passes (in case of a stop request) or is dropped (in
-    -- case of a start request).
+    -- Store register for the information if the start request is currently pending. This is only used
+    -- when a packet of the channel is currently dropped in the pipeline.
     signal is_start_req_pending_reg : std_logic;
     signal is_start_req_pending_new : std_logic;
     -- Output register of *_REQ_DONE signals
@@ -369,6 +368,9 @@ architecture FULL of RX_DMA_CALYPTE_HDR_MANAGER is
     signal trk_pend        : slv_array_t(1 downto 0)(CHANNELS -1 downto 0);
     -- Every numbered request of a kind had its header popped, yet a channel is pending for that kind
     signal trk_idle_err    : std_logic_vector(1 downto 0);
+    signal pend_all        : std_logic_vector(CHANNELS -1 downto 0);
+    -- A request of a stopped channel written while that channel was not pending
+    signal req_wr_unpend   : std_logic;
 
     -- =============================================================================================
     -- Perfofmance counter logic
@@ -444,6 +446,10 @@ begin
     --      assert always (trk_idle_err = "00") abort (RESET)
     --      report "RX_DMA_HDR_MANAGER: A channel is pending although every request of its kind was taken!";
 
+    -- psl assert_stopped_req_pending :
+    --      assert always (req_wr_unpend = '0') abort (RESET)
+    --      report "RX_DMA_HDR_MANAGER: A request of a stopped channel written while the channel was not pending!";
+
     -- psl assert_start_req_overrun :
     --      assert always (START_REQ_VLD = '1' -> start_req_q_vld = '0') abort (RESET)
     --      report "RX_DMA_HDR_MANAGER: A start request arrived while the previous one was still queued!";
@@ -509,15 +515,9 @@ begin
     --=====================================================================
     -- Channel activity FSM
     --=====================================================================
-    -- This state machine controls the start/stop process on a channel. An inactive channel is
-    -- dropping packets. If a start request is being issued on a channel, a currently dropped packet
-    -- needs to be dropped entirely and the channel is then activated. If the channel did not drop
-    -- any packets upon the start request, it is simply activated and prepared for incoming packets.
-    -- An active channel processes its packets, meaning each packet is send to the host memory.
-    --
-    -- If stop request is being issued on a channel, the channel needs to finish processing its
-    -- current packet and then it is inactive. If no packet has been processed upon the stop
-    -- request, the channel is simply disactivated.
+    -- An inactive channel drops its packets; a start lets a dropped packet finish, then activates
+    -- the channel. A stop deactivates it at once; a packet in progress finishes and keeps it
+    -- in PEND_CHAN until its DMA header is taken.
 
     channel_status_reg_p : process (CLK) is
     begin
@@ -577,18 +577,10 @@ begin
                     stop_req_q_take                                           <= '1';
                     channel_status_new(to_integer(unsigned(stop_req_q_chan))) <= '0';
 
-                    -- If the channel the request was sent on does not have a packet processed on
-                    -- it, acknowledge the stop immediately and do not wait for anything. A header of
-                    -- this channel decided in this same cycle still sees the old status.
-                    if ((pkt_chan_reg /= stop_req_q_chan or pkt_process_pst /= S_PACKET_PROCESS) and
-                        not (pkt_process_pst = S_IDLE and input_fifo_empty = '0' and input_channel = stop_req_q_chan)) then
-                        stop_req_done_int <= '1';
-                    else
-                        -- If the channel to be stopped is processing a packet, do not
-                        -- acknowledge the stop of a channel but switch to S_WAIT_FOR_PKT_END state.
-                        chan_state_change_nst    <= S_WAIT_FOR_PKT_END;
-                        is_start_req_pending_new <= '0';
-                    end if;
+                    -- Acknowledged at once: a packet of the channel in progress, or decided in this cycle with the
+                    -- old status, keeps it in PEND_CHAN until its DMA header is taken. Waiting for its end could wait
+                    -- on a request held on the channel's own full buffer.
+                    stop_req_done_int <= '1';
 
                 elsif (start_req_q_vld = '1') then
                     start_req_q_take                                           <= '1';
@@ -1278,7 +1270,16 @@ begin
         trk_idle_err(k) <= (or trk_pend(k)) when (trk_wr_seq(k) = trk_pop_seq(k)) else '0';
     end generate;
 
-    PEND_CHAN <= trk_pend(0) or trk_pend(1);
+    -- A packet's DMA header request is written at its decision and its header is taken after the packet's last
+    -- data transaction, so the channel is pending through the packet, including a later segment's request.
+    pend_all  <= trk_pend(0) or trk_pend(1);
+    PEND_CHAN <= pend_all;
+
+    -- After its stop is taken, a channel gets requests only for its packet in progress, so it is already pending.
+    req_wr_unpend <= '1' when ((data_addr_next_wr = '1' or dma_hdr_addr_next_wr = '1') and
+                               channel_status_reg(to_integer(unsigned(input_channel))) = '0' and
+                               pend_all(to_integer(unsigned(input_channel))) = '0') else
+                     '0';
 
     -- =============================================================================================
     -- Performance counter logic
