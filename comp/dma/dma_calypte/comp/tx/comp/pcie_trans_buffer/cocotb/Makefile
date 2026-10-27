@@ -25,4 +25,12 @@ sim-elab:
 sim-run:
 	$(MAKE) TARGET=nvc-run comp
 
+# make suite: every combination of ver_settings.py in parallel.
+SUITE_FILE := test_tx_dma_pcie_trans_buffer.py
+SUITE_PREFIX := TRBUF
+include ../../../../../../../../build/scripts/multi_ver/nvc_suite.mk
+
+# Without GENERICS, as multi_ver_cocotb.py gives them, a run takes the "default" setting of ver_settings.py.
+include ../../../../../../../../build/scripts/multi_ver/ver_settings.mk
+
 include ../../../../../../../../build/Makefile
