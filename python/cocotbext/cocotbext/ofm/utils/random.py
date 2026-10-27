@@ -2,6 +2,7 @@
 # Copyright (C) 2025 CESNET z. s. p. o.
 # Author(s): Ondrej Schwarz <ondrejschwarz@cesnet.cz>
 
+import random
 from random import randint
 from random import choice as randchoice
 
@@ -28,3 +29,10 @@ def randint_recursive(min_bits: int, max_bits: int, max_final_bit_range: int = 8
     mid_bits = min_bits + ((max_bits - min_bits) // 2)
     interval = randchoice([(min_bits, mid_bits), (mid_bits, max_bits)])
     return randint_recursive(*interval, max_final_bit_range)
+
+
+def named_rngs(*names: str) -> dict:
+    """Independent random generators keyed by name, all derived from the global generator through one draw, so
+    each stimulus stream follows the run's seed whatever the others draw."""
+    master = random.Random(random.getrandbits(64))
+    return {name: random.Random(master.getrandbits(64)) for name in names}
