@@ -110,6 +110,12 @@ def test_legal_traffic_passes():
     assert prop.frames == 4 and not prop.errors
 
 
+def test_gap_in_frame_is_legal_by_default():
+    entity, prop = make()
+    play(prop, entity, [open_frame(0), IDLE, close_frame(0)])
+    prop.final_check()
+
+
 def test_straddling_start_after_eof_is_legal_when_allowed():
     entity, prop = make(straddling=True)
     play(prop, entity, [
@@ -146,6 +152,7 @@ def test_straddling_start_after_eof_is_legal_when_allowed():
     ("eof_without_sof", [cycle(src_rdy="1", sof="01", eof="01", sof_pos="0010", eof_pos="000001")], {}),
     ("straddling", [open_frame(0), cycle(src_rdy="1", sof="10")], dict(straddling=True)),
     ("no_straddling", [open_frame(0), cycle(src_rdy="1", sof="10")], dict(straddling=False)),
+    ("no_gap_in_frame", [open_frame(0), IDLE, close_frame(0)], dict(no_gap_in_frame=True)),
 ])
 def test_rule_fires(rule, cycles, kwargs):
     entity, prop = make(max_errors=0, **kwargs)

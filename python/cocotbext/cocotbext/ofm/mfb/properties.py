@@ -33,6 +33,7 @@ MFB_RULES = (
     "eof_without_sof",
     "straddling",
     "no_straddling",
+    "no_gap_in_frame",
 )
 
 
@@ -52,7 +53,7 @@ class MFBProperty:
     _optional_signals = ["sof_pos", "eof_pos", "meta", "be"]
 
     def __init__(self, entity, name, clock, reset=None, reset_active_level=1, mfb_params=None,
-                 straddling=None, disable=(), max_errors=1, label=None, start=True):
+                 straddling=None, no_gap_in_frame=False, disable=(), max_errors=1, label=None, start=True):
         self.bus = Bus(entity, name, self._signals, optional_signals=self._optional_signals)
         self.log = entity._log
         self.name = label or name
@@ -60,6 +61,8 @@ class MFBProperty:
         self.reset = reset
         self.reset_active_level = reset_active_level
         self.straddling = straddling
+        # PCIe-flavoured MFB keeps SRC_RDY high from the SOF to the EOF of a frame; plain MFB may pause inside one.
+        self.no_gap_in_frame = no_gap_in_frame
         self.max_errors = max_errors
 
         unknown = set(disable) - set(MFB_RULES)
@@ -166,6 +169,9 @@ class MFBProperty:
 
         src_rdy = src_rdy_v == "1"
         dst_rdy = dst_rdy_v == "1"
+
+        if self.no_gap_in_frame and self.frame_open and not src_rdy:
+            self._violation("no_gap_in_frame", "SRC_RDY is low in the middle of a frame")
 
         # The source may not withdraw an offer: once SRC_RDY rises it stays up until the sink
         # takes the word. Checked against the previous cycle, which is where the offer was made.
