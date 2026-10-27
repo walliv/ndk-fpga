@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # Copyright (C) 2024-2026 CESNET z. s. p. o.
+# Copyright (C) 2026 Universitaet Heidelberg, Institut fuer Technische Informatik (ZITI)
 # Author(s): Martin Spinler <spinler@cesnet.cz>
 #            Ondřej Schwarz <ondrejschwarz@cesnet.cz>
+#            Vladislav Valek <vladislav.valek@stud.uni-heidelberg.de>
 
 from typing import Optional
 from copy import copy
@@ -124,6 +126,8 @@ if cocotb.__version__ >= "2.0.0":
             clk_freq: Clock frequency in Hz (used by some idle generators).
             idle_factory: Factory producing idle transactions when the queue
                 is empty or when the idle generator requests a gap.
+            idle_generator: Idle generator to use instead of the default one,
+                e.g. ``IdleGenerator()`` for full throughput.
         """
 
         bus   : BusProtocol
@@ -142,7 +146,8 @@ if cocotb.__version__ >= "2.0.0":
             clk_freq: Optional[float] = None,
             idle_factory=IdleTransactionFactory(),
             no_default_rate_limiter=False,
-            rate_limiter_config: dict = dict(rate_percentage=30, random_idles=True, max_idles=3, zero_idles_chance=80)
+            rate_limiter_config: dict = dict(rate_percentage=30, random_idles=True, max_idles=3, zero_idles_chance=80),
+            idle_generator: Optional[IdleGenerator] = None,
         ):
 
             self._init_bus(protocol, dut, name, separator, array_idx, generics_prefix, **protocol_kwargs)
@@ -164,7 +169,10 @@ if cocotb.__version__ >= "2.0.0":
             )
 
             # default idle generator that actually generates idles
-            self._idle_gen = IdleGenerator() if no_default_rate_limiter else ItemRateLimiter(**rate_limiter_config)
+            if idle_generator is not None:
+                self._idle_gen = idle_generator
+            else:
+                self._idle_gen = IdleGenerator() if no_default_rate_limiter else ItemRateLimiter(**rate_limiter_config)
             self._idle_fac = idle_factory
 
             self._cfg_update()

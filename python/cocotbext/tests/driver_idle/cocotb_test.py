@@ -121,9 +121,8 @@ async def run_mfb_idle_words_test(dut):
     geo = mfb_geometry(dut)
     rng = random.Random(random.getrandbits(64))
     gaps = [rng.randint(0, GAP_MAX) for _ in range(WORDS)]
-    drv = MFBDriver(dut, "RX_MFB", dut.CLK, generics_prefix="MFB", no_default_rate_limiter=True,
-                    idle_factory=IdleTransactionFactory(1, 1))
-    drv.set_idle_generator(ScriptedIdles(gaps))
+    drv = MFBDriver(dut, "RX_MFB", dut.CLK, generics_prefix="MFB", idle_factory=IdleTransactionFactory(1, 1),
+                    idle_generator=ScriptedIdles(gaps))
     frames = [rng.randbytes(geo.word_width // 8) for _ in range(WORDS)]
     for f in frames:
         drv.append(MfbTransaction(data=f))
