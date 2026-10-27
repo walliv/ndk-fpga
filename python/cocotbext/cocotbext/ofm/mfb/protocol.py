@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # Copyright (C) 2026 CESNET z. s. p. o.
+# Copyright (C) 2026 Universitaet Heidelberg, Institut fuer Technische Informatik (ZITI)
 # Author(s): Ondrej Schwarz <ondrejschwarz@cesnet.cz>
+#            Vladislav Valek <vladislav.valek@stud.uni-heidelberg.de>
 
 from cocotb.types import Logic
 from cocotbext.ofm.base.types import LogicArray, LogicArray2D
@@ -8,6 +10,11 @@ from cocotbext.ofm.base.protocol import BusProtocol, parameter, generic, signal,
 from cocotbext.ofm.mfb.utils import get_mfb_params
 from math import log2
 from dataclasses import dataclass
+
+
+def _serialized(value):
+    """The flat value of a per-region signal, which a driver gives as a LogicArray2D or already flat."""
+    return value.serialize() if isinstance(value, LogicArray2D) else value
 
 
 @dataclass
@@ -68,9 +75,10 @@ class MfbProtocol(BusProtocol):
         return sigval
 
     @DATA.write()
-    def DATA(self, signal, value: LogicArray | bytearray | bytes) -> None:
+    def DATA(self, signal, value: LogicArray | bytearray | bytes | int) -> None:
+        # an int converts straight to the bit string the simulator takes, without a LogicArray of the whole word
         if isinstance(value, bytearray) or isinstance(value, bytes):
-            value = LogicArray.from_bytes(bytes(value).ljust(self.WORD_WIDTH // 8, b"\x00"), self.WORD_WIDTH, byteorder="little")
+            value = int.from_bytes(value, byteorder="little")
         signal.value = value
 
     @signal
@@ -78,16 +86,16 @@ class MfbProtocol(BusProtocol):
         return sigval
 
     @SOF_POS.write()
-    def SOF_POS(self, signal, value: LogicArray2D) -> None:
-        signal.value = value.serialize()
+    def SOF_POS(self, signal, value: LogicArray2D | LogicArray | str | int) -> None:
+        signal.value = _serialized(value)
 
     @signal
     def EOF_POS(self, sigval) -> LogicArray:
         return sigval
 
     @EOF_POS.write()
-    def EOF_POS(self, signal, value: LogicArray2D) -> None:
-        signal.value = value.serialize()
+    def EOF_POS(self, signal, value: LogicArray2D | LogicArray | str | int) -> None:
+        signal.value = _serialized(value)
 
     SOF     : LogicArray = signal()
     EOF     : LogicArray = signal()
@@ -99,5 +107,5 @@ class MfbProtocol(BusProtocol):
         return sigval
 
     @META.write(put_with="SOF")
-    def META(self, signal, value: LogicArray2D) -> None:
-        signal.value = value.serialize()
+    def META(self, signal, value: LogicArray2D | LogicArray | str | int) -> None:
+        signal.value = _serialized(value)

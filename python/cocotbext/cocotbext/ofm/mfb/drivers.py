@@ -1,22 +1,33 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # Copyright (C) 2024-2026 CESNET z. s. p. o.
+# Copyright (C) 2026 Universitaet Heidelberg, Institut fuer Technische Informatik (ZITI)
 # Author(s): Jakub Cabal <cabal@cesnet.cz>
 #            Ondrej Schwarz <ondrejschwarz@cesnet.cz>
+#            Vladislav Valek <vladislav.valek@stud.uni-heidelberg.de>
+
+from collections import deque
+from dataclasses import dataclass
+
+from cocotb.handle import LogicArrayObject, LogicObject
+from cocotb.types import Logic, LogicArray
 
 from cocotbext.ofm.base.drivers import ModularBusDriver
 from cocotbext.ofm.base.transaction import IdleTransaction
-from cocotbext.ofm.mfb.transaction import MfbTransaction
-from cocotb.types import Logic, LogicArray
 from cocotbext.ofm.base.types import LogicArray2D
-from cocotbext.ofm.utils.math import ceildiv
 from cocotbext.ofm.mfb.protocol import MfbProtocol
-
-from dataclasses import dataclass, asdict
+from cocotbext.ofm.mfb.transaction import MfbTransaction
 
 
 class MFBDriver(ModularBusDriver):
+    """Driver of an MFB bus built on the signals of an :class:`MfbProtocol`.
+
+    A word is staged as plain integers and per-region lists and only the signals whose value differs from the last
+    write are written.
+    """
+
     bus: MfbProtocol
 
+    # MFBDriver stages its words without the State; it is kept for the subclasses that extend it.
     @dataclass
     class State:
         DATA    : LogicArray | bytearray = 0
@@ -30,19 +41,7 @@ class MFBDriver(ModularBusDriver):
     def __init__(self, dut, name, clock, protocol=MfbProtocol, no_inner_idles: bool = False, **kwargs):
         super().__init__(dut, name, clock, protocol=protocol, **kwargs)
 
-        self._item_width     : int = self.bus.ITEM_WIDTH
-        self._word_bytes     : int = self.bus.WORD_WIDTH // 8
-        self._item_bytes     : int = self.bus.ITEM_WIDTH // 8
-        self._block_bytes    : int = self.bus.BLOCK_SIZE * self._item_bytes
-        self._region_bytes   : int = self._block_bytes * self.bus.REGION_SIZE
-        self._regions        : int = self.bus.REGIONS
-        self._region_items   : int = self.bus.REGION_SIZE * self.bus.BLOCK_SIZE
-
         self._no_inner_idles : bool = no_inner_idles
-
-        self._staged_items   : int = 0
-        self._item_cnt       : int = 0
-        self._frame_cnt      : int = 0
 
     @property
     def item_cnt(self):
@@ -52,190 +51,313 @@ class MFBDriver(ModularBusDriver):
     def frame_cnt(self):
         return self._frame_cnt
 
+    def append(self, transaction: MfbTransaction | IdleTransaction):
+        """Queue a frame, or an IdleTransaction for a gap of its length in bytes."""
+        self._queue.append(transaction)
+
     def _init_state(self):
         self.state: MFBDriver.State = MFBDriver.State()
 
+    def _init_bus(self, protocol, *args, **kwargs):
+        super()._init_bus(protocol, *args, **kwargs)
+
+        bus = self.bus
+        self._regions        : int = bus.REGIONS
+        self._region_items   : int = bus.REGION_SIZE * bus.BLOCK_SIZE
+        self._item_width     : int = bus.ITEM_WIDTH
+        self._item_bytes     : int = bus.ITEM_WIDTH // 8
+        self._block_bytes    : int = bus.BLOCK_SIZE * self._item_bytes
+        self._region_bytes   : int = bus.REGION_SIZE * self._block_bytes
+        self._word_bytes     : int = self._regions * self._region_bytes
+        self._word_items     : int = self._regions * self._region_items
+
+        self._init_signals()
+
+        self._queue    : deque = deque()
+        self._cursor   : int   = 0
+        self._frame_cnt: int   = 0
+        # the frame that started the run of frames being laid and the items sent since
+        self._run              = None
+        self._run_items: int   = 0
+
+    def _init_signals(self):
+        """Writers of the signals present on the bus and the X value of the per-region and whole-word ones."""
+        bus = self.bus
+        regions = self._regions
+        self._write = {}
+        self._last = {}
+        self._dst_rdy = self._reader("DST_RDY")
+
+        # (name, put_with, per-region width, X of a region, writes flat values) of the per-region signals
+        self._region_signals = []
+        # (name, put_with, X of the signal) of the optional signals valid with another signal of the whole word
+        self._word_signals = []
+
+        for name, descriptor in bus.signals.items():
+            if name == "DST_RDY":
+                continue
+
+            self._write[name] = descriptor.writer(bus)
+
+            put_with = descriptor.put_with
+            if name in ("SOF_POS", "EOF_POS") or put_with in ("SOF", "EOF"):
+                width = len(descriptor.target(bus)) // regions
+                flat = getattr(MfbProtocol, name, None) is descriptor
+                self._region_signals.append((name, put_with, width, "X" * width, flat))
+            elif descriptor.is_optional and put_with is not None:
+                self._word_signals.append((name, put_with, "X" * len(descriptor.target(bus))))
+
+        self._region_names = tuple(s[0] for s in self._region_signals)
+        self._clear_word()
+
+    def _reader(self, name):
+        """A function telling whether the 1-bit signal `name` is 1, which reads the bit string of a plain handle."""
+        sig = self.bus.signals[name].target(self.bus)
+
+        if isinstance(sig, (LogicObject, LogicArrayObject)):
+            handle = sig._handle
+            return lambda: handle.get_signal_val_binstr() == "1"
+
+        return lambda: str(sig.value) == "1"
+
     def _clear_signals(self):
-        self._auto_clear_signals()
-        self.state.DATA    = bytearray(self.bus.WORD_WIDTH // 8)
-        self.state.SOF_POS = LogicArray2D.from_logicarray(self.state.SOF_POS, self.bus.REGIONS)
-        self.state.EOF_POS = LogicArray2D.from_logicarray(self.state.EOF_POS, self.bus.REGIONS)
-        self.state.SOF     = LogicArray(0, self.bus.REGIONS)
-        self.state.EOF     = LogicArray(0, self.bus.REGIONS)
-        self.state.SRC_RDY = 0
+        self._clear_word()
 
-        # converting signals valid with SOF or EOF to LogicArray2D
-        for name in self.bus.optional_signals.keys():
-            put_with = self.bus.put_with(name)
+    def _clear_word(self):
+        """Empty the staged word; the cursor is kept."""
+        regions = self._regions
+        self._w_data     : int  = 0
+        self._w_sof      : int  = 0
+        self._w_eof      : int  = 0
+        self._w_items    : int  = 0
+        self._w_has_data : bool = False
+        self._w_regions  : dict = {name: [None] * regions for name in self._region_names}
+        self._w_words    : dict = {}
 
-            if put_with == "SOF" or put_with == "EOF":
-                value = getattr(self.state, name)
-                setattr(self.state, name, LogicArray2D.from_logicarray(value, self.bus.REGIONS))
+    def _write_to_bus(self):
+        self._write_word(0)
 
-    async def _split_transaction(self, transaction: MfbTransaction | IdleTransaction):
-        word_is_full  : bool = False
-        word_has_data : bool = False
-        word_overflow : bool = False
-        region_offset : int  = 0
-        byte_offset   : int  = 0
+    def _put(self, name, value):
+        """Write `value` to the signal `name` unless it holds that value from the last write."""
+        if self._last.get(name, self) != value:
+            self._last[name] = value
+            self._write[name](value)
 
-        while not word_is_full:
-            if isinstance(transaction, MfbTransaction):
-                while transaction.data:
-                    # get a slice of data from the transaction to the end of the width of a word
-                    data = transaction.data[:self._word_bytes - byte_offset]
+    def _write_word(self, src_rdy: int):
+        """Write the staged word with the given SRC_RDY; signals that keep their value are not written."""
+        put = self._put
+        put("DATA", self._w_data)
+        put("SOF", self._w_sof)
+        put("EOF", self._w_eof)
 
-                    # if a transaction has already started or ended in this region, put it in the next region
-                    if self.state.SOF[region_offset] or self.state.EOF[region_offset]:
-                        region_offset += 1
+        for name, _, width, x_field, flat in self._region_signals:
+            value = _region_value(self._w_regions[name], width, x_field)
+            if self._last.get(name, self) != value:
+                self._last[name] = value
+                if not flat:
+                    value = LogicArray2D.from_logicarray(_logic(value, width * self._regions), self._regions)
+                self._write[name](value)
 
-                        # if all regions are full, send the transaction
-                        if region_offset >= self._regions:
-                            region_offset = 0
-                            yield
-                            word_has_data = False
+        for name, _, x_value in self._word_signals:
+            put(name, self._w_words.get(name, x_value))
 
-                        # set the byte offset to the start of the new region
-                        byte_offset = region_offset * self._region_bytes
-                        # get the data from the transaction again
-                        continue
+        put("SRC_RDY", src_rdy)
 
-                    sof_pos   = None
-                    sof_index = None
-
-                    # set SOF if the packet has not started in the previous word
-                    if not word_overflow:
-                        self.state.SOF[region_offset] = 1
-                        sof_pos = (byte_offset % self._region_bytes) // self._block_bytes
-                        sof_index = region_offset
-                        self.state.SOF_POS[region_offset] = LogicArray.from_unsigned(sof_pos, len(self.state.SOF_POS[region_offset]))
-                    else:
-                        word_overflow = False
-
-                    # check for overflow
-                    if len(data) != len(transaction.data):
-                        word_overflow = True
-
-                    # set DATA
-                    self.state.DATA[byte_offset:byte_offset + len(data)] = data
-                    word_has_data = True
-
-                    # count the items
-                    self._staged_items += (len(data) * 8) // self._item_width
-
-                    # remove the part of the data being sent from the transaction
-                    transaction.data = transaction.data[self._word_bytes - byte_offset:]
-
-                    # increase the offset
-                    byte_offset  += len(data)
-                    region_offset = (byte_offset - 1) // self._region_bytes
-
-                    eof_pos   = None
-                    eof_index = None
-
-                    # set EOF if the packet does not overflow to the next word
-                    if not word_overflow:
-                        self.state.EOF[region_offset] = 1
-                        eof_pos = ((byte_offset - 1) % self._region_bytes) // self._item_bytes
-                        eof_index = region_offset
-                        self.state.EOF_POS[region_offset] = LogicArray.from_unsigned(eof_pos, len(self.state.EOF_POS[region_offset]))
-
-                    # set optional signals automatically
-                    self._auto_set_optional_signals(transaction, sof_index, eof_index)
-
-                    # align the byte offset to the next block and region offset to the next region
-                    byte_offset   = ceildiv(self._block_bytes, byte_offset) * self._block_bytes
-                    region_offset = byte_offset // self._region_bytes
-
-                    # check if the word if full
-                    word_is_full = byte_offset >= self._word_bytes
-
-                    # when the word is full, send it to the bus
-                    if word_is_full:
-                        byte_offset = 0
-                        region_offset = 0
-                        yield
-                        word_has_data = False
-
-            elif isinstance(transaction, IdleTransaction):
-                if self._no_inner_idles:
-                    yield
-                    return
-
-                remaining_idle_bytes = len(transaction)
-
-                while remaining_idle_bytes:
-                    free_bytes = self._word_bytes - byte_offset
-
-                    if free_bytes <= remaining_idle_bytes:
-                        self.state.DATA[byte_offset:] = free_bytes * b"\x00"
-                        byte_offset += free_bytes
-                        remaining_idle_bytes -= free_bytes
-                    else:
-                        self.state.DATA[byte_offset:byte_offset + remaining_idle_bytes] = remaining_idle_bytes * b"\x00"
-                        byte_offset += remaining_idle_bytes
-                        remaining_idle_bytes = 0
-
-                    byte_offset   = ceildiv(self._block_bytes, byte_offset) * self._block_bytes
-                    region_offset = byte_offset // self._region_bytes
-
-                    word_is_full = byte_offset >= self._word_bytes
-
-                    if word_is_full:
-                        byte_offset = 0
-                        region_offset = 0
-
-                        if word_has_data:
-                            # send the word with the end of the previous frame to the bus
-                            yield
-                            word_has_data = False
-                        else:
-                            # a word without frame data is an idle cycle with SRC_RDY low
-                            await self._clk_re
-
-            # if the word is not yet full, get the next transaction
-            if not word_is_full:
-                transaction = await anext(self._transactions)
-
-    async def _send_to_bus(self):
-        self.state.SRC_RDY = 1
-        self._write_to_bus()
-
+    async def _send_word(self):
+        """Offer the staged word until DST_RDY accepts it, then count it and empty the stage."""
+        self._write_word(1)
         await self._clk_re
 
-        while not self.bus.DST_RDY:
+        dst_rdy = self._dst_rdy
+        while not dst_rdy():
             await self._clk_re
 
-        self._frame_cnt += self.state.EOF.count("1")
+        self._item_cnt += self._w_items
+        self._run_items += self._w_items
+        self._frame_cnt += self._w_eof.bit_count()
+        self._clear_word()
 
-    def _get_sent_items(self):
-        items = self._staged_items
-        self._staged_items = 0
-        return items
+    async def _idle_word(self):
+        """One clock of SRC_RDY low, whatever DST_RDY is."""
+        self._write_word(0)
+        await self._clk_re
 
-    def _get_idle_items(self):
-        return self._regions * self._region_items
+    async def _close_word(self):
+        """End the staged word: send it if it holds data, otherwise spend its clock idle."""
+        if self._w_has_data:
+            await self._send_word()
+        else:
+            await self._idle_word()
 
-    def _auto_set_optional_signals(self, transaction: MfbTransaction, sof_index: int, eof_index: int):
-        """Automatically assings value to optional signals present in the transaction."""
-        for name, value in asdict(transaction).items():
-            name = name.upper()
+    async def _main_loop(self):
+        queue = self._queue
 
-            if name in self.bus.optional_signals:
-                put_with = self.bus.put_with(name)
+        while True:
+            if not queue:
+                # a frame that ended inside the word leaves the word open
+                if self._cursor:
+                    if self._w_has_data:
+                        await self._send_word()
+                    self._cursor = 0
+                    self._run_end()
 
-                if put_with is None:
-                    continue
+                await self._idle(self._idle_fac.make())
+                continue
 
-                if put_with == "SOF" or put_with == "EOF":
-                    index = sof_index if put_with == "SOF" else eof_index
+            transaction = queue.popleft()
 
-                    if index is None:
-                        continue
+            if isinstance(transaction, IdleTransaction):
+                await self._idle(transaction)
+                continue
 
-                    if getattr(self.state, put_with)[index]:
-                        sigval = getattr(self.state, name)
-                        sigval[index] = value
-                else:
-                    if getattr(self.state, put_with):
-                        setattr(self.state, name, value)
+            assert isinstance(transaction, MfbTransaction), f"Transaction must be an instance of MfbTransaction, not {type(transaction)}."
+
+            for _ in range(self._idle_gen.get(transaction)):
+                await self._idle(self._idle_fac.make())
+
+            await self._frame(transaction)
+
+    async def _idle(self, transaction: IdleTransaction):
+        """An idle met with no word open lasts one word; inside an open word it skips its length in bytes."""
+        if not self._cursor:
+            await self._idle_word()
+            self._idle_gen.put(transaction, items=self._word_items, end=True)
+            return
+
+        if self._no_inner_idles:
+            if self._w_has_data:
+                await self._send_word()
+            self._cursor = 0
+            self._run_end()
+            return
+
+        await self._skip(len(transaction))
+
+    async def _skip(self, length: int):
+        """Leave `length` bytes from the cursor empty, rounded up to a block; each word passed ends as it holds data."""
+        word_bytes = self._word_bytes
+        block_bytes = self._block_bytes
+        pos = self._cursor + length
+
+        while pos >= word_bytes:
+            await self._close_word()
+            pos -= word_bytes
+
+        pos = -(-pos // block_bytes) * block_bytes
+        if pos >= word_bytes:
+            await self._close_word()
+            pos = 0
+
+        self._cursor = pos
+        self._run_end()
+
+    def _set_region_values(self, transaction, region: int, put_with: str):
+        """Stage the transaction's values of the per-region optional signals valid with `put_with` in `region`."""
+        for name, signal_put_with, width, _, _ in self._region_signals:
+            if signal_put_with == put_with and name not in ("SOF_POS", "EOF_POS"):
+                value = getattr(transaction, name.lower(), None)
+                if value is not None:
+                    self._w_regions[name][region] = _field_value(value, width, name)
+
+    async def _frame(self, transaction: MfbTransaction):
+        """Lay the frame from the cursor, sending each word it fills."""
+        data = transaction.data
+        length = len(data)
+
+        if not length:
+            return
+
+        region_bytes = self._region_bytes
+        block_bytes = self._block_bytes
+        word_bytes = self._word_bytes
+        item_bytes = self._item_bytes
+        cur = self._cursor
+
+        if not cur:
+            self._run = transaction
+            self._run_items = 0
+
+        # a region that already holds a SOF or an EOF takes no new SOF
+        if cur:
+            region = cur // region_bytes
+            if (self._w_sof | self._w_eof) >> region & 1:
+                cur = (region + 1) * region_bytes
+                if cur >= word_bytes:
+                    await self._send_word()
+                    cur = 0
+
+        region = cur // region_bytes
+        self._w_sof |= 1 << region
+        if "SOF_POS" in self._w_regions:
+            self._w_regions["SOF_POS"][region] = (cur % region_bytes) // block_bytes
+        self._set_region_values(transaction, region, "SOF")
+
+        pos = 0
+        while True:
+            take = min(length - pos, word_bytes - cur)
+            self._w_data |= int.from_bytes(data[pos:pos + take], byteorder="little") << (cur * 8)
+            self._w_items += take // item_bytes
+            self._w_has_data = True
+            for name, _, _ in self._word_signals:
+                value = getattr(transaction, name.lower(), None)
+                if value is not None:
+                    self._w_words[name] = value
+            pos += take
+            cur += take
+
+            if pos >= length:
+                break
+
+            await self._send_word()
+            cur = 0
+
+        region = (cur - 1) // region_bytes
+        self._w_eof |= 1 << region
+        if "EOF_POS" in self._w_regions:
+            self._w_regions["EOF_POS"][region] = ((cur - 1) % region_bytes) // item_bytes
+        self._set_region_values(transaction, region, "EOF")
+
+        cur = -(-cur // block_bytes) * block_bytes
+        if cur >= word_bytes:
+            await self._send_word()
+            cur = 0
+
+        self._cursor = cur
+        self._run_end()
+
+    def _run_end(self):
+        """Report a run of frames to the idle generator once the word it ends in is full; a run starts in an empty word."""
+        if not self._cursor and self._run is not None:
+            self._idle_gen.put(self._run, items=self._run_items, end=True)
+            self._run = None
+
+
+def _region_value(values: list, width: int, x_field: str):
+    """The flat value of per-region fields: an int while every field is an int, else the bit string with X fields."""
+    flat = 0
+
+    for region, value in enumerate(values):
+        if value.__class__ is not int:
+            break
+        flat |= value << (region * width)
+    else:
+        return flat
+
+    return "".join(x_field if v is None else (v if isinstance(v, str) else format(v, f"0{width}b")) for v in reversed(values))
+
+
+def _field_value(value, width: int, name: str):
+    """A transaction's value of a `width`-bit field: an int, or the bit string of a LogicArray."""
+    if isinstance(value, LogicArray):
+        if len(value) != width:
+            raise ValueError(f"{name} of {len(value)} bits does not fit the {width}-bit field of a region")
+        return str(value)
+
+    if not 0 <= value < 1 << width:
+        raise ValueError(f"{name} {value:#x} does not fit the {width}-bit field of a region")
+    return value
+
+
+def _logic(value, width: int) -> LogicArray:
+    """A flat value from _region_value as a LogicArray of `width` bits."""
+    return LogicArray.from_unsigned(value, width) if isinstance(value, int) else LogicArray(value)
