@@ -4,6 +4,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import os
 import shutil
 import subprocess
 
@@ -30,8 +31,19 @@ puts "ip_build_dir [dict get $IP_PARAMS_L IP_BUILD_DIR]"
 """
 
 
-def tclsh(directory, script):
-    result = subprocess.run(["tclsh"], input=script, cwd=directory, capture_output=True, text=True)
+# Runs SetupDesign of the Vivado flow on stand-ins for the Vivado commands it calls, which print their arguments.
+SETUP_DESIGN = VIVADO_INC + tcl_stubs(
+    *"create_project set_param set_property current_project update_ip_catalog config_ip_cache".split()
+) + """
+proc version {args} { return 2025.1 }
+set NB_MAIN_CALLED 1
+array set SYNTH_FLAGS {FPGA xcu55c-fsvh2892-2L-e OUTPUT stub SETUP_FLAGS {}}
+SetupDesign SYNTH_FLAGS
+"""
+
+
+def tclsh(directory, script, env=None):
+    result = subprocess.run(["tclsh"], input=script, cwd=directory, capture_output=True, text=True, env=env)
     assert result.returncode == 0, result.stderr
     return result.stdout.splitlines()
 
@@ -112,3 +124,32 @@ def test_eval_file_sets_the_file_properties(tmp_path):
     ))
     assert "set_property SCOPED_TO_REF top {}" in output
     assert "set_property USED_IN synthesis {}" in output
+
+
+def setup_design(directory, cache_dir=None):
+    env = {k: v for k, v in os.environ.items() if k != "NDK_IP_CACHE_DIR"}
+    if cache_dir is not None:
+        env["NDK_IP_CACHE_DIR"] = str(cache_dir)
+    return tclsh(directory, SETUP_DESIGN, env)
+
+
+def test_ip_cache_is_opt_in(tmp_path):
+    output = setup_design(tmp_path)
+    assert not [line for line in output if "config_ip_cache" in line or "IP synthesis cache" in line]
+
+
+def test_ip_cache(tmp_path):
+    cache = tmp_path / "cache" / "2025.1"
+    output = setup_design(tmp_path, tmp_path / "cache")
+    assert f"config_ip_cache -use_cache_location {cache}" in output
+    assert [line for line in output if line.startswith("set_property IP_CACHE_PERMISSIONS {read write}")]
+    assert f"IP synthesis cache: {cache}" in output
+    assert cache.is_dir()
+    assert not list(cache.iterdir())
+
+
+def test_unusable_ip_cache_is_disabled(tmp_path):
+    (tmp_path / "file").touch()
+    output = setup_design(tmp_path, tmp_path / "file" / "cache")
+    assert not [line for line in output if "config_ip_cache" in line]
+    assert [line for line in output if line.startswith("WARNING: IP synthesis cache disabled")]

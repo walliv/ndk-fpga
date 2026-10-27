@@ -303,6 +303,25 @@ proc SetupDesign {synth_flags} {
         update_ip_catalog
     }
 
+    # Opt-in OOC IP synthesis cache: create_project -force deletes the project-local one, so NDK_IP_CACHE_DIR names
+    # a directory that outlives the project, with a subdirectory per Vivado version.
+    if {[info exists ::env(NDK_IP_CACHE_DIR)] && $::env(NDK_IP_CACHE_DIR) ne ""} {
+        # An unusable directory disables the cache instead of caching somewhere unintended.
+        if {[catch {
+            set ip_cache_dir [file normalize [file join $::env(NDK_IP_CACHE_DIR) [version -short]]]
+            file mkdir $ip_cache_dir
+            set ip_cache_probe [file join $ip_cache_dir .writable]
+            close [open $ip_cache_probe w]
+            file delete -force $ip_cache_probe
+            config_ip_cache -use_cache_location $ip_cache_dir
+            set_property IP_CACHE_PERMISSIONS {read write} [current_project]
+        } ip_cache_err]} {
+            puts "WARNING: IP synthesis cache disabled ($ip_cache_err)"
+        } else {
+            puts "IP synthesis cache: $ip_cache_dir"
+        }
+    }
+
     # Apply user settings
     foreach i $SYNTH_FLAGS(SETUP_FLAGS) {
         if { $i == "USE_XPM_LIBRARIES" } {
