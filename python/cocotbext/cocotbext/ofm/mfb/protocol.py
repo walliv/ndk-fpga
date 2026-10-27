@@ -5,6 +5,7 @@
 from cocotb.types import Logic
 from cocotbext.ofm.base.types import LogicArray, LogicArray2D
 from cocotbext.ofm.base.protocol import BusProtocol, parameter, generic, signal, optional_signal
+from cocotbext.ofm.mfb.utils import get_mfb_params
 from math import log2
 from dataclasses import dataclass
 
@@ -15,6 +16,29 @@ class MfbParams:
     region_size : int = 0
     block_size  : int = 0
     item_width  : int = 0
+
+    @property
+    def region_items(self) -> int:
+        return self.region_size * self.block_size
+
+    @property
+    def word_width(self) -> int:
+        return self.regions * self.region_items * self.item_width
+
+    @property
+    def sof_pos_width(self) -> int:
+        """Bits of the SOF_POS field of one region, 0 for a region of one block."""
+        return (self.region_size - 1).bit_length()
+
+    @property
+    def eof_pos_width(self) -> int:
+        """Bits of the EOF_POS field of one region, 0 for a region of one item."""
+        return (self.region_items - 1).bit_length()
+
+    @classmethod
+    def from_bus(cls, bus, params_dic=None) -> "MfbParams":
+        """Geometry of a bus as get_mfb_params infers it from the signal widths and `params_dic`."""
+        return cls(*get_mfb_params(bus, params_dic)[:4])
 
 
 class MfbProtocol(BusProtocol):
