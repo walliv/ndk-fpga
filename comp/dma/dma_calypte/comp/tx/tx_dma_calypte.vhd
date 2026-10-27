@@ -516,6 +516,11 @@ begin
     --      assert always (fifox_mult_full = '0') abort (RESET)
     --      report "TX_DMA_CALYPTE: The DMA header FIFO is full and the PCIe CQ bus is stopped!";
 
+    -- The PCIe endpoint cannot hold back completer requests, so a stalled CQ bus loses data.
+    -- psl assert_cq_dst_rdy_never_falls :
+    --      assert always (PCIE_CQ_MFB_DST_RDY = '1' -> next (PCIE_CQ_MFB_DST_RDY = '1')) abort (RESET)
+    --      report "TX_DMA_CALYPTE: PCIE_CQ_MFB_DST_RDY fell outside reset, the PCIe endpoint cannot stall CQ!";
+
     dma_hdr_fifo_i : entity work.FIFOX_MULTI
     generic map (
         DATA_WIDTH      => 62 + log2(CHANNELS) + 64,
