@@ -57,6 +57,9 @@ architecture BANKED of TX_DMA_PCIE_TRANS_BUFFER_IMPL is
     -- withhold RD_DATA_VLD for it and the reader retries.
     constant XPM_WRITE_MODE    : string  := "no_change";
 
+    -- XPM accepts UltraRAM in the simple dual port array only with port B read_first or write_first (XPM_MEMORY 40-8).
+    constant XPM_SDP_WRITE_MODE : string := tsel(RAM_TYPE = "URAM", "read_first", XPM_WRITE_MODE);
+
     -- Width of the (registered) target-array index; at least 1 bit even when MEM_ARRAYS = 1
     constant ARR_IDX_W       : natural := max(1, log2(MEM_ARRAYS));
 
@@ -524,7 +527,7 @@ begin
                     -- elaboration assert guarantees this is always 1 here (READ_LATENCY >= 2 +
                     -- MFB_REGIONS=1 is rejected), matching rd_data_vld_reg_p's fixed 1 cycle.
                     READ_LATENCY_B     => XPM_RD_LATENCY,
-                    WRITE_MODE_B       => XPM_WRITE_MODE
+                    WRITE_MODE_B       => XPM_SDP_WRITE_MODE
                 )
                 port map (
                     SLEEP => '0',
