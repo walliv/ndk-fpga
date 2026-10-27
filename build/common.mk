@@ -74,6 +74,23 @@ vhdocl:
 
 COCOTB_GPI_USERS_ENV = $(shell cocotb-config --pygpi-entry-point >/dev/null 2>&1 && printf 'GPI_USERS="%s;%s"' "$$(cocotb-config --libpython)" "$$(cocotb-config --pygpi-entry-point)")
 
+# COVERAGE_EN selects the nvc coverage kinds, or "all", and is read at elaboration only, so changing
+# it needs a re-elaboration. Give independently seeded runs distinct COVERAGE_FILE names, or a later
+# run overwrites the database of an earlier one.
+COVERAGE_EN ?=
+# Kept out of NVC_ELAB_ARGS, so that one given on the make command line does not drop the coverage options.
+NVC_COVERAGE_FLAGS :=
+ifneq ($(COVERAGE_EN),)
+ifeq ($(COVERAGE_EN),all)
+NVC_COVERAGE_FLAGS += --cover
+else
+NVC_COVERAGE_FLAGS += --cover=$(COVERAGE_EN)
+endif
+ifneq ($(COVERAGE_FILE),)
+NVC_COVERAGE_FLAGS += --cover-file=$(COVERAGE_FILE)
+endif
+endif
+
 # NVC_LOAD marks a cocotb run. Its results.xml is removed before the run and must exist afterwards without a
 # failure, as --exit-severity fails a run only on a VHDL or PSL abort, not on a failed test or an unimportable module.
 define clear_cocotb_results
@@ -165,7 +182,7 @@ TOP_LEVEL_ENT_LC := $(shell echo $(TOP_LEVEL_ENT) | tr '[:upper:]' '[:lower:]')
 # Analysis and elaboration of the nvc flow, shared by nvc and nvc-elab.
 define nvc_analyse_elab
 	@nvc --work=nvcwork -H 1G -M 4G --std=2008 -a $(NVC_ANALYSE_FLAGS) $(NVC_PSL_FLAGS) $(filter %.vhd,$(MOD))
-	@nvc --work=nvcwork -H 1G -M 4G -e $(NVC_ELAB_FLAGS) $(NVC_ELAB_ARGS) $(TOP_LEVEL_ENT_LC)
+	@nvc --work=nvcwork -H 1G -M 4G -e $(NVC_ELAB_FLAGS) $(NVC_COVERAGE_FLAGS) $(NVC_ELAB_ARGS) $(TOP_LEVEL_ENT_LC)
 endef
 
 # The cocotb run of the nvc flow, shared by nvc and nvc-run.

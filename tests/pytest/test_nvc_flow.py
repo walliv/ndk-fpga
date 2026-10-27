@@ -241,3 +241,27 @@ def test_run_without_results_fails_make(elaborated, target):
     result = make(elaborated, f"TARGET={target}", "COCOTB_TEST_MODULES=flow_missing")
     assert result.returncode != 0
     assert "cocotb wrote no results.xml" in result.stderr
+
+
+@pytest.mark.parametrize("target", ELABORATING)
+@pytest.mark.parametrize("args, options", [
+    ([], ["-O3"]),
+    (["COVERAGE_EN=all"], ["-O3", "--cover"]),
+    (["COVERAGE_EN=statement,branch", "COVERAGE_FILE=run1.ncdb", "NVC_ELAB_ARGS=-gDATA_WIDTH=64"],
+     ["-O3", "--cover=statement,branch", "--cover-file=run1.ncdb", "-gDATA_WIDTH=64"]),
+])
+def test_coverage_options(bench, target, args, options):
+    _, nvc_args = step(dry_run(bench, f"TARGET={target}", *args), "nvc", "-e")
+    assert nvc_args[nvc_args.index("-e") + 1:-1] == options
+
+
+def run_with_coverage(bench):
+    """Elaborates the MI_PIPE bench with coverage and runs a passing test on it, which leaves run1.ncdb."""
+    assert make(bench, "TARGET=nvc-elab", "COVERAGE_EN=all", "COVERAGE_FILE=run1.ncdb").returncode == 0
+    result = make(bench, "TARGET=nvc-run", "COCOTB_TEST_MODULES=flow_pass")
+    assert result.returncode == 0, result.stderr
+
+
+def test_coverage_database(bench):
+    run_with_coverage(bench)
+    assert (bench / "run1.ncdb").is_file()
