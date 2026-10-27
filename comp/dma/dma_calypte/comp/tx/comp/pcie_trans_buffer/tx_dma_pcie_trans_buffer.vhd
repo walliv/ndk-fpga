@@ -258,11 +258,13 @@ begin
     -- Assertions for verification
     -- =============================================================================================
 
-    -- psl assert_captured_dma_header :
-    --      assert forall it in {0 to (MFB_REGIONS -1)} :
-    --      always ((not (PCIE_MFB_SRC_RDY = '1' or PCIE_MFB_META(it)(META_BE) /= (META_BE_W -1 downto 0 => '0'))) or
-    --              (PCIE_MFB_META(it)(META_IS_DMA_HDR) = "0")) abort(RESET) @rising_edge(CLK)
-    --      report "TX_DMA_PCIE_TRANS_BUFFER: captured DMA header on region  to_string(it) Danger of data overwrite!";
+    captured_dma_hdr_assert_g : for it in 0 to (MFB_REGIONS -1) generate
+    begin
+        -- psl assert_captured_dma_header :
+        --      assert always ((not (PCIE_MFB_SRC_RDY = '1' or PCIE_MFB_META(it)(META_BE) /= (META_BE_W -1 downto 0 => '0'))) or
+        --              (PCIE_MFB_META(it)(META_IS_DMA_HDR) = "0")) abort(RESET) @rising_edge(CLK)
+        --      report "TX_DMA_PCIE_TRANS_BUFFER: captured DMA header on a region. Danger of data overwrite!";
+    end generate;
 
     -- =============================================================================================
     -- Address storage
