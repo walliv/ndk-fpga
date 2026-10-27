@@ -189,6 +189,11 @@ nvc-sim: NVC_LOAD=--load $(shell cocotb-config --lib-name-path vhpi nvc)
 nvc-sim: nvc
 nvc-run: NVC_LOAD=--load $(shell cocotb-config --lib-name-path vhpi nvc)
 
+# nvc needs libpython to load the cocotb VHPI bridge. Its directory goes on LD_LIBRARY_PATH only for the cocotb
+# nvc run step, so it does not shadow system libs for tclsh and other tools.
+NVC_PYTHON_LIBDIR = $(shell python3 -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))' 2>/dev/null)
+NVC_LIBPYTHON_ENV = $(if $(NVC_LOAD),$(if $(NVC_PYTHON_LIBDIR),LD_LIBRARY_PATH=$(NVC_PYTHON_LIBDIR):$$LD_LIBRARY_PATH))
+
 # Extra environment variables for the nvc -r step only, e.g. LD_LIBRARY_PATH for a project, without
 # affecting the tclsh mk-file generation that also uses NETCOPE_ENV.
 NVC_RUN_ENV ?=
@@ -204,7 +209,7 @@ endef
 # The cocotb run of the nvc flow, shared by nvc and nvc-run.
 define nvc_run
 	$(call clear_cocotb_results)
-	@$(NVC_RUN_ENV) $(COCOTB_ENV) nvc --work=nvcwork -H 1G -M 4G -r $(NVC_EXIT_SEVERITY_FLAGS) $(NVC_RUN_ARGS) $(TOP_LEVEL_ENT_LC) $(NVC_WAVE_FLAGS) --ieee-warnings=off $(NVC_LOAD)
+	@$(NVC_LIBPYTHON_ENV) $(NVC_RUN_ENV) $(COCOTB_ENV) nvc --work=nvcwork -H 1G -M 4G -r $(NVC_EXIT_SEVERITY_FLAGS) $(NVC_RUN_ARGS) $(TOP_LEVEL_ENT_LC) $(NVC_WAVE_FLAGS) --ieee-warnings=off $(NVC_LOAD)
 	$(call check_cocotb_results)
 endef
 

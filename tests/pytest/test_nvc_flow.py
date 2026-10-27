@@ -285,3 +285,17 @@ def test_coverage_report_needs_a_database(bench):
     result = make(bench, "coverage-report")
     assert result.returncode != 0
     assert "no .ncdb coverage databases" in result.stderr
+
+
+@pytest.mark.parametrize("target, expected", [("nvc-sim", True), ("nvc-run", True), ("nvc", False)])
+def test_libpython_dir(bench, target, expected):
+    """Only a cocotb run gets the libpython directory, in front of what the environment holds."""
+    libdir = subprocess.check_output(
+        ["python3", "-c", "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))"], text=True).strip()
+    env, _ = step(dry_run(bench, f"TARGET={target}"), "nvc", "-r")
+    assert (env.get("LD_LIBRARY_PATH", "").split(":")[0] == libdir) == expected
+
+
+def test_run_env_follows_libpython(bench):
+    env, _ = step(dry_run(bench, "TARGET=nvc-sim", "NVC_RUN_ENV=LD_LIBRARY_PATH=/opt/lib"), "nvc", "-r")
+    assert env["LD_LIBRARY_PATH"] == "/opt/lib"
