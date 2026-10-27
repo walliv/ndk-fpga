@@ -14,7 +14,8 @@ use work.type_pack.all;
 use work.pcie_axi_meta_pack.all;
 
 -- The Purpose of this component is to convert MFB to AXI bus.
--- Supported is only 512b variant without straddling
+-- Supported are 512b and 256b variants, the 512b one with and without straddling.
+-- Without straddling a word holds one TLP.
 entity PCIE_CC_MFB2AXI is
     generic (
         -- =======================================================================
@@ -37,7 +38,7 @@ entity PCIE_CC_MFB2AXI is
         -- =======================================================================
         AXI_CCUSER_WIDTH  : natural := AXI_CC512_USER_W;
         AXI_DATA_WIDTH    : natural := 512;
-        -- Not supported
+        -- Start and end of a TLP are given by TUSER instead of tlast and tkeep, permitted only for AXI_CCUSER_WIDTH = 81
         STRADDLING        : boolean := false
 
     );
