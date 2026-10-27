@@ -25,6 +25,20 @@ For example, in some configurations (like PCIe IPs), a first packet in a bus wor
 byte 0. When masking would be set to true, after a port switch, some packets can begin on higher
 bytes other than 0 in a bus word which would break a protocol.
 
+Using ARRIVAL_ORDER_EN parameter
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+*False*: The inputs are served in time slices of
+:vhdl:genconstant:`CNT_MAX <mfb_merger_simple.cnt_max>` clock cycles. A frame can leave before a frame of the
+other input that was accepted earlier.
+
+*True*: Frames leave in the order the merger accepted them. One input owns the output at a time and only the
+owner is accepted; the other input sees DST_RDY low. Ownership passes to the other input after a word of the
+owner that leaves no frame open, once the other input has data and the owner either has none or has kept the
+output for CNT_MAX clock cycles with TX DST_RDY while the other input had data. A word is never split, so
+MASKING_EN has no effect in this mode. The other input waits at most CNT_MAX cycles plus the owner's current
+frame.
+
 MFB Merger Simple GEN
 ---------------------
 

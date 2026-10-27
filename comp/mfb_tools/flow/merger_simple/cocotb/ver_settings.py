@@ -13,6 +13,7 @@ SETTINGS = {
         "META_WIDTH": "8",
         "MASKING_EN": "true",
         "CNT_MAX": "64",
+        "ARRIVAL_ORDER_EN": "false",
     },
 
     "nomask": {"MASKING_EN": "false"},
@@ -26,6 +27,7 @@ SETTINGS = {
     # The PCIe geometry DMA_CALYPTE merges its RQ streams in.
     "pcie": {"REGION_SIZE": "1", "ITEM_WIDTH": "32", "META_WIDTH": "16", "MASKING_EN": "false", "CNT_MAX": "8"},
     "2reg": {"REGIONS": "2"},
+    "arrival": {"ARRIVAL_ORDER_EN": "true"},
 
     "_combinations_": {
         "default": (),
@@ -37,5 +39,11 @@ SETTINGS = {
         "pcie_2reg": ("pcie", "2reg"),
         "r4_rs8_cnt4": ("r4_rs8", "cnt4"),
         "r4_rs8_nomask_cnt256": ("r4_rs8", "nomask", "cnt256"),
+        "ao_default": ("arrival",),
+        "ao_r1_rs1_cnt2": ("rs1", "nomask", "cnt2", "arrival"),
+        "ao_r2_rs8_nomask": ("r2_rs8", "nomask", "arrival"),
+        "ao_pcie_1reg": ("pcie", "arrival"),
+        "ao_pcie_2reg": ("pcie", "2reg", "arrival"),
+        "ao_r4_rs8_cnt4": ("r4_rs8", "cnt4", "arrival"),
     },
 }

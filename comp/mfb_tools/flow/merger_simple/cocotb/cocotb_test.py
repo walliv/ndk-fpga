@@ -3,8 +3,8 @@
 # Author(s): Vladislav Valek <vladislav.valek@stud.uni-heidelberg.de>
 #
 # SPDX-License-Identifier: Apache-2.0
-"""Two seeded MFB streams into MFB_MERGER_SIMPLE under random TX DST_RDY. The output must be an interleaving
-of the two input frame sequences, each in its own order, with nothing lost, duplicated or altered."""
+"""Two seeded MFB streams into MFB_MERGER_SIMPLE under random TX DST_RDY: the output must interleave both input frame
+sequences in order, unaltered, and in the arrival order mode keep the order of their accepted SOFs."""
 
 import os
 from collections import deque
@@ -25,7 +25,7 @@ from cocotbext.ofm.ver.scoreboard import MergeChecker, Report
 CLK_NS = 4
 STALL_LIMIT_CYCLES = 20_000
 INT_GENERICS = ("REGIONS", "REGION_SIZE", "BLOCK_SIZE", "ITEM_WIDTH", "META_WIDTH", "CNT_MAX")
-BOOL_GENERICS = ("MASKING_EN",)
+BOOL_GENERICS = ("MASKING_EN", "ARRIVAL_ORDER_EN")
 
 
 class GapGen:
@@ -82,6 +82,9 @@ class MergerBench:
         self.word_items = g["REGIONS"] * g["REGION_SIZE"] * g["BLOCK_SIZE"]
         self.rngs = named_rngs("rst", "pkt0", "pkt1", "gap0", "gap1", "rdy")
         self.frames = int(os.environ.get("MERGER_FRAMES", "3000"))
+        # In the arrival order mode no frame may leave before a frame of the other input accepted earlier. MERGER_ORDER_CHECK
+        # keeps the check of an A/B run on an elaboration without that mode.
+        self.order_check = os.environ.get("MERGER_ORDER_CHECK", "1" if g["ARRIVAL_ORDER_EN"] else "0") == "1"
         self.report = Report(self.log)
         self.cycles = 0
         # Accepted input frames not yet seen on the output, tagged with the cycle of their SOF, and per input the SOF
@@ -137,6 +140,9 @@ class MergerBench:
         if other is not None and (other < arrived or (other == arrived and j == 0)):
             self.overtakes += 1
             self.overtake_wait_max = max(self.overtake_wait_max, self.cycles - other)
+            if self.order_check:
+                self.report(f"output frame {self.merge.out_frames} of input {i} (SOF accepted at cycle {arrived}) left before "
+                            f"a frame of input {j} accepted at cycle {other}")
 
     def _in_window(self):
         """Both inputs still have frames to deliver: the output could be busy every ready cycle."""
@@ -182,7 +188,9 @@ class MergerBench:
         self.build()
         self.log.info(f"cocotbext.ofm imported from {cocotbext.ofm.mfb.fast_drivers.__file__}")
         self.log.info(f"generics {self.gen}, {self.frames} frames per input, "
-                      f"{'saturated inputs' if self.saturate else 'gapped inputs'}, random TX DST_RDY")
+                      f"{'saturated inputs' if self.saturate else 'gapped inputs'}, "
+                      f"random TX DST_RDY, frame order check "
+                      f"{'on' if self.order_check else 'off'}")
         cocotb.start_soon(Clock(d.CLK, CLK_NS, "ns", impl="gpi").start())
         cocotb.start_soon(self.sampler())
         await ClockCycles(d.CLK, self.rngs["rst"].randint(5, 20))
@@ -196,8 +204,15 @@ class MergerBench:
         while self.merge.out_frames < total and not self.report.errors:
             await ClockCycles(d.CLK, 100)
             if self.cycles - self.last_out_cycle > STALL_LIMIT_CYCLES:
+                d = self.dut
+                state = ", ".join(f"{n} {signal_binstr(getattr(d, n))}" for n in
+                                  ("RX_MFB0_SRC_RDY", "RX_MFB0_DST_RDY", "RX_MFB1_SRC_RDY", "RX_MFB1_DST_RDY",
+                                   "TX_MFB_SRC_RDY", "TX_MFB_DST_RDY"))
+                if self.gen["ARRIVAL_ORDER_EN"]:
+                    state += (f", owner {int(d.ao_owner.value)}, registers valid {signal_binstr(d.ao_vld)}, frames open "
+                              f"{signal_binstr(d.ao_open)}")
                 self.report(f"no output frame for {self.cycles - self.last_out_cycle} cycles, {self.merge.out_frames}/"
-                            f"{total} out, inputs accepted {self.in_frames}")
+                            f"{total} out, inputs accepted {self.in_frames}; {state}")
                 break
         await ClockCycles(d.CLK, 20)
         for msg in self.merge.leftovers():

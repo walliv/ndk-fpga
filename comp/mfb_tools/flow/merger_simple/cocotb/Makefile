@@ -9,7 +9,8 @@ TOP_LEVEL_PATH=..
 TARGET=cocotb
 # MFB_MERGER_SIMPLE_GEN's input FIFOs are analysed too; the Xilinx memories need no vendor library beyond unisim.
 NVC_PLATFORM_TAGS := xilinx
-# An RTL error must fail the shard.
+# The merger's PSL checks are part of the bench, and an RTL error must fail the shard.
+NVC_PSL := 1
 NVC_EXIT_SEVERITY := error
 
 CONFIG ?= default
