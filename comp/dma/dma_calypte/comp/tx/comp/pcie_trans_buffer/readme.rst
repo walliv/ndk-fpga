@@ -64,7 +64,7 @@ collision checks flag that case.
 Verification
 ^^^^^^^^^^^^
 
-``cocotb/`` holds a cocotb bench (nvc) with a byte-accurate reference model
+``cocotb/`` holds a cocotb bench with a byte-accurate reference model
 (``trans_buffer_model.py``). It covers aligned and unaligned writes at every DWord offset with
 FirstBE/LastBE patterns, two frames in one bus word to the same or different channels and memory
 arrays, channel buffer wraparound, randomized traffic with reads racing the writes, where a no-op word
@@ -74,29 +74,23 @@ The log names the implementation under test and, for the banked one, counts the 
 read colliding with the other region's write was withheld. Every test reseeds from
 ``COCOTB_RANDOM_SEED``. The toplevel is a test-only wrapper that takes
 :vhdl:genconstant:`READ_BARREL_SHIFTER_EN` as the bit mask ``READ_BARREL_SHIFTER_MASK`` (bit ``p`` is
-element ``p``), since nvc cannot set an array generic from the command line::
+element ``p``), since nvc cannot set an array generic from the command line. ``cocotb/ver_settings.py``
+holds the combinations of generics the bench runs; with ``MEM_PARTITIONING`` false it runs the tests of the
+flat address space::
 
     cd cocotb
-    make                                                    # defaults, AUTO -> banked URAM
-    make NVC_ELAB_ARGS="-gRAM_TYPE=BRAM"                    # per-byte, two memory arrays
-    make NVC_ELAB_ARGS="-gCHANNELS=32 -gPOINTER_WIDTH=13"   # 32 channels: banked URAM
-    make NVC_ELAB_ARGS="-gREAD_BARREL_SHIFTER_MASK=1 -gCHANNELS=16 -gPOINTER_WIDTH=13"  # as TX_DMA_CALYPTE: per-byte
-    make NVC_ELAB_ARGS="-gREAD_BARREL_SHIFTER_MASK=1 -gCHANNELS=32 -gPOINTER_WIDTH=13"  # as TX_DMA_CALYPTE with 32 channels: banked URAM
-    make NVC_ELAB_ARGS="-gREAD_LATENCY=3 -gRAM_TYPE=BRAM"   # banked BRAM, registered read request
-    make NVC_ELAB_ARGS="-gDEVICE=AGILEX"                    # per-byte on Intel, 2 regions
-    make NVC_ELAB_ARGS="-gMEM_PARTITIONING=false -gCHANNELS=2 -gPOINTER_WIDTH=18 -gRAM_TYPE=BRAM"  # banked BRAM, flat
+    make                                          # the "default" combination, AUTO -> banked URAM
+    make GENERICS='-gRAM_TYPE="BRAM"'             # other generics: per-byte, two memory arrays
+    python3 ../../../../../../../../build/scripts/multi_ver/multi_ver_cocotb.py ver_settings.py -n lat3_bram -c  # one combination
 
 ``cocotb_test.py`` drives the 2-region geometry only. ``cocotb_1region_smoke.py`` checks a 1-region
-instance: data integrity of aligned, unaligned and wrapping writes, a read latency of one cycle for
-both :vhdl:genconstant:`RAM_TYPE` values, and that a read racing a write to the same address drops
-``RD_DATA_VLD_A`` in exactly the colliding cycle with the banked buffer and returns the old data with
-the per-byte one::
+instance (combination ``smoke_uram_b8``): data integrity of aligned, unaligned and wrapping writes, a read
+latency of one cycle for both :vhdl:genconstant:`RAM_TYPE` values, and that a read racing a write to the
+same address drops ``RD_DATA_VLD_A`` in exactly the colliding cycle with the banked buffer and returns the
+old data with the per-byte one.
 
-    make COCOTB_TEST_MODULES=cocotb_1region_smoke NVC_ELAB_ARGS="-gMFB_REGIONS=1 \
-        -gREAD_BARREL_SHIFTER_MASK=1 -gCHANNELS=16 -gPOINTER_WIDTH=13 -gRAM_TYPE=URAM"
-
-On Intel the 1-region per-byte buffer uses ``altera_syncram``, which exists only as a SystemVerilog
-model, so it elaborates in nvc but does not simulate there.
+The Intel combinations run under Questa with the Altera simulation libraries; the nvc suite only elaborates them,
+as the 1-region per-byte buffer uses ``altera_syncram``, which exists only as a SystemVerilog model.
 
 General subcomponents
 ---------------------
