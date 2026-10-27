@@ -1,9 +1,9 @@
-# cocotb_test.py: MFB driver behaviour against a sink that drops DST_RDY at random
+# cocotb_test.py: MFB and MVB driver behaviour against a sink that drops DST_RDY at random
 # Copyright (C) 2026 Universitaet Heidelberg, Institut fuer Technische Informatik (ZITI)
 # Author(s): Vladislav Valek <vladislav.valek@stud.uni-heidelberg.de>
 #
 # SPDX-License-Identifier: Apache-2.0
-"""Each driver sends whole-word frames split by scripted idle words while the sink drops DST_RDY at random. Words
+"""Each driver sends whole words split by scripted idle words while the sink drops DST_RDY at random. Words
 must arrive once, in order and held while waiting, and each gap must last exactly its idle words."""
 
 import random
@@ -17,6 +17,8 @@ from cocotbext.ofm.base.transaction import IdleTransactionFactory
 from cocotbext.ofm.mfb.drivers import MFBDriver
 from cocotbext.ofm.mfb.protocol import MfbParams
 from cocotbext.ofm.mfb.transaction import MfbTransaction
+from cocotbext.ofm.mvb.drivers import MVBDriver
+from cocotbext.ofm.mvb.transaction import MvbTrClassic
 from cocotbext.ofm.ver.backpressure import BackpressureConfig, apply_backpressure
 
 CLK_NS = 4
@@ -105,6 +107,10 @@ async def start(dut):
     cocotb.start_soon(Clock(dut.CLK, CLK_NS, "ns").start())
     dut.RX_MFB_DST_RDY.value = 0
     dut.RX_MFB_BE.value = 0
+    dut.RX_MVB_DST_RDY.value = 0
+    # The MVB driver writes its data signals only with its first word, so they start defined here, one clock
+    # ahead: a write of the bench in the timestep of the driver's first word would replace that word.
+    dut.RX_MVB_DATA.value = 0
     await RisingEdge(dut.CLK)
 
 
@@ -122,3 +128,21 @@ async def run_mfb_idle_words_test(dut):
     for f in frames:
         drv.append(MfbTransaction(data=f))
     await run(dut, "RX_MFB", [int.from_bytes(f, "little") for f in frames], gaps[1:] + [0])
+
+
+@cocotb.test()
+async def run_mvb_idle_words_test(dut):
+    """Words of MVB_ITEMS items; the idle generator puts the scripted idle words before each word's first item."""
+    await start(dut)
+    items, width = int(dut.MVB_ITEMS.value), int(dut.MVB_ITEM_WIDTH.value)
+    rng = random.Random(random.getrandbits(64))
+    gaps = [rng.randint(0, GAP_MAX) for _ in range(WORDS)]
+    drv = MVBDriver(dut, "RX_MVB", dut.CLK, generics_prefix="MVB", no_default_rate_limiter=True,
+                    idle_factory=IdleTransactionFactory(1, 1))
+    drv.set_idle_generator(ScriptedIdles([g if k == 0 else 0 for g in gaps for k in range(items)]))
+    values = [[rng.getrandbits(width) for _ in range(items)] for _ in range(WORDS)]
+    for word in values:
+        for v in word:
+            drv.append(MvbTrClassic(data=v))
+    words = [sum(v << (k * width) for k, v in enumerate(word)) for word in values]
+    await run(dut, "RX_MVB", words, gaps[1:] + [0])

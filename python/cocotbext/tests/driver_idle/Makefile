@@ -1,4 +1,4 @@
-# Makefile: cocotb bench of the MFB drivers
+# Makefile: cocotb bench of the MFB and MVB drivers
 # Copyright (C) 2026 Universitaet Heidelberg, Institut fuer Technische Informatik (ZITI)
 # Author(s): Vladislav Valek <vladislav.valek@stud.uni-heidelberg.de>
 #
