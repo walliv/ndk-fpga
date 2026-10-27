@@ -67,10 +67,12 @@ architecture FULL of SHAKEDOWN is
     signal s_merge_dout_arr : slv_array_t(OUTPUTS-1 downto 0)(DATA_WIDTH+1-1 downto 0);
     signal s_dout_arr       : slv_array_t(OUTPUTS-1 downto 0)(DATA_WIDTH-1 downto 0);
 
+    -- psl default clock is rising_edge(CLK);
+
 begin
 
     -- psl assert_input_less_output :
-    --      assert always ((DIN_SRC_RDY = '1') -> (count_ones(DIN_VLD) <= OUTPUTS)) abort (RESET) @rising_edge(CLK)
+    --      assert always ((DIN_SRC_RDY = '1') -> (count_ones(DIN_VLD) <= OUTPUTS)) abort (RESET)
     --      report "[SHAKEDOWN] There are more items valid on DIN interface than DOUT ITEMS, items might be getting lost!";
 
     s_din_arr <= slv_array_downto_deser(DIN,INPUTS,DATA_WIDTH);
