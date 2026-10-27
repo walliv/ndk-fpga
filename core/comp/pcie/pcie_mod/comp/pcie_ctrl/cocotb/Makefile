@@ -11,4 +11,7 @@ TARGET=cocotb
 .PHONY: all
 all: comp
 
+# make suite: every combination of ver_settings.py times every cocotb test, in parallel nvc runs.
+include ../../../../../../../build/scripts/multi_ver/nvc_suite.mk
+
 include ../../../../../../../build/Makefile
