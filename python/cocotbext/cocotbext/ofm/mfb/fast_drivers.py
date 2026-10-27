@@ -25,9 +25,10 @@ _DEFAULT_VLD_GEN = object()
 
 
 def meta_logic(meta: Union[bytes, LogicArray, int], width: int) -> LogicArray:
-    """The META of a transaction, given as bytes, a LogicArray or an int, as a LogicArray of `width` bits."""
+    """The META of a transaction, given as bytes, a LogicArray or an int, as a LogicArray of `width` bits. Bytes are
+    little-endian, as DATA and the META of drivers.MFBDriver."""
     if isinstance(meta, bytes):
-        return LogicArray.from_bytes(meta, byteorder="big")
+        return LogicArray.from_unsigned(int.from_bytes(meta, byteorder="little"), width)
     if isinstance(meta, LogicArray):
         return meta
     if isinstance(meta, int):
