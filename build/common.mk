@@ -8,7 +8,7 @@
 RM ?= rm -f
 TCLSH ?= tclsh
 
-.PHONY: simulation vhdocl cocotb clean_common
+.PHONY: simulation vhdocl cocotb clean_common coverage-report
 
 GEN_MK_TARGETS += simulation vhdocl cocotb ghdl-sim nvc nvc-sim nvc-elab nvc-run
 simulation: GEN_MK_ENV=SIM_SCRIPT=$(SIM_SCRIPT) SIM_FLAGS=$(SIM_FLAGS)
@@ -20,6 +20,20 @@ nvc nvc-sim nvc-elab nvc-run: NETCOPE_ENV+=PLATFORM_TAGS="$(NVC_PLATFORM_TAGS)"
 clean_common:
 	-@$(RM) -r nvcwork/ $(NETCOPE_TEMP)
 	-@$(RM) DevTree_paths.txt vhdocl.doc vhdocl.conf
+
+# Merges every *.ncdb under the current directory and renders an HTML report. It needs no
+# Modules.tcl, so it is defined outside the two-phase GEN_MK_TARGETS machinery.
+COVERAGE_MERGED     ?= coverage_merged.ncdb
+COVERAGE_REPORT_DIR ?= coverage_report
+coverage-report:
+	$(eval NCDB_FILES := $(shell find . -name '*.ncdb' -not -name '$(notdir $(COVERAGE_MERGED))'))
+	@if [ -z "$(NCDB_FILES)" ]; then \
+		echo "*** no .ncdb coverage databases found under $(CURDIR) -- run with COVERAGE_EN=... first ***" >&2; \
+		exit 1; \
+	fi
+	nvc --cover-merge -o $(COVERAGE_MERGED) $(NCDB_FILES)
+	nvc --cover-report -o $(COVERAGE_REPORT_DIR) $(COVERAGE_MERGED)
+	@echo "Coverage report: $(COVERAGE_REPORT_DIR)/index.html (merged from: $(NCDB_FILES))"
 
 MAKE_REC = $(MAKE) -f $(firstword $(MAKEFILE_LIST)) --no-print-directory $(NETCOPE_ENV)
 

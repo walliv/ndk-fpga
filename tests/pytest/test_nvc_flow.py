@@ -265,3 +265,16 @@ def run_with_coverage(bench):
 def test_coverage_database(bench):
     run_with_coverage(bench)
     assert (bench / "run1.ncdb").is_file()
+
+
+def test_coverage_report(bench):
+    run_with_coverage(bench)
+    result = make(bench, "coverage-report")
+    assert result.returncode == 0, result.stderr
+    assert (bench / "coverage_report" / "index.html").is_file()
+
+
+def test_coverage_report_needs_a_database(bench):
+    result = make(bench, "coverage-report")
+    assert result.returncode != 0
+    assert "no .ncdb coverage databases" in result.stderr
