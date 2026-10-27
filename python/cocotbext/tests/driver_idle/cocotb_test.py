@@ -16,6 +16,9 @@ from cocotb.clock import Clock
 from cocotb.triggers import ClockCycles, ReadOnly, RisingEdge
 from cocotb.types import LogicArray
 
+from cocotbext.ofm.base.generators import IdleGenerator
+from cocotbext.ofm.base.transaction import IdleTransactionFactory
+from cocotbext.ofm.mfb.drivers import MFBDriver
 from cocotbext.ofm.mfb.fast_drivers import MFBDriver as FastMFBDriver
 from cocotbext.ofm.mfb.protocol import MfbParams
 from cocotbext.ofm.mfb.transaction import MfbTransaction
@@ -27,6 +30,17 @@ GAP_MAX = 4
 DST_RDY_HIGH = 0.4
 # Cycles per word with every gap at GAP_MAX and DST_RDY high only in every tenth cycle.
 CYCLES_PER_WORD_MAX = GAP_MAX + 10
+
+
+class ScriptedIdles(IdleGenerator):
+    """Idle items before each transaction, taken from a list, then none."""
+
+    def __init__(self, counts):
+        super().__init__()
+        self._counts = iter(counts)
+
+    def get(self, transaction, *args, **kwargs):
+        return next(self._counts, 0)
 
 
 async def sample(dut, prefix, cycles):
@@ -113,6 +127,22 @@ async def run_fast_mfb_idle_words_test(dut):
     for f in frames:
         drv.append(f)
     await run(dut, "RX_MFB", [int.from_bytes(f, "little") for f in frames], gaps)
+
+
+@cocotb.test()
+async def run_mfb_idle_words_test(dut):
+    """One-word frames; the idle generator puts the scripted idle transactions before each frame."""
+    await start(dut)
+    geo = mfb_geometry(dut)
+    rng = random.Random(random.getrandbits(64))
+    gaps = [rng.randint(0, GAP_MAX) for _ in range(WORDS)]
+    drv = MFBDriver(dut, "RX_MFB", dut.CLK, generics_prefix="MFB", no_default_rate_limiter=True,
+                    idle_factory=IdleTransactionFactory(1, 1))
+    drv.set_idle_generator(ScriptedIdles(gaps))
+    frames = [rng.randbytes(geo.word_width // 8) for _ in range(WORDS)]
+    for f in frames:
+        drv.append(MfbTransaction(data=f))
+    await run(dut, "RX_MFB", [int.from_bytes(f, "little") for f in frames], gaps[1:] + [0])
 
 
 async def collect_words(dut, words):
