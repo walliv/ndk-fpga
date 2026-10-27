@@ -279,6 +279,47 @@ async def run_mfb_geometry_test(dut):
         assert words == [(int.from_bytes(frame, "little"), eof_pos)], f"geometry from {form}: words {words}"
 
 
+async def collect_frame_words(dut, words):
+    """Every accepted MFB word as (DATA, SOF, EOF), from the word on the bus in the timestep it is started in."""
+    while True:
+        await ReadOnly()
+        if int(dut.RX_MFB_SRC_RDY.value) and int(dut.RX_MFB_DST_RDY.value):
+            words.append((int(dut.RX_MFB_DATA.value), int(dut.RX_MFB_SOF.value), int(dut.RX_MFB_EOF.value)))
+        await RisingEdge(dut.CLK)
+
+
+@cocotb.test()
+async def run_mfb_sof_after_eof_test(dut):
+    """A frame starts in the region where the previous one ends when it does not end there as well; one that would
+    end there too starts in the next region."""
+    await start(dut)
+    geo = mfb_geometry(dut)
+    word_bytes = geo.word_width // 8
+    region_bytes = word_bytes // geo.regions
+    block_bytes = geo.block_size * geo.item_width // 8
+    dut.RX_MFB_DST_RDY.value = 1
+    rng = random.Random(random.getrandbits(64))
+    drv = MFBDriver(dut, "RX_MFB", dut.CLK, generics_prefix="MFB", idle_generator=IdleGenerator())
+    words = []
+    cocotb.start_soon(collect_frame_words(dut, words))
+
+    # A ends in block 0 of the second word, B fills the rest of that region and ends in the next one, where C,
+    # a block long, cannot follow it.
+    a = rng.randbytes(word_bytes + block_bytes)
+    b = rng.randbytes(region_bytes)
+    c = rng.randbytes(block_bytes)
+    for frame in (a, b):
+        drv.append(MfbTransaction(data=frame))
+    await drv.send(MfbTransaction(data=c))
+    await ClockCycles(dut.CLK, 2)
+
+    stream = a + b + bytes(word_bytes - region_bytes - block_bytes) + c
+    expected = [(int.from_bytes(stream[0:word_bytes], "little"), 0b01, 0b00),
+                (int.from_bytes(stream[word_bytes:2 * word_bytes], "little"), 0b01, 0b11),
+                (int.from_bytes(stream[2 * word_bytes:], "little"), 0b01, 0b01)]
+    assert words == expected, f"words as (DATA, SOF, EOF): {[(hex(d), s, e) for d, s, e in words]}"
+
+
 @cocotb.test()
 async def run_mvb_idle_words_test(dut):
     """Words of MVB_ITEMS items; the idle generator puts the scripted idle words before each word's first item."""

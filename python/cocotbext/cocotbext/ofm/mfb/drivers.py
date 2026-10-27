@@ -431,10 +431,10 @@ class MFBDriver(ModularBusDriver):
             self._run = transaction
             self._run_items = 0
 
-        # a region that already holds a SOF or an EOF takes no new SOF
+        # a region takes a second SOF never and a SOF after an EOF only for a frame that does not end there too
         if cur:
             region = cur // region_bytes
-            if (self._w_sof | self._w_eof) >> region & 1:
+            if self._w_sof >> region & 1 or (self._w_eof >> region & 1 and cur % region_bytes + length <= region_bytes):
                 cur = (region + 1) * region_bytes
                 if cur >= word_bytes:
                     await self._send_word()
