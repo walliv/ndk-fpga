@@ -11,6 +11,7 @@ use IEEE.numeric_std.all;
 
 use work.math_pack.all;
 use work.type_pack.all;
+use work.pcie_axi_meta_pack.all;
 
 -- The Purpose of this component is to convert MFB to AXI bus.
 -- Supported is only 512b variant without straddling
@@ -34,7 +35,7 @@ entity PCIE_CC_MFB2AXI is
         -- CC_USER_WIDTH = 81 for Gen3x16 PCIe - with straddling
         -- CC_USER_WIDTH = 33 for Gen3x8 PCIe - without straddling
         -- =======================================================================
-        AXI_CCUSER_WIDTH  : natural := 81;
+        AXI_CCUSER_WIDTH  : natural := AXI_CC512_USER_W;
         AXI_DATA_WIDTH    : natural := 512;
         -- Not supported
         STRADDLING        : boolean := false
@@ -102,13 +103,13 @@ architecture FULL of PCIE_CC_MFB2AXI is
     signal cc_usr_sop_ptr : slv_array_t(1 downto 0)(1 downto 0);
     signal cc_usr_eop_ptr : slv_array_t(1 downto 0)(3 downto 0);
 begin
-    assert ((MFB_REGIONS = 1 and AXI_CCUSER_WIDTH = 33 and not STRADDLING)
-            or (MFB_REGIONS = 2 and AXI_CCUSER_WIDTH = 81 and STRADDLING)
-            or (MFB_REGIONS = 2 and AXI_CCUSER_WIDTH = 81 and not STRADDLING))
+    assert ((MFB_REGIONS = 1 and AXI_CCUSER_WIDTH = AXI_CC256_USER_W and not STRADDLING)
+            or (MFB_REGIONS = 2 and AXI_CCUSER_WIDTH = AXI_CC512_USER_W and STRADDLING)
+            or (MFB_REGIONS = 2 and AXI_CCUSER_WIDTH = AXI_CC512_USER_W and not STRADDLING))
         report "PCIE_CC_MFB2AXI: Unsupported AXI CC USER port width, the supported are: 33 (when MFB_REGIONS = 1), 81 (when MFB_REGIONS = 2)"
         severity FAILURE;
 
-    axi_512b_g: if (MFB_REGIONS = 2 and AXI_CCUSER_WIDTH = 81) generate
+    axi_512b_g: if (MFB_REGIONS = 2 and AXI_CCUSER_WIDTH = AXI_CC512_USER_W) generate
         straddling_en_g : if (STRADDLING) generate
             cc_keep <= (others => '0');
 
@@ -154,13 +155,14 @@ begin
                 end if;
             end process;
 
-            cc_user <= (64 downto 0 => '0')
-                       & cc_usr_eop_ptr(1)
-                       & cc_usr_eop_ptr(0)
-                       & cc_usr_eop
-                       & cc_usr_sop_ptr(1)
-                       & cc_usr_sop_ptr(0)
-                       & cc_usr_sop;
+            cc_user(AXI_CC512_SOP)       <= cc_usr_sop;
+            cc_user(AXI_CC512_SOP_POS_0) <= cc_usr_sop_ptr(0);
+            cc_user(AXI_CC512_SOP_POS_1) <= cc_usr_sop_ptr(1);
+            cc_user(AXI_CC512_EOP)       <= cc_usr_eop;
+            cc_user(AXI_CC512_EOP_POS_0) <= cc_usr_eop_ptr(0);
+            cc_user(AXI_CC512_EOP_POS_1) <= cc_usr_eop_ptr(1);
+            cc_user(AXI_CC512_DISCON_O)  <= '0';
+            cc_user(AXI_CC512_PARITY)    <= (others => '0');
 
         else generate
             cc_user <= (others => '0');
