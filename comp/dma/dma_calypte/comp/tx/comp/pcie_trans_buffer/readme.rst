@@ -81,6 +81,7 @@ element ``p``), since nvc cannot set an array generic from the command line::
     make NVC_ELAB_ARGS="-gCHANNELS=32 -gPOINTER_WIDTH=13"   # 32 channels: banked URAM
     make NVC_ELAB_ARGS="-gREAD_BARREL_SHIFTER_MASK=1 -gCHANNELS=16 -gPOINTER_WIDTH=13"  # as TX_DMA_CALYPTE: per-byte
     make NVC_ELAB_ARGS="-gREAD_BARREL_SHIFTER_MASK=1 -gCHANNELS=32 -gPOINTER_WIDTH=13"  # as TX_DMA_CALYPTE with 32 channels: banked URAM
+    make NVC_ELAB_ARGS="-gREAD_LATENCY=3 -gRAM_TYPE=BRAM"   # banked BRAM, registered read request
     make NVC_ELAB_ARGS="-gDEVICE=AGILEX"                    # per-byte on Intel, 2 regions
     make NVC_ELAB_ARGS="-gMEM_PARTITIONING=false -gCHANNELS=2 -gPOINTER_WIDTH=18 -gRAM_TYPE=BRAM"  # banked BRAM, flat
 

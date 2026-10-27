@@ -49,8 +49,9 @@ entity TX_DMA_PCIE_TRANS_BUFFER is
         -- widens by log2(CHANNELS) bits.
         MEM_PARTITIONING : boolean := TRUE;
 
-        -- Cycles from RD_EN_* to RD_DATA_VLD_*: 1 (default); 2 adds XPM's output register, on the TDP
-        -- (2-region) read path only.
+        -- Cycles from RD_EN_* to RD_DATA_VLD_*: 1 (default); 2 adds XPM's output register; 3 also
+        -- registers the REQUEST (rd_req_reg_g), keeping the address decode out of the requester's
+        -- cycle. 2 and 3 exist on the TDP (2-region) read path only.
         READ_LATENCY : natural := 1
     );
     port (
