@@ -19,7 +19,7 @@ from cocotbext.ofm.base.generators import IdleGenerator, OnOffIdleGenerator
 from cocotbext.ofm.base.transaction import IdleTransactionFactory
 from cocotbext.ofm.mfb.drivers import MFBDriver
 from cocotbext.ofm.mfb.protocol import MfbParams
-from cocotbext.ofm.mfb.transaction import MfbTransaction
+from cocotbext.ofm.mfb.transaction import MfbTransaction, MfbWord
 from cocotbext.ofm.mvb.drivers import MVBDriver
 from cocotbext.ofm.mvb.transaction import MvbTrClassic
 from cocotbext.ofm.ver.backpressure import BackpressureConfig, apply_backpressure
@@ -383,6 +383,60 @@ async def run_mfb_transaction_forms_test(dut):
     assert words == [(int.from_bytes(p, "little"), 1, 1 << (geo.regions - 1)) for p in payloads], \
         f"words as (DATA, SOF, EOF): {[(hex(d), s, e) for d, s, e in words]}"
     assert drv.frame_cnt == len(forms) and drv.item_cnt == len(forms) * word_bytes * 8 // geo.item_width
+
+
+async def collect_bus_words(dut, words):
+    """Every accepted MFB word as the bit strings of its signals, from the word on the bus in the timestep it is started
+    in."""
+    while True:
+        await ReadOnly()
+        if int(dut.RX_MFB_SRC_RDY.value) and int(dut.RX_MFB_DST_RDY.value):
+            words.append(tuple(str(getattr(dut, f"RX_MFB_{s}").value) for s in ("DATA", "SOF", "EOF", "SOF_POS", "EOF_POS", "BE")))
+        await RisingEdge(dut.CLK)
+
+
+@cocotb.test()
+async def run_mfb_word_test(dut):
+    """MfbWord words go on the bus as given, after the open word of a frame; item_cnt and the default BE follow their
+    SOF, EOF and positions."""
+    await start(dut)
+    geo = mfb_geometry(dut)
+    word_bytes = geo.word_width // 8
+    region_items = geo.region_size * geo.block_size
+    eof_width = len(dut.RX_MFB_EOF_POS) // geo.regions
+    dut.RX_MFB_DST_RDY.value = 1
+    rng = random.Random(random.getrandbits(64))
+    drv = MFBDriver(dut, "RX_MFB", dut.CLK, generics_prefix="MFB", idle_generator=IdleGenerator())
+    words = []
+    cocotb.start_soon(collect_bus_words(dut, words))
+
+    frame = rng.randbytes(3)
+    first = MfbWord(data=rng.getrandbits(geo.word_width), sof=0b01, sof_pos=1)
+    last = MfbWord(data=rng.getrandbits(geo.word_width), eof=1 << (geo.regions - 1),
+                   eof_pos=5 << ((geo.regions - 1) * eof_width), be=0x1234)
+    drv.append(MfbTransaction(data=frame))
+    drv.append(first)
+    await drv.send(last)
+    await ClockCycles(dut.CLK, 2)
+
+    def bits(value, width):
+        return format(value, f"0{width}b")
+
+    sof_pos_x = "X" * len(dut.RX_MFB_SOF_POS)
+    eof_pos_x = "X" * len(dut.RX_MFB_EOF_POS)
+    # the first word covers the region of its SOF from block 1 on and every region after it
+    first_be = ((1 << word_bytes) - 1) & ~((1 << geo.block_size * geo.item_width // 8) - 1)
+    expected = [
+        (bits(int.from_bytes(frame, "little"), geo.word_width), bits(1, geo.regions), bits(1, geo.regions),
+         sof_pos_x[:-2] + "00", eof_pos_x[:-eof_width] + bits(2, eof_width), bits((1 << 3) - 1, word_bytes)),
+        (bits(first.data, geo.word_width), bits(1, geo.regions), bits(0, geo.regions), bits(1, len(sof_pos_x)),
+         eof_pos_x, bits(first_be, word_bytes)),
+        (bits(last.data, geo.word_width), bits(0, geo.regions), bits(last.eof, geo.regions), sof_pos_x,
+         bits(last.eof_pos, len(eof_pos_x)), bits(0x1234, word_bytes)),
+    ]
+    assert words == expected, f"words as (DATA, SOF, EOF, SOF_POS, EOF_POS, BE): {words}"
+    assert drv.frame_cnt == 2
+    assert drv.item_cnt == 3 + (geo.regions * region_items - geo.block_size) + (geo.regions - 1) * region_items + 6
 
 
 @cocotb.test()

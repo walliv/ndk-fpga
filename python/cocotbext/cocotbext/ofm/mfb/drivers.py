@@ -19,7 +19,7 @@ from cocotbext.ofm.base.drivers import ModularBusDriver
 from cocotbext.ofm.base.transaction import IdleTransaction
 from cocotbext.ofm.base.types import LogicArray2D
 from cocotbext.ofm.mfb.protocol import MfbParams, MfbProtocol
-from cocotbext.ofm.mfb.transaction import MfbTransaction
+from cocotbext.ofm.mfb.transaction import MfbTransaction, MfbWord
 from cocotbext.ofm.mfb.utils import get_mfb_params
 
 
@@ -80,7 +80,7 @@ class MFBDriver(ModularBusDriver):
     @property
     def pending(self) -> int:
         """Frames appended and not yet accepted by the sink."""
-        return self._appended - self._frame_cnt
+        return self._appended - self._done
 
     def append(self, transaction: MfbTransaction | IdleTransaction, callback=None, event: Event | None = None):
         """Queue a frame, an MfbTransaction or plain bytes or LogicArray, or an IdleTransaction for a gap of its length
@@ -110,7 +110,7 @@ class MFBDriver(ModularBusDriver):
         awaiting a dropped frame never returns, so its task is to be cancelled."""
         self._queue.clear()
         self._waiters.clear()
-        self._appended = self._frame_cnt
+        self._appended = self._done
         self._cursor = 0
         self._run = None
         self._clear_word()
@@ -143,6 +143,7 @@ class MFBDriver(ModularBusDriver):
         self._word_bytes     : int = self._regions * self._region_bytes
         self._word_items     : int = self._regions * self._region_items
         self._word_blocks    : int = self._regions * bus.REGION_SIZE
+        self._block_size     : int = bus.BLOCK_SIZE
 
         self._init_signals()
 
@@ -153,6 +154,9 @@ class MFBDriver(ModularBusDriver):
         self._epoch    : int   = 0
         self._cursor   : int   = 0
         self._appended : int   = 0
+        # the frames and words of the queue that the sink has accepted
+        self._done     : int   = 0
+        self._word_in_frame    = False
         # (frame count at which it is accepted, frame, callback, event) of each frame someone waits for
         self._waiters  : deque = deque()
         self._frame_cnt: int   = 0
@@ -188,6 +192,7 @@ class MFBDriver(ModularBusDriver):
                 self._word_signals.append((name, put_with, "X" * len(descriptor.target(bus))))
 
         self._region_names = tuple(s[0] for s in self._region_signals)
+        self._field_width = {s[0]: s[2] for s in self._region_signals}
 
         # a BE of another width, e.g. the first and last byte enables of PCIe, is not this one and is left alone
         self._has_be = "BE" in bus.signals and len(bus.signals["BE"].target(bus)) == self._word_bytes
@@ -216,6 +221,7 @@ class MFBDriver(ModularBusDriver):
         self._w_sof      : int  = 0
         self._w_eof      : int  = 0
         self._w_items    : int  = 0
+        self._w_done     : int  = 0
         self._w_has_data : bool = False
         self._w_regions  : dict = {name: [None] * regions for name in self._region_names}
         self._w_words    : dict = {}
@@ -270,18 +276,19 @@ class MFBDriver(ModularBusDriver):
 
         self._item_cnt += self._w_items
         self._run_items += self._w_items
-        eofs = self._w_eof.bit_count()
+        self._frame_cnt += self._w_eof.bit_count()
+        done = self._w_done
         self._clear_word()
 
-        if eofs:
-            self._frame_cnt += eofs
+        if done:
+            self._done += done
             self._release()
 
     def _release(self):
         """Wake the senders of the accepted frames; raises _Aborted if one of their callbacks called abort()."""
         waiters = self._waiters
 
-        while waiters and waiters[0][0] <= self._frame_cnt:
+        while waiters and waiters[0][0] <= self._done:
             _, transaction, callback, event = waiters.popleft()
             if event is not None:
                 event.set()
@@ -365,6 +372,10 @@ class MFBDriver(ModularBusDriver):
 
             if isinstance(transaction, IdleTransaction):
                 await self._idle(transaction)
+                continue
+
+            if isinstance(transaction, MfbWord):
+                await self._word(transaction)
                 continue
 
             assert isinstance(transaction, (MfbTransaction, bytes, bytearray, LogicArray)), \
@@ -502,6 +513,7 @@ class MFBDriver(ModularBusDriver):
 
         region = (cur - 1) // region_bytes
         self._w_eof |= 1 << region
+        self._w_done += 1
         if "EOF_POS" in self._w_regions:
             self._w_regions["EOF_POS"][region] = ((cur - 1) % region_bytes) // item_bytes
         self._set_region_values(fields, region, "EOF")
@@ -513,6 +525,84 @@ class MFBDriver(ModularBusDriver):
 
         self._cursor = cur
         self._run_end()
+
+    async def _word(self, word: MfbWord):
+        """Send a word as given, after the gap the idle generator asks for; an open word of frames is sent first."""
+        if self._cursor:
+            if self._w_has_data:
+                await self._send_word()
+            self._cursor = 0
+            self._run_end()
+
+        gen = self._idle_gen
+        if gen.frame_gaps:
+            for _ in range(-(-gen.get(word) // self._word_blocks)):
+                await self._idle_word()
+                gen.put(IdleTransaction(), items=self._word_items, end=True)
+        else:
+            for _ in range(gen.get(word)):
+                await self._idle(self._idle_fac.make())
+
+        self._w_data = word.data
+        self._w_sof = word.sof
+        self._w_eof = word.eof
+        for name, _, width, _, _ in self._region_signals:
+            value = getattr(word, name.lower(), None)
+            if value is not None:
+                self._w_regions[name] = [value >> (region * width) & (1 << width) - 1 for region in range(self._regions)]
+
+        items, enables = self._word_coverage(word)
+        if self._has_be:
+            self._w_be = enables if word.be is None else word.be
+        self._w_items = items
+        self._w_has_data = True
+        self._w_done = 1
+
+        if gen.frame_gaps:
+            gen.put(word, items=items, blocks=self._word_blocks, end=bool(word.eof))
+        else:
+            gen.put(word, items=items, end=True)
+
+        await self._send_word()
+
+    def _word_coverage(self, word: MfbWord):
+        """The items of the frames in a word and the mask of their bytes, from its SOF, EOF and positions; a missing
+        position is the first block of the region for SOF and its last item for EOF."""
+        region_items = self._region_items
+        sof_width = self._field_width.get("SOF_POS", 0)
+        eof_width = self._field_width.get("EOF_POS", 0)
+        spans = []
+        in_frame = self._word_in_frame
+
+        for region in range(self._regions):
+            sof = word.sof >> region & 1
+            eof = word.eof >> region & 1
+            first = last = 0
+            if sof and word.sof_pos is not None:
+                first = (word.sof_pos >> region * sof_width & (1 << sof_width) - 1) * self._block_size
+            last = region_items - 1
+            if eof and word.eof_pos is not None:
+                last = word.eof_pos >> region * eof_width & (1 << eof_width) - 1
+
+            if in_frame:
+                spans.append((region, 0, last if eof else region_items - 1))
+                in_frame = not eof
+                if eof and sof and first > last:
+                    spans.append((region, first, region_items - 1))
+                    in_frame = True
+            elif sof and eof and last >= first:
+                spans.append((region, first, last))
+            elif sof:
+                spans.append((region, first, region_items - 1))
+                in_frame = True
+
+        self._word_in_frame = in_frame
+        item_bytes = self._item_bytes
+        items = sum(hi - lo + 1 for _, lo, hi in spans)
+        mask = 0
+        for region, lo, hi in spans:
+            mask |= ((1 << (hi - lo + 1) * item_bytes) - 1) << (region * region_items + lo) * item_bytes
+        return items, mask
 
     def _run_end(self):
         """Report a run of frames to the idle generator once the word it ends in is full; a run starts in an empty word."""
