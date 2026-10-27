@@ -89,3 +89,9 @@ class Axi4Stream(BusMonitor):
 
                     self._recv(word)
                     self.frame_cnt += 1
+
+
+class Axi4StreamV(Axi4Stream):
+    """Axi4Stream on signals named after the AMD PCIe IP ports (``<name>_VALID``, ``<name>_DATA``, ...)."""
+    _signals = {"TVALID": "VALID"}
+    _optional_signals = {"TREADY": "READY", "TDATA": "DATA", "TLAST": "LAST", "TKEEP": "KEEP", "TUSER": "USER"}
