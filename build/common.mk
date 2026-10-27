@@ -180,6 +180,8 @@ endif
 # Default: allow signal collapse + -O3 (much faster on large designs).
 # Set NVC_NO_COLLAPSE=1 for wave debug or if a small TB regresses.
 NVC_ELAB_FLAGS ?= -O3
+# GENERICS ("-gNAME=VALUE ...") sets the generics as in the Questa flow, which multi_ver_cocotb.py relies on.
+GENERICS ?=
 ifeq ($(NVC_NO_COLLAPSE),1)
 NVC_ELAB_FLAGS += --no-collapse
 endif
@@ -196,7 +198,7 @@ TOP_LEVEL_ENT_LC := $(shell echo $(TOP_LEVEL_ENT) | tr '[:upper:]' '[:lower:]')
 # Analysis and elaboration of the nvc flow, shared by nvc and nvc-elab.
 define nvc_analyse_elab
 	@nvc --work=nvcwork -H 1G -M 4G --std=2008 -a $(NVC_ANALYSE_FLAGS) $(NVC_PSL_FLAGS) $(filter %.vhd,$(MOD))
-	@nvc --work=nvcwork -H 1G -M 4G -e $(NVC_ELAB_FLAGS) $(NVC_COVERAGE_FLAGS) $(NVC_ELAB_ARGS) $(TOP_LEVEL_ENT_LC)
+	@nvc --work=nvcwork -H 1G -M 4G -e $(NVC_ELAB_FLAGS) $(NVC_COVERAGE_FLAGS) $(GENERICS) $(NVC_ELAB_ARGS) $(TOP_LEVEL_ENT_LC)
 endef
 
 # The cocotb run of the nvc flow, shared by nvc and nvc-run.

@@ -182,6 +182,13 @@ def test_elab_args(bench, target):
     assert "-gDATA_WIDTH=64" in args
 
 
+@pytest.mark.parametrize("target", ELABORATING)
+def test_generics(bench, target):
+    """GENERICS as multi_ver_cocotb.py passes it, with the trailing space."""
+    _, args = step(dry_run(bench, f"TARGET={target}", "GENERICS=-gDATA_WIDTH=64 -gITEMS=8 "), "nvc", "-e")
+    assert "-gDATA_WIDTH=64" in args and "-gITEMS=8" in args
+
+
 @pytest.mark.parametrize("target", RUNNING)
 def test_run_args(bench, target):
     _, args = step(dry_run(bench, f"TARGET={target}", "NVC_RUN_ARGS=--stop-time=1us"), "nvc", "-r")
