@@ -37,6 +37,11 @@ def signal_int(handle) -> int:
     return int(signal_binstr(handle), 2)
 
 
+def signal_handshake(src_rdy, dst_rdy) -> bool:
+    """True when both handshake signals, read through signal_binstr, are 1: the word on the bus is transferred."""
+    return signal_binstr(src_rdy) == "1" and signal_binstr(dst_rdy) == "1"
+
+
 def binstr_resolvable(binstr: str) -> bool:
     """cocotb's is_resolvable on a bit string: every bit a 0, 1, L or H."""
     return not binstr.strip("01LH")
