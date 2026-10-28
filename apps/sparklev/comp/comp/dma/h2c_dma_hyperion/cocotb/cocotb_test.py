@@ -5,6 +5,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from collections import deque
+from dataclasses import dataclass
 import random
 import cocotb
 import logging
@@ -32,11 +33,10 @@ file_handler = RotatingFileHandler("rotating.log", maxBytes=(5 * 1024 * 1024), b
 file_handler.setFormatter(SimLogFormatter(strip_ansi=True))
 root_logger.addHandler(file_handler)
 
-class MfbTrWithBe(MfbTransactionWithMeta):
-    attrs = MfbTransactionWithMeta.attrs + ["be"]
 
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
+@dataclass(slots=True)
+class MfbTrWithBe(MfbTransactionWithMeta):
+    be: int = 0
 
 class MonitorStatistics(cocotb_bus.monitors.MonitorStatistics):
     def __init__(self):
