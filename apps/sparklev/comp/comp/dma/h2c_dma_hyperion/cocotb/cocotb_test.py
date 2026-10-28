@@ -11,7 +11,7 @@ import cocotb
 import logging
 from logging.handlers import RotatingFileHandler
 from cocotb.clock import Clock
-from cocotb.triggers import ClockCycles
+from cocotb.triggers import ClockCycles, RisingEdge, ReadOnly
 from cocotb.logging import SimLogFormatter
 
 import cocotb_bus.monitors
@@ -21,9 +21,17 @@ from cocotbext.ofm.mi.drivers import MIRequestDriver
 from cocotbext.ofm.dma.hyperion import H2CHyperionMIRegMap, CtrlRegBits
 
 from cocotbext.ofm.mfb.fast_drivers import MFBDriver
+from cocotbext.ofm.mfb.properties import attach_mfb_properties
 from cocotbext.ofm.mfb.transaction import MfbTransactionWithMeta
+from cocotbext.ofm.mfb.utils import random_tuple_iterator
 from cocotbext.ofm.pcie import CQMfbMeta, CQHeader, pcie_byte_count, PcieReqType
 from cocotbext.ofm.mi.drivers import MIRequestDriver
+
+# AXI3 carries a 4b AWLEN (max 16 beats) where cocotbext-axi defaults to the AXI4 8b; the patch
+# must be applied before AxiSlaveWrite/AxiWriteBus are imported.
+from cocotbext.axi.axi_channels import AxiAWSink
+HBM_LEN_WIDTH = 4
+AxiAWSink._signal_widths = {**AxiAWSink._signal_widths, "awlen": HBM_LEN_WIDTH}
 
 import cocotbext.axi
 from cocotbext.axi import AxiWriteBus, MemoryRegion
@@ -151,7 +159,14 @@ class Testbench:
     def __init__(self, dut, debug=False):
         self.dut = dut
         self.mi_driver = MIRequestDriver(dut, "MI", dut.CLK)
-        self.cq_mfb_driver = MFBDriver(dut, "PCIE_CQ_MFB", dut.CLK, vld_gen=None)
+        # A real CQ source legally deasserts SRC_RDY between and inside frames.
+        self.cq_mfb_driver = MFBDriver(dut, "PCIE_CQ_MFB", dut.CLK, vld_gen=random_tuple_iterator(2, 8, 0, 4))
+        # Conformance watchdog on the CQ input; it only samples, so it rides alongside the driver. nvc also
+        # exposes the internal MFB signals of the top level, hence the explicit interface.
+        self.mfb_props = attach_mfb_properties(
+            dut, dut.CLK, reset=dut.RESET, include=("PCIE_CQ_MFB",),
+            mfb_params={"regions": 1, "region_size": 1, "block_size": 8, "item_width": 32},
+        )
         self.hbm_wr_slave = AxiSlaveWrite(AxiWriteBus.from_prefix(dut, "HBM_AXI"), dut.CLK, dut.RESET)
         region = MemoryRegion(2**self.hbm_wr_slave.address_width)
         self.hbm_wr_slave.target = region
@@ -184,6 +199,75 @@ class Testbench:
         self.dut.RESET.value = 1
         await ClockCycles(self.dut.CLK, 100)
         self.dut.RESET.value = 0
+
+    async def w_burst_monitor(self):
+        """W-channel watchdog: no accepted W beat has WSTRB = 0, no burst exceeds 16 beats, and beats
+        per WLAST match AWLEN+1 in order. An AW may follow its W beats, so both streams are queued
+        and paired."""
+        aw_lens = deque()
+        w_lens = deque()
+        beats = 0
+        while True:
+            await RisingEdge(self.dut.CLK)
+            await ReadOnly()
+            if bool(self.dut.HBM_AXI_AWVALID.value) and bool(self.dut.HBM_AXI_AWREADY.value):
+                aw_lens.append(int(self.dut.HBM_AXI_AWLEN.value))
+
+            if bool(self.dut.HBM_AXI_WVALID.value) and bool(self.dut.HBM_AXI_WREADY.value):
+                assert int(self.dut.HBM_AXI_WSTRB.value) != 0, (
+                    f"accepted a W beat with WSTRB = 0 (a padding beat) after {beats} beats of the "
+                    f"current burst")
+                beats += 1
+                assert beats <= 16, f"{beats} W beats without a WLAST (AXI3 allows at most 16)"
+                if bool(self.dut.HBM_AXI_WLAST.value):
+                    w_lens.append(beats - 1)
+                    beats = 0
+
+            while aw_lens and w_lens:
+                declared = aw_lens.popleft()
+                sent = w_lens.popleft()
+                assert declared == sent, (
+                    f"burst declared AWLEN={declared} but its WLAST arrived after {sent + 1} beats")
+
+    async def axi_aw_4k_boundary_monitor(self):
+        """AXI3 write-burst legality watchdog: no accepted AW burst may cross a 4096B boundary
+        (AMBA A3.4.1). AWLEN is the native 4b port, so the <=16-beat rule is structural."""
+        while True:
+            await RisingEdge(self.dut.CLK)
+            await ReadOnly()
+            if bool(self.dut.HBM_AXI_AWVALID.value) and bool(self.dut.HBM_AXI_AWREADY.value):
+                addr = int(self.dut.HBM_AXI_AWADDR.value)
+                length = int(self.dut.HBM_AXI_AWLEN.value)
+                size = int(self.dut.HBM_AXI_AWSIZE.value)
+                burst_bytes = (length + 1) << size
+                start_page = addr & ~0xFFF
+                end_page = (addr + burst_bytes - 1) & ~0xFFF
+                assert start_page == end_page, (
+                    f"AW burst crosses a 4KB boundary: addr=0x{addr:09X} awlen={length} "
+                    f"awsize={size} (burst_bytes={burst_bytes})")
+
+    async def axi_valid_hold_monitor(self):
+        """AW/W handshake watchdog (AMBA A3.2.1): once VALID is asserted it stays asserted, with the
+        payload unchanged, until READY takes the transfer."""
+        dut = self.dut
+        channels = (
+            ("AW", dut.HBM_AXI_AWVALID, dut.HBM_AXI_AWREADY,
+             (dut.HBM_AXI_AWID, dut.HBM_AXI_AWADDR, dut.HBM_AXI_AWLEN, dut.HBM_AXI_AWSIZE, dut.HBM_AXI_AWBURST)),
+            ("W", dut.HBM_AXI_WVALID, dut.HBM_AXI_WREADY,
+             (dut.HBM_AXI_WDATA, dut.HBM_AXI_WSTRB, dut.HBM_AXI_WLAST)),
+        )
+        stalled = {name: None for name, _, _, _ in channels}
+        while True:
+            await RisingEdge(dut.CLK)
+            await ReadOnly()
+            for name, valid, ready, payload in channels:
+                v = bool(valid.value)
+                now = tuple(str(sig.value) for sig in payload)
+                held = stalled[name]
+                if held is not None:
+                    assert v, f"{name}VALID fell without a handshake (AMBA A3.2.1)"
+                    assert now == held, f"{name} payload changed while {name}VALID waited for {name}READY"
+                stalled[name] = now if v and not bool(ready.value) else None
 
     async def sample_cntrs(self):
         ctrl_reg = int.from_bytes(await self.mi_driver.read(H2CHyperionMIRegMap.CONTROL, 1))
@@ -289,7 +373,13 @@ async def prepare(dut):
     cocotb.start_soon(Clock(dut.CLK, CLK_PERIOD, unit='ns').start())
 
     tb = Testbench(dut=dut, debug=False)
+    tb.log.info(f"cocotb.RANDOM_SEED={cocotb.RANDOM_SEED} "
+                f"(re-run with COCOTB_RANDOM_SEED=<seed> to reproduce this exact run, including "
+                f"PCIE_CQ_MFB gap entropy)")
     await tb.reset()
+    cocotb.start_soon(tb.w_burst_monitor())
+    cocotb.start_soon(tb.axi_aw_4k_boundary_monitor())
+    cocotb.start_soon(tb.axi_valid_hold_monitor())
 
     return tb
 
