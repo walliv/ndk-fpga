@@ -27,7 +27,7 @@ architecture USP of PCIE_CORE is
     constant XVC_BASE_ADDRESS  : natural := tsel(ENDPOINT_TYPE = "USP_PCIE4C", 16#EA0#, 16#4A0#);
     constant DTB_NEXT_POINTER  : natural := tsel(XVC_ENABLE, XVC_BASE_ADDRESS, 0);
 
-    constant PCIE_HIPS         : natural := tsel((ENDPOINT_MODE = 0 or ENDPOINT_MODE = 1 or ENDPOINT_MODE = 2),PCIE_ENDPOINTS,PCIE_ENDPOINTS/2);
+    constant PCIE_HIPS         : natural := tsel((ENDPOINT_MODE = 0 or ENDPOINT_MODE = 1 or ENDPOINT_MODE = 2 or ENDPOINT_MODE = 3),PCIE_ENDPOINTS,PCIE_ENDPOINTS/2);
     constant PCIE_IP_LANES     : natural := tsel(ENDPOINT_MODE = 1, PCIE_LANES/2, PCIE_LANES);
     constant AXI_DATA_WIDTH    : natural := CQ_MFB_REGIONS*256;
     -- FPGA_COMMON chooses the width of the AXI interface through CQ_MFB_REGIONS, the TUSER widths follow it.
