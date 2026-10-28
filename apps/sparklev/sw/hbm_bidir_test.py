@@ -25,9 +25,6 @@ _HBM_CH_STRIDE = 0x80000000          # 2 GiB per channel
 # Number of RX DMA channels exposed by the current RTL build
 NUM_RX_CH = 8
 
-# Maximum individual DMA packet size accepted by Calypte
-DMA_PKT_SIZE_MAX = 16 * 1024
-
 
 def parse_channel_list(spec: str) -> list[int]:
     """Parse a comma/range channel specification such as ``0-7`` or ``0,2,4-6``."""
@@ -94,7 +91,7 @@ def scenario_bidir_channel(
     log.debug("Channel %d: C2H read done; stats:\n%s", ch, reader.get_statistics())
 
     # 4. Collect received bytes from the RX DMA channel.
-    #    One read normally produces one DMA frame, but be robust to fragmentation.
+    #    The reader cuts a read into frames of at most DMA_PKT_SIZE_MAX bytes.
     received = bytearray()
     deadline = time.monotonic() + 2.0
 
@@ -243,10 +240,7 @@ def main() -> None:
         type=int,
         default=4096,
         metavar="BYTES",
-        help=(
-            f"Payload size in bytes per channel (default: %(default)s, "
-            f"max: {DMA_PKT_SIZE_MAX})"
-        ),
+        help="Payload size in bytes per channel (default: %(default)s)",
     )
     run_args.add_argument(
         "--skip-negative",
@@ -261,12 +255,6 @@ def main() -> None:
         level=logging.DEBUG if args.verbose > 0 else logging.INFO,
         format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
     )
-
-    if args.size > DMA_PKT_SIZE_MAX:
-        log.error(
-            "--size %d exceeds DMA_PKT_SIZE_MAX=%d", args.size, DMA_PKT_SIZE_MAX
-        )
-        sys.exit(1)
 
     channels = parse_channel_list(args.channels)
     invalid = [ch for ch in channels if not (0 <= ch < NUM_RX_CH)]
