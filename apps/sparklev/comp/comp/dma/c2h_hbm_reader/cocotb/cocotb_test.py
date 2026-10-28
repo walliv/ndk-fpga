@@ -4,19 +4,17 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-import itertools
 import math
 import random
 import logging
 from logging.handlers import RotatingFileHandler
-from cocotbext.ofm.dma.hyperion import C2HReaderMIRegMap, C2HCtrlRegBits, C2HStatRegBits
+from cocotbext.ofm.dma.hyperion import C2HReaderMIRegMap, C2HStatRegBits
 
 import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import ClockCycles, RisingEdge, ReadOnly
 from cocotb.logging import SimLogFormatter
 
-import cocotb_bus.monitors
 from cocotb_bus.drivers import BitDriver
 from cocotb_bus.scoreboard import Scoreboard
 
@@ -26,13 +24,13 @@ from cocotbext.ofm.mfb.properties import attach_mfb_properties
 from cocotbext.ofm.mfb.transaction import MfbTransactionWithMeta
 from cocotbext.ofm.mfb.utils import random_tuple_iterator
 
-# Patch AXI3 4-bit ARLEN before importing AxiSlaveRead so the width assert passes.
+from cocotbext.axi import AxiReadBus, AxiSlaveRead, SparseMemoryRegion
 from cocotbext.axi.axi_channels import AxiARSink
+
+# AXI3 carries a 4b ARLEN (max 16 beats) where cocotbext-axi defaults to the AXI4 8b. The sink checks the
+# width when AxiSlaveRead constructs it, so the patch only has to precede the Testbench.
 HBM_LEN_WIDTH = 4
 AxiARSink._signal_widths = {**AxiARSink._signal_widths, "arlen": HBM_LEN_WIDTH}
-
-import cocotbext.axi
-from cocotbext.axi import AxiReadBus, AxiSlaveRead, SparseMemoryRegion
 
 root_logger = logging.getLogger()
 file_handler = RotatingFileHandler("rotating.log", maxBytes=(5 * 1024 * 1024), backupCount=2)

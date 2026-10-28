@@ -25,16 +25,15 @@ from cocotbext.ofm.mfb.properties import attach_mfb_properties
 from cocotbext.ofm.mfb.transaction import MfbTransactionWithMeta
 from cocotbext.ofm.mfb.utils import random_tuple_iterator
 from cocotbext.ofm.pcie import CQMfbMeta, CQHeader, pcie_byte_count, PcieReqType
-from cocotbext.ofm.mi.drivers import MIRequestDriver
-
-# AXI3 carries a 4b AWLEN (max 16 beats) where cocotbext-axi defaults to the AXI4 8b; the patch
-# must be applied before AxiSlaveWrite/AxiWriteBus are imported.
-from cocotbext.axi.axi_channels import AxiAWSink
-HBM_LEN_WIDTH = 4
-AxiAWSink._signal_widths = {**AxiAWSink._signal_widths, "awlen": HBM_LEN_WIDTH}
 
 import cocotbext.axi
 from cocotbext.axi import AxiWriteBus, MemoryRegion
+from cocotbext.axi.axi_channels import AxiAWSink
+
+# AXI3 carries a 4b AWLEN (max 16 beats) where cocotbext-axi defaults to the AXI4 8b. The sink checks the
+# width when AxiSlaveWrite constructs it, so the patch only has to precede the Testbench.
+HBM_LEN_WIDTH = 4
+AxiAWSink._signal_widths = {**AxiAWSink._signal_widths, "awlen": HBM_LEN_WIDTH}
 
 root_logger = logging.getLogger()
 file_handler = RotatingFileHandler("rotating.log", maxBytes=(5 * 1024 * 1024), backupCount=2)
@@ -46,10 +45,12 @@ root_logger.addHandler(file_handler)
 class MfbTrWithBe(MfbTransactionWithMeta):
     be: int = 0
 
+
 class MonitorStatistics(cocotb_bus.monitors.MonitorStatistics):
     def __init__(self):
         super().__init__()
         self.received_bytes = 0
+
 
 class AxiSlaveWrite(cocotbext.axi.AxiSlaveWrite, cocotb_bus.monitors.Monitor):
     def __init__(self, bus: AxiWriteBus, clk, rst=None, target=None, reset_active_level : bool = True, **kwargs):
@@ -76,6 +77,7 @@ class AxiSlaveWrite(cocotbext.axi.AxiSlaveWrite, cocotb_bus.monitors.Monitor):
         # Run callbacks on the receved transaction
         for callback in self._callbacks:
             callback((address, data))
+
 
 class HyperionModel:
     def __init__(self, mps: int = 512, axi_width: int = 512):
@@ -105,11 +107,16 @@ class HyperionModel:
         # Calculate the real length of data payload in bytes based on
         byte_count = pcie_byte_count(cq_hdr.dword_count, meta.firstBe, meta.lastBe)
 
-        if meta.firstBe & 0b0001: offset = 0
-        elif meta.firstBe & 0b0010: offset = 1
-        elif meta.firstBe & 0b0100: offset = 2
-        elif meta.firstBe & 0b1000: offset = 3
-        else: offset = 0
+        if meta.firstBe & 0b0001:
+            offset = 0
+        elif meta.firstBe & 0b0010:
+            offset = 1
+        elif meta.firstBe & 0b0100:
+            offset = 2
+        elif meta.firstBe & 0b1000:
+            offset = 3
+        else:
+            offset = 0
 
         addr = (cq_hdr.addr << 2) + offset
 
@@ -151,9 +158,11 @@ class HyperionModel:
             self.recv_trs += 1
             self.recv_trs_bytes += chunk_size
 
+
 def random_pause():
     while True:
         yield random.random() > 0.9  # 70% chance of dropping READY
+
 
 class Testbench:
     def __init__(self, dut, debug=False):
@@ -274,7 +283,6 @@ class Testbench:
         ctrl_reg |= (1 << CtrlRegBits.SAMPLE_CNTRS)
         await self.mi_driver.write(H2CHyperionMIRegMap.CONTROL, ctrl_reg.to_bytes(1, 'little'))
 
-
     async def check_counters(self, req_count):
         assert self.model.recv_trs == self.hbm_wr_slave.stats.received_transactions, \
             f"Mismatch in number of received write transactions: Model={self.model.recv_trs}, HBM Slave={self.hbm_wr_slave.stats.received_transactions}"
@@ -368,6 +376,7 @@ class Testbench:
         self.cq_mfb_driver.append(tr)
         self.model.proc_input(tr)
 
+
 async def prepare(dut):
     CLK_PERIOD = 4
     cocotb.start_soon(Clock(dut.CLK, CLK_PERIOD, unit='ns').start())
@@ -382,6 +391,7 @@ async def prepare(dut):
     cocotb.start_soon(tb.axi_valid_hold_monitor())
 
     return tb
+
 
 @cocotb.test()
 async def run_random_read_test(dut, req_count: int = 10000):
