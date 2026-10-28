@@ -5,7 +5,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass, fields
-import time
 
 import nfb
 from cocotbext.ofm.dma.hyperion import C2HReaderMIRegMap, C2HCtrlRegBits, C2HStatRegBits
