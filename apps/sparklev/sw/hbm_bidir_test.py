@@ -105,9 +105,9 @@ def scenario_bidir_channel(
     rx_stats = rxq.read_stats()
     log.debug("Channel %d: RX stats: %s", ch, rx_stats)
 
-    if len(received) < size:
+    if len(received) != size:
         log.error(
-            "FAIL channel %d: only %d of %d bytes received within deadline; "
+            "FAIL channel %d: %d of %d bytes received within deadline; "
             "rx_stats=%s  reader=%s",
             ch, len(received), size, rx_stats, reader.get_statistics(),
         )

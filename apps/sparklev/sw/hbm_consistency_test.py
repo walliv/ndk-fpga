@@ -173,8 +173,7 @@ def _build_read_addresses(channels: list[int], stride: int, chunk: int) -> list[
 def _recv_exact(rxq, size: int, timeout_per_recv: float = 0.1, total_timeout: float = 2.0) -> bytes:
     """Collect exactly *size* bytes from *rxq*, concatenating DMA frames.
 
-    Returns the collected bytes (may be more than *size* if DMA over-delivers,
-    caller takes only [:size]).  Raises RuntimeError on timeout.
+    Raises RuntimeError on timeout or when the frames carry more than *size* bytes.
     """
     received = bytearray()
     deadline = time.monotonic() + total_timeout
@@ -189,6 +188,8 @@ def _recv_exact(rxq, size: int, timeout_per_recv: float = 0.1, total_timeout: fl
         for frame in frames:
             received.extend(frame)
 
+    if len(received) != size:
+        raise RuntimeError(f"Collected {len(received)} B for a {size} B read")
     return bytes(received)
 
 
@@ -257,7 +258,7 @@ def phase_verify(
             got = _recv_exact(rxq, chunk)
         except RuntimeError as exc:
             log.error(
-                "FAIL [%d/%d] ch=%d addr=0x%010x: recv timeout: %s",
+                "FAIL [%d/%d] ch=%d addr=0x%010x: recv failed: %s",
                 i + 1, total_chunks, ch, addr, exc,
             )
             mismatch_count += 1
@@ -265,16 +266,14 @@ def phase_verify(
 
         # Compare against expected pattern.
         expected = expected_bytes(addr, chunk)
-        got_cmp = got[:chunk]
-
-        if got_cmp != expected:
+        if got != expected:
             diff_off = next(
-                j for j, (a, b) in enumerate(zip(got_cmp, expected)) if a != b
+                j for j, (a, b) in enumerate(zip(got, expected)) if a != b
             )
             # Align diff_off down to nearest 8-byte boundary for word display.
             word_off = diff_off & ~7
             exp_word = expected[word_off:word_off + 8]
-            got_word = got_cmp[word_off:word_off + 8]
+            got_word = got[word_off:word_off + 8]
             log.error(
                 "FAIL [%d/%d] ch=%d addr=0x%010x: mismatch at byte offset +%d "
                 "(word @+%d: expected %s got %s)",
