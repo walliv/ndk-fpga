@@ -123,8 +123,9 @@ class Testbench:
         self.dut = dut
         self.log = logging.getLogger("cocotb.%s" % type(self).__qualname__)
 
-        # The model takes CHANNELS from the elaborated DUT, so a GENERICS override cannot desync it.
+        # The model takes its generics from the elaborated DUT, so a GENERICS override cannot desync it.
         self.cmap = ChannelMap(int(dut.CHANNELS.value))
+        self.frame_max = int(dut.FRAME_SIZE_MAX.value)
 
         # --- MI driver ---
         self.mi = MIRequestDriver(dut, "MI", dut.CLK)
@@ -186,6 +187,7 @@ class Testbench:
         # --- Model statistics ---
         self.exp_req_cnt   = 0
         self.exp_req_bytes = 0
+        self.exp_frame_cnt = 0
 
         if debug:
             self.log.setLevel(logging.DEBUG)
@@ -274,7 +276,8 @@ class Testbench:
         Program C2H_HBM_READER to read `size` bytes from HBM address `addr` and wait until DONE.
 
         The DUT streams `size` bytes starting at `addr`, split into INCR AXI bursts of at most 16
-        beats that must not cross a 4 KiB boundary. `addr`/`size` must pass ChannelMap.in_range().
+        beats that must not cross a 4 KiB boundary, and emits them as MFB frames of FRAME_SIZE_MAX
+        bytes, the last one shorter. `addr`/`size` must pass ChannelMap.in_range().
         """
         cm = self.cmap
         assert cm.in_range(addr, size), f"request addr=0x{addr:09X} size={size} is out of range"
@@ -287,7 +290,9 @@ class Testbench:
         # Build expected output and update model counters
         exp_data = await build_expected_frame(self.mem, addr, size)
         exp_meta = chan  # HDR_META=0 (high bits), CHAN=chan (low chan_w bits)
-        self.expected_output.append(MfbTransactionWithMeta(data=exp_data, meta=exp_meta))
+        for off in range(0, size, self.frame_max):
+            self.expected_output.append(MfbTransactionWithMeta(data=exp_data[off:off + self.frame_max], meta=exp_meta))
+            self.exp_frame_cnt += 1
         self.exp_req_cnt   += 1
         self.exp_req_bytes += size
 
@@ -376,28 +381,29 @@ async def prepare(dut):
     cocotb.start_soon(Clock(dut.CLK, 4, unit="ns").start())
     tb = Testbench(dut=dut, debug=False)
     tb.log.info(f"cocotb.RANDOM_SEED={cocotb.RANDOM_SEED} CHANNELS={tb.cmap.channels} "
-                f"(re-run with COCOTB_RANDOM_SEED=<seed> GENERICS=-gCHANNELS=<n> to reproduce)")
+                f"FRAME_SIZE_MAX={tb.frame_max} (re-run with COCOTB_RANDOM_SEED=<seed> "
+                f"GENERICS='-gCHANNELS=<n> -gFRAME_SIZE_MAX=<b>' to reproduce)")
     tb.backpressure.start(random_tuple_iterator(1, 8, 1, 4))
     await tb.reset()
     cocotb.start_soon(tb.ar_monitor())
     return tb
 
 
-async def _wait_all_frames(tb, req_count, dut, timeout_clocks=10_000_000):
-    """Wait until the MFB monitor has seen all `req_count` complete frames."""
+async def _wait_all_frames(tb, dut, timeout_clocks=10_000_000):
+    """Wait until the MFB monitor has seen every frame the model expects."""
     last = 0
     waited = 0
-    while tb.mfb_mon.frame_cnt < req_count:
+    while tb.mfb_mon.frame_cnt < tb.exp_frame_cnt:
         if tb.mfb_mon.frame_cnt // 100 > last:
             last = tb.mfb_mon.frame_cnt // 100
             cocotb.log.info(
-                f"Waiting for MFB frames: {tb.mfb_mon.frame_cnt}/{req_count}"
+                f"Waiting for MFB frames: {tb.mfb_mon.frame_cnt}/{tb.exp_frame_cnt}"
             )
         await ClockCycles(dut.CLK, 100)
         waited += 100
         if waited >= timeout_clocks:
             raise TimeoutError(
-                f"Timed out waiting for MFB frames: {tb.mfb_mon.frame_cnt}/{req_count}"
+                f"Timed out waiting for MFB frames: {tb.mfb_mon.frame_cnt}/{tb.exp_frame_cnt}"
             )
     await ClockCycles(dut.CLK, 100)
 
@@ -417,7 +423,7 @@ async def run_random_read_test(dut, req_count: int = 1000):
         addr, size = _rand_request(tb.cmap)
         await tb.issue_request(addr, size)
 
-    await _wait_all_frames(tb, req_count, dut)
+    await _wait_all_frames(tb, dut)
     await tb.check_counters()
     raise tb.scoreboard.result
 
@@ -426,7 +432,7 @@ async def run_random_read_test(dut, req_count: int = 1000):
 async def run_large_read_test(dut, req_count: int = 50):
     """
     Multi-burst transfers: 513 B..8 KiB at random aligned addresses. Verifies that the DUT
-    chains bursts into a single MFB frame with SOF on the first beat and EOF on the last beat.
+    chains bursts into frames of FRAME_SIZE_MAX bytes regardless of where the bursts end.
     """
     tb = await prepare(dut)
 
@@ -434,7 +440,7 @@ async def run_large_read_test(dut, req_count: int = 50):
         addr, size = _rand_large_request(tb.cmap)
         await tb.issue_request(addr, size)
 
-    await _wait_all_frames(tb, req_count, dut)
+    await _wait_all_frames(tb, dut)
     await tb.check_counters()
     raise tb.scoreboard.result
 
@@ -448,16 +454,14 @@ async def run_4k_boundary_test(dut):
     tb = await prepare(dut)
     cm = tb.cmap
 
-    req_count = 0
     for beats_before in range(1, MAX_BURST_BEATS):
         for size in (beats_before * HBM_BYTE_W + 1, MAX_BURST_BYTES, MAX_BURST_BYTES + 33, 3 * MAX_BURST_BYTES):
             chan = random.randrange(cm.channels)
             page = random.randrange(1, cm.region // AXI_PAGE - 4)
             addr = (chan << cm.region_w) + page * AXI_PAGE - beats_before * HBM_BYTE_W
             await tb.issue_request(addr, size)
-            req_count += 1
 
-    await _wait_all_frames(tb, req_count, dut)
+    await _wait_all_frames(tb, dut)
     await tb.check_counters()
     raise tb.scoreboard.result
 
@@ -471,14 +475,12 @@ async def run_range_err_test(dut):
     tb = await prepare(dut)
     cm = tb.cmap
 
-    req_count = 0
     for chan in sorted({0, random.randrange(1, cm.channels - 1), cm.channels - 1}):
         region_base = chan << cm.region_w
         region_end = region_base + cm.region
         # Ends exactly at the region end (for the last channel, the end of HBM): accepted.
         size = random.randint(1, 3 * MAX_BURST_BEATS) * HBM_BYTE_W
         await tb.issue_request(region_end - size, size)
-        req_count += 1
         # One byte too long: crosses into the next region, or past the end of HBM.
         await tb.issue_rejected_request(region_end - size, size + 1)
         # Starts inside the region and ends a whole burst into the next one.
@@ -486,7 +488,6 @@ async def run_range_err_test(dut):
         # Starts at the region base: accepted, and served from this channel.
         size = random.randint(1, MAX_BURST_BYTES)
         await tb.issue_request(region_base, size)
-        req_count += 1
         # Otherwise in range, but not 32B-aligned.
         lbase = random.randrange(0, cm.region - 2 * MAX_BURST_BYTES, HBM_BYTE_W)
         await tb.issue_rejected_request(region_base + lbase + random.randrange(1, HBM_BYTE_W), size)
@@ -495,6 +496,6 @@ async def run_range_err_test(dut):
     await tb.issue_rejected_request(HBM_SIZE - MAX_BURST_BYTES, 2 * MAX_LARGE_BYTES)
     await tb.issue_rejected_request(random.randrange(0, HBM_SIZE, HBM_BYTE_W), 0)
 
-    await _wait_all_frames(tb, req_count, dut)
+    await _wait_all_frames(tb, dut)
     await tb.check_counters()
     raise tb.scoreboard.result

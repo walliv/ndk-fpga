@@ -32,6 +32,8 @@ entity C2H_HBM_READER is
 
         HDR_META_WIDTH : natural := 12;
         CHANNELS       : natural := 64;
+        -- A request is cut into frames of this many bytes, the last one shorter, since the RX DMA rejects longer ones.
+        FRAME_SIZE_MAX : natural := 4096;
 
         -- Target device for the output MFB FIFO (passed to MFB_FIFOX)
         DEVICE : string := "ULTRASCALE"
@@ -105,6 +107,8 @@ architecture FULL of C2H_HBM_READER is
     constant AXI_PAGE_W : natural := 12;
     constant BEAT_W     : natural := log2(HBM_BYTE_W);
 
+    constant FRAME_BEATS : natural := FRAME_SIZE_MAX / HBM_BYTE_W;
+
     -- Output MFB FIFO depth: must be >= max AXI burst length (2**HBM_LEN_WIDTH = 16 beats).
     constant MFB_FIFO_DEPTH : natural := 2**HBM_LEN_WIDTH;
 
@@ -142,7 +146,8 @@ architecture FULL of C2H_HBM_READER is
     signal req_bytes_cnt : unsigned(63 downto 0);
 
     signal remaining_bytes : unsigned(63 downto 0);
-    signal first_beat      : std_logic;
+    signal frame_beat      : unsigned(max(1, log2(FRAME_BEATS))-1 downto 0);
+    signal frame_end       : std_logic;
     signal beats_left      : unsigned(HBM_LEN_WIDTH downto 0);
 
     signal beat_bytes_u    : unsigned(63 downto 0);
@@ -177,6 +182,9 @@ begin
         severity FAILURE;
     assert (log2(CHANNELS) <= HBM_ID_WIDTH)
         report "C2H_HBM_READER: log2(CHANNELS) must be <= HBM_ID_WIDTH."
+        severity FAILURE;
+    assert (FRAME_SIZE_MAX >= HBM_BYTE_W and FRAME_SIZE_MAX mod HBM_BYTE_W = 0)
+        report "C2H_HBM_READER: FRAME_SIZE_MAX must be a nonzero multiple of the HBM word."
         severity FAILURE;
 
     -- =============================================================================================
@@ -261,7 +269,7 @@ begin
                 araddr_r        <= (others => '0');
                 arlen_r         <= (others => '0');
                 remaining_bytes <= (others => '0');
-                first_beat      <= '0';
+                frame_beat      <= (others => '0');
                 beats_left      <= (others => '0');
                 req_cnt         <= (others => '0');
                 req_bytes_cnt   <= (others => '0');
@@ -301,7 +309,7 @@ begin
                         busy      <= '0';
                     else
                         remaining_bytes <= size_reg;
-                        first_beat      <= '1';
+                        frame_beat      <= (others => '0');
                         arvalid_r       <= '0';
                         beats_left      <= (others => '0');
                         req_cnt         <= req_cnt + 1;
@@ -354,16 +362,20 @@ begin
                             beats_left <= beats_left - 1;
                         end if;
 
+                        if (frame_end = '1') then
+                            frame_beat <= (others => '0');
+                        else
+                            frame_beat <= frame_beat + 1;
+                        end if;
+
                         if (remaining_bytes > beat_bytes_u) then
                             remaining_bytes <= remaining_bytes - beat_bytes_u;
                             addr_reg        <= addr_reg + resize(beat_bytes_u, addr_reg'length);
-                            first_beat      <= '0';
                         else
                             remaining_bytes <= (others => '0');
                             addr_reg        <= addr_reg + resize(remaining_bytes, addr_reg'length);
                             busy            <= '0';
                             done            <= '1';
-                            first_beat      <= '0';
                         end if;
                     end if;
                 end if;
@@ -390,8 +402,10 @@ begin
     fifo_rx_meta(log2(CHANNELS)-1 downto 0)            <= HBM_AXI_RID(log2(CHANNELS)-1 downto 0);
     fifo_rx_meta(META_WIDTH-1 downto log2(CHANNELS))   <= (others => '0');
 
-    fifo_rx_sof(0) <= first_beat;
-    fifo_rx_eof(0) <= '1' when remaining_bytes <= beat_bytes_u else '0';
+    frame_end <= '1' when frame_beat = FRAME_BEATS-1 or remaining_bytes <= beat_bytes_u else '0';
+
+    fifo_rx_sof(0) <= '1' when frame_beat = 0 else '0';
+    fifo_rx_eof(0) <= frame_end;
 
     fifo_rx_sof_pos <= (others => '0');
 
