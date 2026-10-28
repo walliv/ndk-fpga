@@ -9,7 +9,7 @@ import math
 import random
 import logging
 from logging.handlers import RotatingFileHandler
-from cocotbext.ofm.dma.hyperion import C2HReaderMIRegMap, C2HCtrlRegBits, C2HC2HStatRegBits
+from cocotbext.ofm.dma.hyperion import C2HReaderMIRegMap, C2HCtrlRegBits, C2HStatRegBits
 
 import cocotb
 from cocotb.clock import Clock
