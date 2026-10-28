@@ -291,12 +291,10 @@ begin
                     done      <= '0';
                     error     <= '0';
                     range_err <= '0';
-                    -- Validate before issuing any read:
-                    --  * non-zero size
-                    --  * do not read past the end of HBM:  addr + size <= 2**HBM_ADDR_WIDTH
-                    --  * do not cross the channel's region: addr[REGION_W-1:0] + size <= 2**REGION_W
-                    --    (ARID/CHAN follows the running address; a straddle would mis-route mid-transfer)
-                    if (size_reg = 0
+                    -- Reject an unaligned start, an empty request, one past the end of HBM and one leaving its channel region,
+                    -- since CHAN follows the running address and a straddle would mis-route mid-transfer.
+                    if (addr_reg(BEAT_W-1 downto 0) /= 0
+                       or size_reg = 0
                        or (resize(addr_reg, 65) + resize(size_reg, 65)) > shift_left(to_unsigned(1, 65), HBM_ADDR_WIDTH)
                        or (resize(addr_reg(REGION_W-1 downto 0), 65) + resize(size_reg, 65)) > shift_left(to_unsigned(1, 65), REGION_W)) then
                         range_err <= '1';
