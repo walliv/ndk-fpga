@@ -16,7 +16,7 @@ use work.pcie_meta_pack.all;
 
 entity H2C_DMA_HYPERION is
     generic (
-        DEVICE : string := "ULTRASCALE";
+        DEVICE   : string := "ULTRASCALE";
         MI_WIDTH : natural := 32;
 
         -- HBM parameters for its AXI interface
@@ -33,7 +33,7 @@ entity H2C_DMA_HYPERION is
         PCIE_CQ_MFB_REGION_SIZE : natural := 1;
         PCIE_CQ_MFB_BLOCK_SIZE  : natural := 8;
         PCIE_CQ_MFB_ITEM_WIDTH  : natural := 32
-        );
+    );
     port (
         CLK   : in std_logic;
         RESET : in std_logic;
@@ -91,16 +91,16 @@ entity H2C_DMA_HYPERION is
 end entity;
 
 architecture FULL of H2C_DMA_HYPERION is
-    signal inp_fifo_mfb_data    : std_logic_vector(PCIE_CQ_MFB_REGIONS*PCIE_CQ_MFB_REGION_SIZE*PCIE_CQ_MFB_BLOCK_SIZE*PCIE_CQ_MFB_ITEM_WIDTH-1 downto 0);
-    signal inp_fifo_mfb_be      : std_logic_vector((PCIE_CQ_MFB_REGIONS*PCIE_CQ_MFB_REGION_SIZE*PCIE_CQ_MFB_BLOCK_SIZE*PCIE_CQ_MFB_ITEM_WIDTH)/8 -1 downto 0);
-    signal inp_fifo_mfb_meta    : std_logic_vector(PCIE_CQ_MFB_REGIONS*PCIE_CQ_META_WIDTH -1 downto 0);
+    signal inp_fifo_mfb_data      : std_logic_vector(PCIE_CQ_MFB_REGIONS*PCIE_CQ_MFB_REGION_SIZE*PCIE_CQ_MFB_BLOCK_SIZE*PCIE_CQ_MFB_ITEM_WIDTH-1 downto 0);
+    signal inp_fifo_mfb_be        : std_logic_vector((PCIE_CQ_MFB_REGIONS*PCIE_CQ_MFB_REGION_SIZE*PCIE_CQ_MFB_BLOCK_SIZE*PCIE_CQ_MFB_ITEM_WIDTH)/8 -1 downto 0);
+    signal inp_fifo_mfb_meta      : std_logic_vector(PCIE_CQ_MFB_REGIONS*PCIE_CQ_META_WIDTH -1 downto 0);
     signal inp_fifo_mfb_meta_comp : std_logic_vector((PCIE_CQ_MFB_REGIONS*PCIE_CQ_MFB_REGION_SIZE*PCIE_CQ_MFB_BLOCK_SIZE*PCIE_CQ_MFB_ITEM_WIDTH)/8 + PCIE_CQ_META_WIDTH -1 downto 0);
-    signal inp_fifo_mfb_sof     : std_logic_vector(PCIE_CQ_MFB_REGIONS -1 downto 0);
-    signal inp_fifo_mfb_eof     : std_logic_vector(PCIE_CQ_MFB_REGIONS -1 downto 0);
-    signal inp_fifo_mfb_sof_pos : std_logic_vector(PCIE_CQ_MFB_REGIONS*max(1, log2(PCIE_CQ_MFB_REGION_SIZE)) -1 downto 0);
-    signal inp_fifo_mfb_eof_pos : std_logic_vector(PCIE_CQ_MFB_REGIONS*max(1, log2(PCIE_CQ_MFB_REGION_SIZE*PCIE_CQ_MFB_BLOCK_SIZE)) -1 downto 0);
-    signal inp_fifo_mfb_src_rdy : std_logic;
-    signal inp_fifo_mfb_dst_rdy : std_logic;
+    signal inp_fifo_mfb_sof       : std_logic_vector(PCIE_CQ_MFB_REGIONS -1 downto 0);
+    signal inp_fifo_mfb_eof       : std_logic_vector(PCIE_CQ_MFB_REGIONS -1 downto 0);
+    signal inp_fifo_mfb_sof_pos   : std_logic_vector(PCIE_CQ_MFB_REGIONS*max(1, log2(PCIE_CQ_MFB_REGION_SIZE)) -1 downto 0);
+    signal inp_fifo_mfb_eof_pos   : std_logic_vector(PCIE_CQ_MFB_REGIONS*max(1, log2(PCIE_CQ_MFB_REGION_SIZE*PCIE_CQ_MFB_BLOCK_SIZE)) -1 downto 0);
+    signal inp_fifo_mfb_src_rdy   : std_logic;
+    signal inp_fifo_mfb_dst_rdy   : std_logic;
 
     signal inp_fifo_afull   : std_logic;
     signal cq_drop_eff      : std_logic;   -- effective drop decision for the current cycle
@@ -162,14 +162,14 @@ begin
         MI_ARDY => MI_ARDY,
         MI_DRDY => MI_DRDY,
 
-        PCIE_REQ_TOTAL_BYTES => pcie_req_total_bytes,
+        PCIE_REQ_TOTAL_BYTES   => pcie_req_total_bytes,
         PCIE_RD_REQ_TOTAL_INCR => pcie_rd_req_total_incr,
         PCIE_WR_REQ_TOTAL_INCR => pcie_wr_req_total_incr,
 
         PCIE_CQ_MFB_SRC_RDY => PCIE_CQ_MFB_SRC_RDY,
         PCIE_CQ_MFB_DST_RDY => PCIE_CQ_MFB_DST_RDY,
-        PCIE_CQ_DROP_INCR  => cq_drop_pulse,
-        PCIE_CQ_DROP_BYTES => cq_drop_bytes,
+        PCIE_CQ_DROP_INCR   => cq_drop_pulse,
+        PCIE_CQ_DROP_BYTES  => cq_drop_bytes,
 
         HBM_AXI_AWVALID => HBM_AXI_AWVALID,
         HBM_AXI_AWREADY => HBM_AXI_AWREADY,
@@ -180,42 +180,44 @@ begin
     );
 
     input_fifox_i : entity work.MFB_FIFOX
-        generic map (
-            REGIONS             => PCIE_CQ_MFB_REGIONS,
-            REGION_SIZE         => PCIE_CQ_MFB_REGION_SIZE,
-            BLOCK_SIZE          => PCIE_CQ_MFB_BLOCK_SIZE,
-            ITEM_WIDTH          => PCIE_CQ_MFB_ITEM_WIDTH,
-            META_WIDTH          => PCIE_CQ_META_WIDTH + (PCIE_CQ_MFB_DATA'length / 8),
-            FIFO_DEPTH          => 512,
-            RAM_TYPE            => "AUTO",
-            DEVICE              => DEVICE,
-            ALMOST_FULL_OFFSET  => 144,
-            ALMOST_EMPTY_OFFSET => 2)
-        port map (
-            CLK         => CLK,
-            RST         => RESET,
+    generic map (
+        REGIONS             => PCIE_CQ_MFB_REGIONS,
+        REGION_SIZE         => PCIE_CQ_MFB_REGION_SIZE,
+        BLOCK_SIZE          => PCIE_CQ_MFB_BLOCK_SIZE,
+        ITEM_WIDTH          => PCIE_CQ_MFB_ITEM_WIDTH,
+        META_WIDTH          => PCIE_CQ_META_WIDTH + (PCIE_CQ_MFB_DATA'length / 8),
+        FIFO_DEPTH          => 512,
+        RAM_TYPE            => "AUTO",
+        DEVICE              => DEVICE,
+        ALMOST_FULL_OFFSET  => 144,
+        ALMOST_EMPTY_OFFSET => 2
+    )
+    port map (
+        CLK         => CLK,
+        RST         => RESET,
 
-            RX_DATA     => PCIE_CQ_MFB_DATA,
-            RX_META     => (PCIE_CQ_MFB_BE, PCIE_CQ_MFB_META),
-            RX_SOF_POS  => PCIE_CQ_MFB_SOF_POS,
-            RX_EOF_POS  => PCIE_CQ_MFB_EOF_POS,
-            RX_SOF      => PCIE_CQ_MFB_SOF,
-            RX_EOF      => PCIE_CQ_MFB_EOF,
-            RX_SRC_RDY  => cq_to_fifo_srdy,
-            RX_DST_RDY  => open,
+        RX_DATA     => PCIE_CQ_MFB_DATA,
+        RX_META     => (PCIE_CQ_MFB_BE, PCIE_CQ_MFB_META),
+        RX_SOF_POS  => PCIE_CQ_MFB_SOF_POS,
+        RX_EOF_POS  => PCIE_CQ_MFB_EOF_POS,
+        RX_SOF      => PCIE_CQ_MFB_SOF,
+        RX_EOF      => PCIE_CQ_MFB_EOF,
+        RX_SRC_RDY  => cq_to_fifo_srdy,
+        RX_DST_RDY  => open,
 
-            TX_DATA     => inp_fifo_mfb_data,
-            TX_META     => inp_fifo_mfb_meta_comp,
-            TX_SOF_POS  => inp_fifo_mfb_sof_pos,
-            TX_EOF_POS  => inp_fifo_mfb_eof_pos,
-            TX_SOF      => inp_fifo_mfb_sof,
-            TX_EOF      => inp_fifo_mfb_eof,
-            TX_SRC_RDY  => inp_fifo_mfb_src_rdy,
-            TX_DST_RDY  => inp_fifo_mfb_dst_rdy,
+        TX_DATA     => inp_fifo_mfb_data,
+        TX_META     => inp_fifo_mfb_meta_comp,
+        TX_SOF_POS  => inp_fifo_mfb_sof_pos,
+        TX_EOF_POS  => inp_fifo_mfb_eof_pos,
+        TX_SOF      => inp_fifo_mfb_sof,
+        TX_EOF      => inp_fifo_mfb_eof,
+        TX_SRC_RDY  => inp_fifo_mfb_src_rdy,
+        TX_DST_RDY  => inp_fifo_mfb_dst_rdy,
 
-            FIFO_STATUS => open,
-            FIFO_AFULL  => inp_fifo_afull,
-            FIFO_AEMPTY => open);
+        FIFO_STATUS => open,
+        FIFO_AFULL  => inp_fifo_afull,
+        FIFO_AEMPTY => open
+    );
 
     (inp_fifo_mfb_be, inp_fifo_mfb_meta) <= inp_fifo_mfb_meta_comp;
 
@@ -227,9 +229,9 @@ begin
     -- RX_DST_RDY stays asserted throughout and the CQ is consumed at line rate.
     PCIE_CQ_MFB_DST_RDY <= '1';
 
-    cq_drop_eff    <= inp_fifo_afull when (PCIE_CQ_MFB_SOF(0) = '1') else cq_drop_held;
+    cq_drop_eff     <= inp_fifo_afull when (PCIE_CQ_MFB_SOF(0) = '1') else cq_drop_held;
     cq_to_fifo_srdy <= PCIE_CQ_MFB_SRC_RDY and (not cq_drop_eff);
-    cq_drop_pulse  <= PCIE_CQ_MFB_SRC_RDY and PCIE_CQ_MFB_SOF(0) and inp_fifo_afull;
+    cq_drop_pulse   <= PCIE_CQ_MFB_SRC_RDY and PCIE_CQ_MFB_SOF(0) and inp_fifo_afull;
 
     cq_drop_hold_p : process (CLK)
     begin
@@ -294,121 +296,127 @@ begin
         IN_FIRST_BE  => cq_in_fbe,
         IN_LAST_BE   => cq_in_lbe,
 
-        OUT_FIRST_IB  => open,
-        OUT_LAST_IB   => open,
+        OUT_FIRST_IB   => open,
+        OUT_LAST_IB    => open,
         OUT_BYTE_COUNT => cq_drop_bytes
     );
 
     h2c_dma_hyperion_meta_ext_i : entity work.H2C_HYPERION_META_EXT
-        generic map (
-            DEVICE          => DEVICE,
-            MFB_REGIONS     => PCIE_CQ_MFB_REGIONS,
-            MFB_REGION_SIZE => PCIE_CQ_MFB_REGION_SIZE,
-            MFB_BLOCK_SIZE  => PCIE_CQ_MFB_BLOCK_SIZE,
-            MFB_ITEM_WIDTH  => PCIE_CQ_MFB_ITEM_WIDTH)
-        port map (
-            CLK                    => CLK,
-            RESET                  => RESET,
+    generic map (
+        DEVICE          => DEVICE,
+        MFB_REGIONS     => PCIE_CQ_MFB_REGIONS,
+        MFB_REGION_SIZE => PCIE_CQ_MFB_REGION_SIZE,
+        MFB_BLOCK_SIZE  => PCIE_CQ_MFB_BLOCK_SIZE,
+        MFB_ITEM_WIDTH  => PCIE_CQ_MFB_ITEM_WIDTH
+    )
+    port map (
+        CLK                    => CLK,
+        RESET                  => RESET,
 
-            PCIE_MFB_BE            => inp_fifo_mfb_be,
-            PCIE_MFB_DATA          => inp_fifo_mfb_data,
-            PCIE_MFB_META          => inp_fifo_mfb_meta,
-            PCIE_MFB_SOF           => inp_fifo_mfb_sof,
-            PCIE_MFB_EOF           => inp_fifo_mfb_eof,
-            PCIE_MFB_SOF_POS       => inp_fifo_mfb_sof_pos,
-            PCIE_MFB_EOF_POS       => inp_fifo_mfb_eof_pos,
-            PCIE_MFB_SRC_RDY       => inp_fifo_mfb_src_rdy,
-            PCIE_MFB_DST_RDY       => inp_fifo_mfb_dst_rdy,
+        PCIE_MFB_BE            => inp_fifo_mfb_be,
+        PCIE_MFB_DATA          => inp_fifo_mfb_data,
+        PCIE_MFB_META          => inp_fifo_mfb_meta,
+        PCIE_MFB_SOF           => inp_fifo_mfb_sof,
+        PCIE_MFB_EOF           => inp_fifo_mfb_eof,
+        PCIE_MFB_SOF_POS       => inp_fifo_mfb_sof_pos,
+        PCIE_MFB_EOF_POS       => inp_fifo_mfb_eof_pos,
+        PCIE_MFB_SRC_RDY       => inp_fifo_mfb_src_rdy,
+        PCIE_MFB_DST_RDY       => inp_fifo_mfb_dst_rdy,
 
-            USR_MFB_META_TR_LEN    => mex_mfb_meta_tr_len,
-            USR_MFB_META_BE        => mex_mfb_meta_be,
-            USR_MFB_META_ADDR      => mex_mfb_meta_addr,
+        USR_MFB_META_TR_LEN    => mex_mfb_meta_tr_len,
+        USR_MFB_META_BE        => mex_mfb_meta_be,
+        USR_MFB_META_ADDR      => mex_mfb_meta_addr,
 
-            USR_MFB_DATA           => mex_mfb_data,
-            USR_MFB_SOF            => mex_mfb_sof,
-            USR_MFB_EOF            => mex_mfb_eof,
-            USR_MFB_SOF_POS        => mex_mfb_sof_pos,
-            USR_MFB_EOF_POS        => mex_mfb_eof_pos,
-            USR_MFB_SRC_RDY        => mex_mfb_src_rdy,
-            USR_MFB_DST_RDY        => mex_mfb_dst_rdy,
+        USR_MFB_DATA           => mex_mfb_data,
+        USR_MFB_SOF            => mex_mfb_sof,
+        USR_MFB_EOF            => mex_mfb_eof,
+        USR_MFB_SOF_POS        => mex_mfb_sof_pos,
+        USR_MFB_EOF_POS        => mex_mfb_eof_pos,
+        USR_MFB_SRC_RDY        => mex_mfb_src_rdy,
+        USR_MFB_DST_RDY        => mex_mfb_dst_rdy,
 
-            PCIE_REQ_TOTAL_BYTES   => pcie_req_total_bytes,
-            PCIE_RD_REQ_TOTAL_INCR => pcie_rd_req_total_incr,
-            PCIE_WR_REQ_TOTAL_INCR => pcie_wr_req_total_incr);
+        PCIE_REQ_TOTAL_BYTES   => pcie_req_total_bytes,
+        PCIE_RD_REQ_TOTAL_INCR => pcie_rd_req_total_incr,
+        PCIE_WR_REQ_TOTAL_INCR => pcie_wr_req_total_incr
+    );
 
     data_shifter_i : entity work.H2C_HYPERION_DATA_SHIFTER
-        generic map (
-            MFB_REGIONS     => PCIE_CQ_MFB_REGIONS,
-            MFB_REGION_SIZE => PCIE_CQ_MFB_REGION_SIZE,
-            MFB_BLOCK_SIZE  => PCIE_CQ_MFB_BLOCK_SIZE,
-            MFB_ITEM_WIDTH  => PCIE_CQ_MFB_ITEM_WIDTH)
-        port map (
-            CLK                => CLK,
-            RST                => RESET,
+    generic map (
+        MFB_REGIONS     => PCIE_CQ_MFB_REGIONS,
+        MFB_REGION_SIZE => PCIE_CQ_MFB_REGION_SIZE,
+        MFB_BLOCK_SIZE  => PCIE_CQ_MFB_BLOCK_SIZE,
+        MFB_ITEM_WIDTH  => PCIE_CQ_MFB_ITEM_WIDTH
+    )
+    port map (
+        CLK                => CLK,
+        RST                => RESET,
 
-            RX_MFB_META_TR_LEN => mex_mfb_meta_tr_len(0),
-            RX_MFB_META_BE     => mex_mfb_meta_be(0),
-            RX_MFB_META_ADDR   => mex_mfb_meta_addr(0),
+        RX_MFB_META_TR_LEN => mex_mfb_meta_tr_len(0),
+        RX_MFB_META_BE     => mex_mfb_meta_be(0),
+        RX_MFB_META_ADDR   => mex_mfb_meta_addr(0),
 
-            RX_MFB_DATA        => mex_mfb_data,
-            RX_MFB_SOF         => mex_mfb_sof(0),
-            RX_MFB_EOF         => mex_mfb_eof(0),
-            RX_MFB_SOF_POS     => mex_mfb_sof_pos,
-            RX_MFB_EOF_POS     => mex_mfb_eof_pos,
-            RX_MFB_SRC_RDY     => mex_mfb_src_rdy,
-            RX_MFB_DST_RDY     => mex_mfb_dst_rdy,
+        RX_MFB_DATA        => mex_mfb_data,
+        RX_MFB_SOF         => mex_mfb_sof(0),
+        RX_MFB_EOF         => mex_mfb_eof(0),
+        RX_MFB_SOF_POS     => mex_mfb_sof_pos,
+        RX_MFB_EOF_POS     => mex_mfb_eof_pos,
+        RX_MFB_SRC_RDY     => mex_mfb_src_rdy,
+        RX_MFB_DST_RDY     => mex_mfb_dst_rdy,
 
-            TX_MFB_META_TR_LEN => shfr_mfb_meta_tr_len,
-            TX_MFB_META_BE     => shfr_mfb_meta_be,
-            TX_MFB_META_ADDR   => shfr_mfb_meta_addr,
+        TX_MFB_META_TR_LEN => shfr_mfb_meta_tr_len,
+        TX_MFB_META_BE     => shfr_mfb_meta_be,
+        TX_MFB_META_ADDR   => shfr_mfb_meta_addr,
 
-            TX_MFB_DATA        => shfr_mfb_data,
-            TX_MFB_SOF         => shfr_mfb_sof,
-            TX_MFB_EOF         => shfr_mfb_eof,
-            TX_MFB_SRC_RDY     => shfr_mfb_src_rdy,
-            TX_MFB_DST_RDY     => shfr_mfb_dst_rdy);
+        TX_MFB_DATA        => shfr_mfb_data,
+        TX_MFB_SOF         => shfr_mfb_sof,
+        TX_MFB_EOF         => shfr_mfb_eof,
+        TX_MFB_SRC_RDY     => shfr_mfb_src_rdy,
+        TX_MFB_DST_RDY     => shfr_mfb_dst_rdy
+    );
 
     axi_adapter_i : entity work.H2C_HYPERION_AXI_ADAPTER
-        generic map (
-            MFB_REGIONS     => PCIE_CQ_MFB_REGIONS,
-            MFB_REGION_SIZE => PCIE_CQ_MFB_REGION_SIZE,
-            MFB_BLOCK_SIZE  => PCIE_CQ_MFB_BLOCK_SIZE,
-            MFB_ITEM_WIDTH  => PCIE_CQ_MFB_ITEM_WIDTH,
+    generic map (
+        MFB_REGIONS     => PCIE_CQ_MFB_REGIONS,
+        MFB_REGION_SIZE => PCIE_CQ_MFB_REGION_SIZE,
+        MFB_BLOCK_SIZE  => PCIE_CQ_MFB_BLOCK_SIZE,
+        MFB_ITEM_WIDTH  => PCIE_CQ_MFB_ITEM_WIDTH,
 
-            HBM_DATA_WIDTH  => HBM_DATA_WIDTH,
-            HBM_ADDR_WIDTH  => HBM_ADDR_WIDTH,
-            HBM_BURST_WIDTH => HBM_BURST_WIDTH,
-            HBM_ID_WIDTH    => HBM_ID_WIDTH,
-            HBM_LEN_WIDTH   => HBM_LEN_WIDTH,
-            HBM_SIZE_WIDTH  => HBM_SIZE_WIDTH,
-            HBM_RESP_WIDTH  => HBM_RESP_WIDTH)
-        port map (
-            RX_MFB_META_TR_LEN  => shfr_mfb_meta_tr_len,
-            RX_MFB_META_BE      => shfr_mfb_meta_be,
-            RX_MFB_META_ADDR    => shfr_mfb_meta_addr,
-            RX_MFB_DATA         => shfr_mfb_data,
-            RX_MFB_SOF          => shfr_mfb_sof,
-            RX_MFB_EOF          => shfr_mfb_eof,
-            RX_MFB_SRC_RDY      => shfr_mfb_src_rdy,
-            RX_MFB_DST_RDY      => shfr_mfb_dst_rdy,
+        HBM_DATA_WIDTH  => HBM_DATA_WIDTH,
+        HBM_ADDR_WIDTH  => HBM_ADDR_WIDTH,
+        HBM_BURST_WIDTH => HBM_BURST_WIDTH,
+        HBM_ID_WIDTH    => HBM_ID_WIDTH,
+        HBM_LEN_WIDTH   => HBM_LEN_WIDTH,
+        HBM_SIZE_WIDTH  => HBM_SIZE_WIDTH,
+        HBM_RESP_WIDTH  => HBM_RESP_WIDTH
+    )
+    port map (
+        RX_MFB_META_TR_LEN  => shfr_mfb_meta_tr_len,
+        RX_MFB_META_BE      => shfr_mfb_meta_be,
+        RX_MFB_META_ADDR    => shfr_mfb_meta_addr,
+        RX_MFB_DATA         => shfr_mfb_data,
+        RX_MFB_SOF          => shfr_mfb_sof,
+        RX_MFB_EOF          => shfr_mfb_eof,
+        RX_MFB_SRC_RDY      => shfr_mfb_src_rdy,
+        RX_MFB_DST_RDY      => shfr_mfb_dst_rdy,
 
-            HBM_AXI_AWID        => HBM_AXI_AWID,
-            HBM_AXI_AWADDR      => HBM_AXI_AWADDR,
-            HBM_AXI_AWLEN       => HBM_AXI_AWLEN,
-            HBM_AXI_AWSIZE      => HBM_AXI_AWSIZE,
-            HBM_AXI_AWBURST     => HBM_AXI_AWBURST,
-            HBM_AXI_AWVALID     => HBM_AXI_AWVALID,
-            HBM_AXI_AWREADY     => HBM_AXI_AWREADY,
+        HBM_AXI_AWID        => HBM_AXI_AWID,
+        HBM_AXI_AWADDR      => HBM_AXI_AWADDR,
+        HBM_AXI_AWLEN       => HBM_AXI_AWLEN,
+        HBM_AXI_AWSIZE      => HBM_AXI_AWSIZE,
+        HBM_AXI_AWBURST     => HBM_AXI_AWBURST,
+        HBM_AXI_AWVALID     => HBM_AXI_AWVALID,
+        HBM_AXI_AWREADY     => HBM_AXI_AWREADY,
 
-            HBM_AXI_WDATA           => HBM_AXI_WDATA,
-            HBM_AXI_WSTRB           => HBM_AXI_WSTRB,
-            HBM_AXI_WDATA_PARITY    => HBM_AXI_WDATA_PARITY,
-            HBM_AXI_WLAST           => HBM_AXI_WLAST,
-            HBM_AXI_WVALID          => HBM_AXI_WVALID,
-            HBM_AXI_WREADY          => HBM_AXI_WREADY,
+        HBM_AXI_WDATA           => HBM_AXI_WDATA,
+        HBM_AXI_WSTRB           => HBM_AXI_WSTRB,
+        HBM_AXI_WDATA_PARITY    => HBM_AXI_WDATA_PARITY,
+        HBM_AXI_WLAST           => HBM_AXI_WLAST,
+        HBM_AXI_WVALID          => HBM_AXI_WVALID,
+        HBM_AXI_WREADY          => HBM_AXI_WREADY,
 
-            HBM_AXI_BID        => HBM_AXI_BID,
-            HBM_AXI_BRESP      => HBM_AXI_BRESP,
-            HBM_AXI_BVALID     => HBM_AXI_BVALID,
-            HBM_AXI_BREADY     => HBM_AXI_BREADY);
+        HBM_AXI_BID        => HBM_AXI_BID,
+        HBM_AXI_BRESP      => HBM_AXI_BRESP,
+        HBM_AXI_BVALID     => HBM_AXI_BVALID,
+        HBM_AXI_BREADY     => HBM_AXI_BREADY
+    );
 end architecture;
