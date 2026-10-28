@@ -116,7 +116,7 @@ architecture FULL of C2H_HBM_READER is
     constant ADDR_REQ_BYT_L : std_logic_vector(7 downto 0) := X"20";
     constant ADDR_REQ_BYT_H : std_logic_vector(7 downto 0) := X"24";
 
-    signal start_req : std_logic;
+    signal start_req  : std_logic;
     signal clear_done : std_logic;
 
     signal addr_reg  : unsigned(HBM_ADDR_WIDTH-1 downto 0);
@@ -220,7 +220,7 @@ begin
     mi_drdy_p : process (CLK)
     begin
         if rising_edge(CLK) then
-            if RESET = '1' then
+            if (RESET = '1') then
                 MI_DRDY <= '0';
             else
                 MI_DRDY <= MI_RD;
@@ -242,7 +242,7 @@ begin
         variable rem_bytes        : unsigned(63 downto 0);
     begin
         if rising_edge(CLK) then
-            if RESET = '1' then
+            if (RESET = '1') then
                 addr_reg        <= (others => '0');
                 size_reg        <= (others => '0');
                 busy            <= '0';
@@ -258,7 +258,7 @@ begin
                 req_cnt         <= (others => '0');
                 req_bytes_cnt   <= (others => '0');
             else
-                if MI_WR = '1' then
+                if (MI_WR = '1') then
                     case MI_ADDR(7 downto 0) is
                         when ADDR_ADDR_L =>
                             addr_reg(31 downto 0) <= unsigned(MI_DWR);
@@ -273,13 +273,13 @@ begin
                     end case;
                 end if;
 
-                if clear_done = '1' then
+                if (clear_done = '1') then
                     done      <= '0';
                     error     <= '0';
                     range_err <= '0';
                 end if;
 
-                if start_req = '1' and busy = '0' then
+                if (start_req = '1' and busy = '0') then
                     done      <= '0';
                     error     <= '0';
                     range_err <= '0';
@@ -288,9 +288,9 @@ begin
                     --  * do not read past the end of HBM:  addr + size <= 2**HBM_ADDR_WIDTH
                     --  * do not cross the channel's 2 GB region: addr[30:0] + size <= 2**31
                     --    (ARID/CHAN follows the running address; a straddle would mis-route mid-transfer)
-                    if size_reg = 0
+                    if (size_reg = 0
                        or (resize(addr_reg, 65) + resize(size_reg, 65)) > shift_left(to_unsigned(1, 65), HBM_ADDR_WIDTH)
-                       or (resize(addr_reg(30 downto 0), 65) + resize(size_reg, 65)) > shift_left(to_unsigned(1, 65), 31) then
+                       or (resize(addr_reg(30 downto 0), 65) + resize(size_reg, 65)) > shift_left(to_unsigned(1, 65), 31)) then
                         range_err <= '1';
                         busy      <= '0';
                     else
@@ -304,19 +304,19 @@ begin
                     end if;
                 end if;
 
-                if busy = '1' then
+                if (busy = '1') then
                     -- Issue a new burst only once the previous burst's data has fully drained from
                     -- the output FIFO (fifo_empty='1'); this keeps a whole burst within FIFO depth.
-                    if arvalid_r = '0' and beats_left = 0 and remaining_bytes /= 0 and fifo_empty = '1' then
+                    if (arvalid_r = '0' and beats_left = 0 and remaining_bytes /= 0 and fifo_empty = '1') then
                         rem_bytes := remaining_bytes;
                         -- Short-circuit for full bursts: avoids overflow of the 5-bit beats_needed
                         -- when remaining_bytes exceeds 31 beats (> 992 bytes).
-                        if rem_bytes >= to_unsigned(2**HBM_LEN_WIDTH * HBM_BYTE_W, rem_bytes'length) then
+                        if (rem_bytes >= to_unsigned(2**HBM_LEN_WIDTH * HBM_BYTE_W, rem_bytes'length)) then
                             next_burst_beats := to_unsigned(2**HBM_LEN_WIDTH, next_burst_beats'length);
                         else
                             -- Partial last burst: rem_bytes < 512, fits safely in HBM_LEN_WIDTH+1 bits.
                             beats_needed := resize((rem_bytes + beat_bytes_u - 1) / beat_bytes_u, beats_needed'length);
-                            if beats_needed = 0 then
+                            if (beats_needed = 0) then
                                 beats_needed := to_unsigned(1, beats_needed'length);
                             end if;
                             next_burst_beats := beats_needed;
@@ -328,21 +328,21 @@ begin
                         arvalid_r     <= '1';
                     end if;
 
-                    if arvalid_r = '1' and HBM_AXI_ARREADY = '1' then
-                        arvalid_r <= '0';
+                    if (arvalid_r = '1' and HBM_AXI_ARREADY = '1') then
+                        arvalid_r  <= '0';
                         beats_left <= burst_beats_u;
                     end if;
 
-                    if beat_accept = '1' then
-                        if HBM_AXI_RRESP /= std_logic_vector(to_unsigned(0, HBM_RESP_WIDTH)) then
+                    if (beat_accept = '1') then
+                        if (HBM_AXI_RRESP /= std_logic_vector(to_unsigned(0, HBM_RESP_WIDTH))) then
                             error <= '1';
                         end if;
 
-                        if beats_left /= 0 then
+                        if (beats_left /= 0) then
                             beats_left <= beats_left - 1;
                         end if;
 
-                        if remaining_bytes > beat_bytes_u then
+                        if (remaining_bytes > beat_bytes_u) then
                             remaining_bytes <= remaining_bytes - beat_bytes_u;
                             addr_reg        <= addr_reg + resize(beat_bytes_u, addr_reg'length);
                             first_beat      <= '0';
@@ -417,11 +417,11 @@ begin
     USER_RX_MFB_SOF     <= fifo_dout(2*MFB_REGIONS - 1 downto MFB_REGIONS);
     USER_RX_MFB_EOF_POS <= fifo_dout(2*MFB_REGIONS + EOF_POS_WIDTH - 1 downto 2*MFB_REGIONS);
     USER_RX_MFB_SOF_POS <= fifo_dout(2*MFB_REGIONS + EOF_POS_WIDTH + SOF_POS_WIDTH - 1 downto
-                                      2*MFB_REGIONS + EOF_POS_WIDTH);
+                                     2*MFB_REGIONS + EOF_POS_WIDTH);
     USER_RX_MFB_META    <= fifo_dout(2*MFB_REGIONS + EOF_POS_WIDTH + SOF_POS_WIDTH + META_WIDTH - 1 downto
-                                      2*MFB_REGIONS + EOF_POS_WIDTH + SOF_POS_WIDTH);
+                                     2*MFB_REGIONS + EOF_POS_WIDTH + SOF_POS_WIDTH);
     USER_RX_MFB_DATA    <= fifo_dout(FIFO_WORD_W - 1 downto
-                                      2*MFB_REGIONS + EOF_POS_WIDTH + SOF_POS_WIDTH + META_WIDTH);
+                                     2*MFB_REGIONS + EOF_POS_WIDTH + SOF_POS_WIDTH + META_WIDTH);
 
     USER_RX_MFB_SRC_RDY <= not fifo_empty;
 end architecture;
