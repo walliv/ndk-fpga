@@ -452,6 +452,7 @@ begin
 
             HDR_META_WIDTH      => HDR_META_WIDTH,
             CHANNELS            => C2H_CHANNELS,
+            FRAME_SIZE_MAX      => PKT_SIZE_MAX,
 
             DEVICE              => DEVICE
         )
