@@ -390,6 +390,9 @@ begin
         HBM_RESP_WIDTH  => HBM_RESP_WIDTH
     )
     port map (
+        CLK   => CLK,
+        RESET => RESET,
+
         RX_MFB_META_TR_LEN  => shfr_mfb_meta_tr_len,
         RX_MFB_META_BE      => shfr_mfb_meta_be,
         RX_MFB_META_ADDR    => shfr_mfb_meta_addr,
