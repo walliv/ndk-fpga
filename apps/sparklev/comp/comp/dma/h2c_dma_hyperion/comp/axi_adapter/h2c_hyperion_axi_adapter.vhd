@@ -86,6 +86,8 @@ architecture FULL of H2C_HYPERION_AXI_ADAPTER is
     -- The AW or the W of the word at the head is taken by the end of this cycle.
     signal aw_ok   : std_logic;
     signal w_ok    : std_logic;
+
+    signal burst_too_long : std_logic;
 begin
     -- AW and W are offered independently of each other's READY (AMBA A3.3.1) and held until taken (A3.2.1). The SOF word
     -- feeds both channels, so it leaves the MFB once both have taken it, possibly in different cycles.
@@ -119,6 +121,15 @@ begin
     tr_byte_offs    <= unsigned(RX_MFB_META_ADDR(4 downto 0));
     tr_len_u        <= unsigned(RX_MFB_META_TR_LEN) + tr_byte_offs + MFB_BYTE_W -1;
     HBM_AXI_AWLEN   <= std_logic_vector(resize(shift_right(tr_len_u, log2(MFB_BYTE_W)), HBM_LEN_WIDTH) -1);
+
+    -- One TLP becomes one burst, so a TLP needing more beats than AWLEN encodes would wrap it; the PCIe payload cap must prevent that.
+    burst_too_long <= awvalid when shift_right(tr_len_u, log2(MFB_BYTE_W)) > 2**HBM_LEN_WIDTH else '0';
+
+    -- psl default clock is rising_edge(CLK);
+
+    -- psl assert_burst_fits_awlen :
+    --      assert always (burst_too_long = '0') abort (RESET)
+    --      report "H2C_HYPERION_AXI_ADAPTER: a write TLP spans more beats than one AXI3 burst holds!";
     HBM_AXI_AWSIZE  <= "101";
     HBM_AXI_AWBURST <= "01";            -- NOTE: INCREMENTING BURST ONLY for our own risk :)
     -- The address and transaction ID of a burst come with its SOF word.
