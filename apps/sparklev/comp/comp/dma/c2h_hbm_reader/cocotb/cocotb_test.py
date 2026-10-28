@@ -13,7 +13,7 @@ from cocotbext.ofm.dma.hyperion import C2HReaderMIRegMap, C2HCtrlRegBits, C2HSta
 
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import ClockCycles, RisingEdge
+from cocotb.triggers import ClockCycles, RisingEdge, ReadOnly
 from cocotb.logging import SimLogFormatter
 
 import cocotb_bus.monitors
@@ -22,7 +22,9 @@ from cocotb_bus.scoreboard import Scoreboard
 
 from cocotbext.ofm.mi.drivers import MIRequestDriver
 from cocotbext.ofm.mfb.fast_monitors import MFBMonitor
+from cocotbext.ofm.mfb.properties import attach_mfb_properties
 from cocotbext.ofm.mfb.transaction import MfbTransactionWithMeta
+from cocotbext.ofm.mfb.utils import random_tuple_iterator
 
 # Patch AXI3 4-bit ARLEN before importing AxiSlaveRead so the width assert passes.
 from cocotbext.axi.axi_channels import AxiARSink
@@ -45,13 +47,18 @@ HBM_ADDR_WIDTH  = 34
 HBM_ID_WIDTH    = 6
 HBM_BYTE_W      = HBM_DATA_WIDTH // 8   # 32
 HDR_META_WIDTH  = 12
-CHANNELS        = 64
-META_CHAN_W     = int(math.log2(CHANNELS))   # 6
-META_TOTAL_W    = HDR_META_WIDTH + META_CHAN_W  # 18
+HBM_SIZE        = 1 << HBM_ADDR_WIDTH
+AXI_PAGE        = 4096
 
 # Maximum AXI burst length: 2^HBM_LEN_WIDTH beats
 MAX_BURST_BEATS = 2 ** HBM_LEN_WIDTH  # 16
 MAX_BURST_BYTES = MAX_BURST_BEATS * HBM_BYTE_W  # 512
+# Largest multi-burst request the random tests issue
+MAX_LARGE_BYTES = 16 * MAX_BURST_BYTES  # 8 KiB
+# Share of random requests placed to end exactly at their channel region's end
+REGION_END_RATE = 0.1
+# A request that never completes must fail the test rather than hang it
+DONE_POLL_LIMIT = 200_000
 
 
 # ============================================================
@@ -85,12 +92,42 @@ def random_pause():
 
 
 # ============================================================
+# Channel addressing
+# ============================================================
+class ChannelMap:
+    """Channel addressing derived from CHANNELS: the channel is the top log2(CHANNELS) bits of the
+    HBM address, so each channel owns one contiguous region of 2**(HBM_ADDR_WIDTH-log2(CHANNELS))
+    bytes."""
+
+    def __init__(self, channels: int):
+        assert channels >= 2 and channels & (channels - 1) == 0, f"CHANNELS={channels} is not a power of two"
+        self.channels = channels
+        self.chan_w = channels.bit_length() - 1
+        assert self.chan_w <= HBM_ID_WIDTH
+        self.region_w = HBM_ADDR_WIDTH - self.chan_w
+        self.region = 1 << self.region_w
+        self.meta_w = HDR_META_WIDTH + self.chan_w
+
+    def chan_of(self, addr: int) -> int:
+        return addr >> self.region_w
+
+    def in_range(self, addr: int, size: int) -> bool:
+        """Mirror of the DUT's request validation: a non-empty request that ends inside HBM and
+        inside the channel region it starts in."""
+        return (size > 0 and addr + size <= HBM_SIZE
+                and (addr & (self.region - 1)) + size <= self.region)
+
+
+# ============================================================
 # Testbench
 # ============================================================
 class Testbench:
     def __init__(self, dut, debug=False):
         self.dut = dut
         self.log = logging.getLogger("cocotb.%s" % type(self).__qualname__)
+
+        # The model takes CHANNELS from the elaborated DUT, so a GENERICS override cannot desync it.
+        self.cmap = ChannelMap(int(dut.CHANNELS.value))
 
         # --- MI driver ---
         self.mi = MIRequestDriver(dut, "MI", dut.CLK)
@@ -105,9 +142,8 @@ class Testbench:
             dut.RESET,
         )
         self.hbm_slave.target = self.mem
-        # Uncomment to add backpressure for stress-testing:
-        # self.hbm_slave.ar_channel.set_pause_generator(random_pause())
-        # self.hbm_slave.r_channel.set_pause_generator(random_pause())
+        self.hbm_slave.ar_channel.set_pause_generator(random_pause())
+        self.hbm_slave.r_channel.set_pause_generator(random_pause())
 
         # Drive the non-standard RDATA_PARITY port to 0 (not part of AxiReadBus)
         dut.HBM_AXI_RDATA_PARITY.value = 0
@@ -123,13 +159,27 @@ class Testbench:
                 "region_size": 4,
                 "block_size": 8,
                 "item_width": 8,
-                "meta_width": META_TOTAL_W,
+                "meta_width": self.cmap.meta_w,
             },
             trans_type=MfbTransactionWithMeta,
         )
 
+        # Conformance watchdog on USER_RX_MFB with the monitor's geometry; named explicitly, as nvc also
+        # exposes the internal signals of the top level.
+        self.mfb_props = attach_mfb_properties(
+            dut, dut.CLK, reset=dut.RESET, include=("USER_RX_MFB",),
+            mfb_params={"regions": 1, "region_size": 4, "block_size": 8, "item_width": 8},
+        )
+
         # --- USER_RX_MFB_DST_RDY random backpressure ---
         self.backpressure = BitDriver(dut.USER_RX_MFB_DST_RDY, dut.CLK)
+
+        # --- Expected AR stream of the request in flight, checked by ar_monitor() ---
+        self.exp_chan = None
+        self.exp_lo = 0
+        self.exp_hi = 0
+        self.ar_count = 0
+        self.ar_beats = 0
 
         # --- Scoreboard ---
         self.expected_output = []
@@ -154,6 +204,40 @@ class Testbench:
         await ClockCycles(self.dut.CLK, 100)
         self.dut.RESET.value = 0
 
+    async def ar_monitor(self):
+        """AXI3 read-burst legality watchdog in the style of the Iuventus read adapter bench, plus
+        the channel routing: ARID carries the channel of the burst's address, which must be the
+        channel of the request in flight, and every burst stays inside that request's beats."""
+        cm = self.cmap
+        while True:
+            await RisingEdge(self.dut.CLK)
+            await ReadOnly()
+            if not (bool(self.dut.HBM_AXI_ARVALID.value) and bool(self.dut.HBM_AXI_ARREADY.value)):
+                continue
+            addr = int(self.dut.HBM_AXI_ARADDR.value)
+            length = int(self.dut.HBM_AXI_ARLEN.value)
+            size = int(self.dut.HBM_AXI_ARSIZE.value)
+            burst = int(self.dut.HBM_AXI_ARBURST.value)
+            arid = int(self.dut.HBM_AXI_ARID.value)
+            burst_bytes = (length + 1) << size
+            assert self.exp_chan is not None, f"AR at 0x{addr:09X} without a request in flight"
+            assert size == HBM_BYTE_W.bit_length() - 1, f"ARSIZE={size}, expected {HBM_BYTE_W.bit_length() - 1} (32B beats)"
+            assert burst == 1, f"ARBURST={burst}, expected 1 (INCR)"
+            assert (addr & ~(AXI_PAGE - 1)) == ((addr + burst_bytes - 1) & ~(AXI_PAGE - 1)), (
+                f"AR burst crosses a 4KB boundary: addr=0x{addr:09X} arlen={length} "
+                f"arsize={size} (burst_bytes={burst_bytes})")
+            assert self.exp_lo <= addr and addr + burst_bytes <= self.exp_hi, (
+                f"AR burst [0x{addr:09X}, 0x{addr + burst_bytes:09X}) leaves the request's beats "
+                f"[0x{self.exp_lo:09X}, 0x{self.exp_hi:09X})")
+            assert cm.chan_of(addr) == self.exp_chan, (
+                f"AR at 0x{addr:09X} lies in channel {cm.chan_of(addr)}, the request targets "
+                f"channel {self.exp_chan}")
+            assert arid & (cm.channels - 1) == self.exp_chan, (
+                f"ARID=0x{arid:02X} carries channel {arid & (cm.channels - 1)}, expected "
+                f"{self.exp_chan} for AR at 0x{addr:09X} (CHANNELS={cm.channels})")
+            self.ar_count += 1
+            self.ar_beats += length + 1
+
     # --------------------------------------------------------
     # MI helpers
     # --------------------------------------------------------
@@ -169,24 +253,37 @@ class Testbench:
     # --------------------------------------------------------
     # Single read-request stimulus + model update
     # --------------------------------------------------------
-    async def issue_request(self, chan, lbase, off, size):
-        """
-        Program C2H_HBM_READER to read `size` bytes from HBM and wait until DONE.
+    async def _program(self, addr, size):
+        await self._mi_write32(C2HReaderMIRegMap.ADDR_L, addr & 0xFFFFFFFF)
+        await self._mi_write32(C2HReaderMIRegMap.ADDR_H, (addr >> 32) & 0x3)
+        await self._mi_write32(C2HReaderMIRegMap.SIZE_L, size & 0xFFFFFFFF)
+        await self._mi_write32(C2HReaderMIRegMap.SIZE_H, (size >> 32) & 0xFFFFFFFF)
+        await self._mi_write32(C2HReaderMIRegMap.CTRL, 0x1)  # START
 
-        The DUT splits the transfer into as many 16-beat (512 B) INCR AXI bursts
-        as needed, advancing the address sequentially.
+    async def _wait_status(self, addr, size):
+        """Poll STATUS until DONE or RANGE_ERR and return the status word."""
+        for poll in range(DONE_POLL_LIMIT):
+            status = await self._mi_read32(C2HReaderMIRegMap.STATUS)
+            if status & (1 << C2HStatRegBits.ERROR):
+                raise RuntimeError(f"C2H_HBM_READER: AXI RRESP error (addr=0x{addr:09X} size={size})")
+            if status & ((1 << C2HStatRegBits.DONE) | (1 << C2HStatRegBits.RANGE_ERR)):
+                self.log.debug(f"status 0x{status:X} after {poll} polls")
+                return status
+            await ClockCycles(self.dut.CLK, 1)
+        raise TimeoutError(f"C2H_HBM_READER: no DONE/RANGE_ERR for addr=0x{addr:09X} size={size}")
 
-        chan  : channel index [0, CHANNELS)
-        lbase : 32B-aligned base offset within the channel region.
-                Must be 512B-aligned for multi-burst transfers so that each
-                16-beat INCR burst does not cross a 4 KB AXI boundary.
-        off   : byte offset [0, 31] added when programming ADDR registers;
-                DUT ignores low 5 bits, so effective start = abase.
-        size  : transfer size in bytes (> 0, must be a multiple of HBM_BYTE_W
-                for clean beat boundaries; up to the channel region size)
+    async def issue_request(self, addr, size):
         """
-        abase = (chan << (HBM_ADDR_WIDTH - HBM_ID_WIDTH)) | lbase
-        addr  = abase + off  # programmed value (low 5 bits ignored by DUT)
+        Program C2H_HBM_READER to read `size` bytes from HBM address `addr` and wait until DONE.
+
+        The DUT drops the low 5 address bits: it streams `size` bytes starting at the 32B-aligned
+        abase = addr & ~31, split into INCR AXI bursts of at most 16 beats that must not cross a
+        4 KiB boundary. `addr`/`size` must pass ChannelMap.in_range().
+        """
+        cm = self.cmap
+        assert cm.in_range(addr, size), f"request addr=0x{addr:09X} size={size} is out of range"
+        chan = cm.chan_of(addr)
+        abase = addr & ~(HBM_BYTE_W - 1)
 
         # Write random data for every beat the DUT will fetch
         nbeats = math.ceil(size / HBM_BYTE_W)
@@ -194,42 +291,49 @@ class Testbench:
 
         # Build expected output and update model counters
         exp_data = await build_expected_frame(self.mem, abase, size)
-        exp_meta = chan  # HDR_META=0 (high bits), CHAN=chan (low META_CHAN_W bits)
+        exp_meta = chan  # HDR_META=0 (high bits), CHAN=chan (low chan_w bits)
         self.expected_output.append(MfbTransactionWithMeta(data=exp_data, meta=exp_meta))
         self.exp_req_cnt   += 1
         self.exp_req_bytes += size
 
-        nbursts = math.ceil(nbeats / MAX_BURST_BEATS)
-        self.log.info(
-            f"ISSUE: chan={chan} lbase=0x{lbase:x} off={off} size={size} "
-            f"nbeats={nbeats} nbursts={nbursts} abase=0x{abase:x}"
-        )
+        self.log.debug(f"ISSUE: chan={chan} addr=0x{addr:09X} size={size} nbeats={nbeats}")
 
-        # Program DUT registers
-        await self._mi_write32(C2HReaderMIRegMap.ADDR_L, addr & 0xFFFFFFFF)
-        await self._mi_write32(C2HReaderMIRegMap.ADDR_H, (addr >> 32) & 0x3)
-        await self._mi_write32(C2HReaderMIRegMap.SIZE_L, size & 0xFFFFFFFF)
-        await self._mi_write32(C2HReaderMIRegMap.SIZE_H, (size >> 32) & 0xFFFFFFFF)
-        await self._mi_write32(C2HReaderMIRegMap.CTRL, 0x1)  # START
+        self.exp_chan = chan
+        self.exp_lo = abase
+        self.exp_hi = abase + nbeats * HBM_BYTE_W
+        ar_beats0 = self.ar_beats
+
+        await self._program(addr, size)
+        status = await self._wait_status(addr, size)
+        assert not status & (1 << C2HStatRegBits.RANGE_ERR), (
+            f"RANGE_ERR for the in-range request addr=0x{addr:09X} size={size}")
 
         # Verify SIZE_L was latched correctly
         size_l_rb = await self._mi_read32(C2HReaderMIRegMap.SIZE_L)
-        if size_l_rb != (size & 0xFFFFFFFF):
-            self.log.error(f"SIZE_L readback mismatch: wrote {size}, read {size_l_rb}")
+        assert size_l_rb == (size & 0xFFFFFFFF), f"SIZE_L readback mismatch: wrote {size}, read {size_l_rb}"
 
-        # Poll STATUS until DONE (bit 1)
-        poll = 0
-        while True:
-            status = await self._mi_read32(C2HReaderMIRegMap.STATUS)
-            if status & (1 << C2HStatRegBits.ERROR):
-                raise RuntimeError(f"C2H_HBM_READER: AXI RRESP error (addr=0x{addr:09X} size={size})")
-            if status & (1 << C2HStatRegBits.DONE):
-                self.log.info(f"DONE after {poll} polls")
-                break
-            poll += 1
-            await ClockCycles(self.dut.CLK, 1)
+        # DONE rises with the last R beat, so every AR of the request has been seen by now.
+        assert self.ar_beats - ar_beats0 == nbeats, (
+            f"ARs requested {self.ar_beats - ar_beats0} beats for addr=0x{addr:09X} size={size}, "
+            f"expected {nbeats}")
+        self.exp_chan = None
 
         # Clear DONE
+        await self._mi_write32(C2HReaderMIRegMap.CTRL, 0x2)
+
+    async def issue_rejected_request(self, addr, size):
+        """Program a request the DUT must reject: RANGE_ERR, no DONE, no AR, no counter change."""
+        assert not self.cmap.in_range(addr, size)
+        ar_count0 = self.ar_count
+        self.exp_chan = None
+        await self._program(addr, size)
+        status = await self._wait_status(addr, size)
+        assert status & (1 << C2HStatRegBits.RANGE_ERR), (
+            f"no RANGE_ERR for the out-of-range request addr=0x{addr:09X} size={size} "
+            f"(status=0x{status:X}, CHANNELS={self.cmap.channels})")
+        assert not status & (1 << C2HStatRegBits.DONE), f"DONE with RANGE_ERR (status=0x{status:X})"
+        await ClockCycles(self.dut.CLK, 50)
+        assert self.ar_count == ar_count0, f"rejected request addr=0x{addr:09X} size={size} issued an AR"
         await self._mi_write32(C2HReaderMIRegMap.CTRL, 0x2)
 
     # --------------------------------------------------------
@@ -250,77 +354,39 @@ class Testbench:
 # ============================================================
 # Test helpers
 # ============================================================
-def _rand_request():
-    """
-    Return (chan, lbase, off, size) for one small (single-burst) request.
-
-    Constraints:
-      - chan   in [0, CHANNELS)
-      - lbase  32B-aligned; (lbase & 0xFFF) + MAX_BURST_BYTES <= 0x1000
-               (ensures the single 16-beat INCR burst cannot cross a 4 KB boundary)
-      - off    in [0, HBM_BYTE_W) — exercises the low-bit-masking path in the DUT
-      - size   1..16 beats = HBM_BYTE_W..MAX_BURST_BYTES in steps of HBM_BYTE_W
-    """
-    chan     = random.randrange(CHANNELS)
-    max_low12 = 0x1000 - MAX_BURST_BYTES  # 0xE00 = 3584
-    low12    = random.randrange(0, max_low12 + 1, HBM_BYTE_W)
-    lbase    = low12
-    off      = random.randrange(0, HBM_BYTE_W)
-    nbeats   = random.randrange(1, MAX_BURST_BEATS + 1)  # 1..16
-    size     = nbeats * HBM_BYTE_W
-    return chan, lbase, off, size
+def _rand_addr(cmap, size):
+    """Random request address for `size` bytes: any channel, any 32B-aligned base, any sub-32B
+    offset, with no regard for 4 KiB pages. A share of requests ends exactly at the channel region's
+    end, which for the last channel is the end of HBM."""
+    region_base = random.randrange(cmap.channels) << cmap.region_w
+    if random.random() < REGION_END_RATE:
+        return region_base + cmap.region - size
+    off = random.randrange(HBM_BYTE_W)
+    lbase = random.randrange(0, cmap.region - size - off + 1, HBM_BYTE_W)
+    return region_base + lbase + off
 
 
-def _rand_large_request():
-    """
-    Return (chan, lbase, off, size) for a multi-burst request (2..16 full bursts).
+def _rand_request(cmap):
+    """(addr, size) of one single-burst-sized request: 1..512 B, any byte count."""
+    size = random.randint(1, MAX_BURST_BYTES)
+    return _rand_addr(cmap, size), size
 
-    lbase is 512B-aligned so that every 16-beat (512 B) INCR burst starts at a
-    512B boundary, which never crosses a 4 KB AXI page boundary (512 divides 4096).
 
-    size is always an exact multiple of MAX_BURST_BYTES so all bursts are full.
-    """
-    chan        = random.randrange(CHANNELS)
-    CHAN_REGION = 1 << (HBM_ADDR_WIDTH - HBM_ID_WIDTH)  # 256 MB per channel
-    MAX_SIZE    = 16 * MAX_BURST_BYTES                   # 16 full bursts = 8192 B
-    # 512B-aligned lbase with enough room for the largest request
-    lbase = random.randrange(0, CHAN_REGION - MAX_SIZE, MAX_BURST_BYTES)
-    off   = 0  # no sub-32B offset for multi-burst transfers
-    nbursts = random.randrange(2, 17)  # 2..16 full bursts
-    size    = nbursts * MAX_BURST_BYTES
-    return chan, lbase, off, size
+def _rand_large_request(cmap):
+    """(addr, size) of one multi-burst request: 513 B..8 KiB, any byte count."""
+    size = random.randint(MAX_BURST_BYTES + 1, MAX_LARGE_BYTES)
+    return _rand_addr(cmap, size), size
 
 
 async def prepare(dut):
     cocotb.start_soon(Clock(dut.CLK, 4, unit="ns").start())
     tb = Testbench(dut=dut, debug=False)
+    tb.log.info(f"cocotb.RANDOM_SEED={cocotb.RANDOM_SEED} CHANNELS={tb.cmap.channels} "
+                f"(re-run with COCOTB_RANDOM_SEED=<seed> GENERICS=-gCHANNELS=<n> to reproduce)")
+    tb.backpressure.start(random_tuple_iterator(1, 8, 1, 4))
     await tb.reset()
+    cocotb.start_soon(tb.ar_monitor())
     return tb
-
-
-async def _mfb_word_monitor(dut):
-    """Log every valid MFB word and every FIFO write (beat_accept)."""
-    clk = RisingEdge(dut.CLK)
-    while True:
-        await clk
-        if dut.USER_RX_MFB_SRC_RDY.value == 1 and dut.USER_RX_MFB_DST_RDY.value == 1:
-            sof = int(dut.USER_RX_MFB_SOF.value)
-            eof = int(dut.USER_RX_MFB_EOF.value)
-            eof_pos = int(dut.USER_RX_MFB_EOF_POS.value)
-            data_bytes = dut.USER_RX_MFB_DATA.value.to_bytes(byteorder='little')
-            cocotb.log.info(
-                f"MFB word: SOF={sof} EOF={eof} EOF_POS={eof_pos} "
-                f"DATA[0:4]={data_bytes[:4].hex()}"
-            )
-        if int(dut.beat_accept.value) == 1:
-            rb = int(dut.remaining_bytes.value)
-            eof_in = int(dut.fifo_rx_eof.value)
-            eof_pos_in = int(dut.fifo_rx_eof_pos.value)
-            first_beat = int(dut.first_beat.value)
-            cocotb.log.info(
-                f"BEAT: remaining_bytes={rb} eof={eof_in} eof_pos_in={eof_pos_in} "
-                f"first_beat={first_beat}"
-            )
 
 
 async def _wait_all_frames(tb, req_count, dut, timeout_clocks=10_000_000):
@@ -348,21 +414,14 @@ async def _wait_all_frames(tb, req_count, dut, timeout_clocks=10_000_000):
 @cocotb.test()
 async def run_random_read_test(dut, req_count: int = 1000):
     """
-    Single-burst transfers: 1..16 beats (32..512 B) per request.
-    Verifies SOF/EOF/EOF_POS, data correctness, and MI counters.
+    Single-burst-sized transfers: 1..512 B at random addresses and offsets, so bursts land across
+    4 KiB pages and at channel region ends. Verifies SOF/EOF/EOF_POS, META, data and MI counters.
     """
     tb = await prepare(dut)
 
-    cocotb.start_soon(_mfb_word_monitor(dut))
-
-    # DST_RDY always high (no backpressure) for deterministic coverage
-    tb.dut.USER_RX_MFB_DST_RDY.value = 1
-    # Uncomment to restore randomized backpressure:
-    # tb.backpressure.start((1, i % 5) for i in itertools.count())
-
     for n in range(req_count):
-        chan, lbase, off, size = _rand_request()
-        await tb.issue_request(chan, lbase, off, size)
+        addr, size = _rand_request(tb.cmap)
+        await tb.issue_request(addr, size)
 
     await _wait_all_frames(tb, req_count, dut)
     await tb.check_counters()
@@ -372,19 +431,72 @@ async def run_random_read_test(dut, req_count: int = 1000):
 @cocotb.test()
 async def run_large_read_test(dut, req_count: int = 50):
     """
-    Multi-burst transfers: 2..16 full 16-beat bursts per request (1..8 KB).
-    Verifies that the DUT correctly chains bursts into a single MFB frame
-    with SOF on the first beat and EOF on the last beat.
+    Multi-burst transfers: 513 B..8 KiB at random addresses and offsets. Verifies that the DUT
+    chains bursts into a single MFB frame with SOF on the first beat and EOF on the last beat.
     """
     tb = await prepare(dut)
 
-    cocotb.start_soon(_mfb_word_monitor(dut))
-
-    tb.dut.USER_RX_MFB_DST_RDY.value = 1
-
     for n in range(req_count):
-        chan, lbase, off, size = _rand_large_request()
-        await tb.issue_request(chan, lbase, off, size)
+        addr, size = _rand_large_request(tb.cmap)
+        await tb.issue_request(addr, size)
+
+    await _wait_all_frames(tb, req_count, dut)
+    await tb.check_counters()
+    raise tb.scoreboard.result
+
+
+@cocotb.test()
+async def run_4k_boundary_test(dut):
+    """
+    Requests starting in the last 16 beats of a 4 KiB page, each long enough to reach past the
+    page, so a burst capped only at 16 beats would cross the boundary.
+    """
+    tb = await prepare(dut)
+    cm = tb.cmap
+
+    req_count = 0
+    for beats_before in range(1, MAX_BURST_BEATS):
+        for size in (beats_before * HBM_BYTE_W + 1, MAX_BURST_BYTES, MAX_BURST_BYTES + 33, 3 * MAX_BURST_BYTES):
+            chan = random.randrange(cm.channels)
+            page = random.randrange(1, cm.region // AXI_PAGE - 4)
+            addr = (chan << cm.region_w) + page * AXI_PAGE - beats_before * HBM_BYTE_W + random.randrange(HBM_BYTE_W)
+            await tb.issue_request(addr, size)
+            req_count += 1
+
+    await _wait_all_frames(tb, req_count, dut)
+    await tb.check_counters()
+    raise tb.scoreboard.result
+
+
+@cocotb.test()
+async def run_range_err_test(dut):
+    """
+    Requests that cross a channel region, run past the end of HBM or are empty set RANGE_ERR and
+    issue no AR; in-range requests right at the region edges around them still complete.
+    """
+    tb = await prepare(dut)
+    cm = tb.cmap
+
+    req_count = 0
+    for chan in sorted({0, random.randrange(1, cm.channels - 1), cm.channels - 1}):
+        region_end = (chan + 1) << cm.region_w
+        off = random.randrange(HBM_BYTE_W)
+        # Ends exactly at the region end (for the last channel, the end of HBM): accepted.
+        size = random.randint(1, 3 * MAX_BURST_BYTES)
+        await tb.issue_request(region_end - size, size)
+        req_count += 1
+        # One byte too long: crosses into the next region, or past the end of HBM.
+        await tb.issue_rejected_request(region_end - size, size + 1)
+        # Starts inside the region and ends a whole burst into the next one.
+        await tb.issue_rejected_request(region_end - HBM_BYTE_W + off, MAX_BURST_BYTES)
+        # Starts at the region base: accepted, and served from this channel.
+        size = random.randint(1, MAX_BURST_BYTES)
+        await tb.issue_request((chan << cm.region_w) + off, size)
+        req_count += 1
+
+    # Far past the end of HBM, and an empty request.
+    await tb.issue_rejected_request(HBM_SIZE - MAX_BURST_BYTES, 2 * MAX_LARGE_BYTES)
+    await tb.issue_rejected_request(random.randrange(0, HBM_SIZE, HBM_BYTE_W), 0)
 
     await _wait_all_frames(tb, req_count, dut)
     await tb.check_counters()
