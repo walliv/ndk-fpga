@@ -34,27 +34,30 @@ begin
         DEBUG           => True,
 
         PORTS           => HBM_PORTS,
+        BL8_MODE        => (others => '1'),
         CNT_WIDTH       => 24,
 
-        AXI_ADDR_WIDTH  => HBM_ADDR_WIDTH,
-        AXI_DATA_WIDTH  => HBM_DATA_WIDTH,
-        AXI_BURST_WIDTH => HBM_BURST_WIDTH,
-        AXI_ID_WIDTH    => HBM_ID_WIDTH,
-        AXI_LEN_WIDTH   => HBM_LEN_WIDTH,
-        AXI_SIZE_WIDTH  => HBM_SIZE_WIDTH,
-        AXI_RESP_WIDTH  => HBM_RESP_WIDTH,
-        USR_DATA_WIDTH  => HBM_DATA_WIDTH,
+        AXI_ADDR_WIDTH   => HBM_ADDR_WIDTH,
+        AXI_DATA_WIDTH   => HBM_DATA_WIDTH,
+        AXI_BURST_WIDTH  => HBM_BURST_WIDTH,
+        AXI_ID_WIDTH     => HBM_ID_WIDTH,
+        AXI_LEN_WIDTH    => HBM_LEN_WIDTH,
+        AXI_SIZE_WIDTH   => HBM_SIZE_WIDTH,
+        AXI_RESP_WIDTH   => HBM_RESP_WIDTH,
+        USR_DATA_WIDTH   => HBM_DATA_WIDTH,
         -- HBM address bits:
         --     - Stack Select:            33
         --     - Destination AXI Port: 32:29
         --     - HBM Address Bits      28:5
         --     - Unused Address Bits    4:0
-        PORT_ADDR_HBIT  => 28,
-        DEVICE          => DEVICE
+        PORT_ADDR_HBIT   => 28,
+        BASE_ADDR_OFFSET => 0,
+        DEVICE           => DEVICE
     )
     port map (
         HBM_CLK             => USR_CLK,
         HBM_RESET           => not hbm_rst_n_bufg,
+        HBM_INIT_DONE       => HBM_INIT_DONE,
 
         MI_CLK              => MI_CLK,
         MI_RESET            => MI_RST,
