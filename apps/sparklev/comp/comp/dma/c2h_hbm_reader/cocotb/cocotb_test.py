@@ -67,8 +67,7 @@ async def build_expected_frame(mem, abase, size):
     Compute the expected MFB frame bytes from the sparse HBM memory model.
 
     The DUT uses INCR burst type throughout; addresses advance by HBM_BYTE_W
-    per beat, sequentially from abase.  abase must be 32B-aligned (low 5 bits
-    cleared by the DUT).
+    per beat, sequentially from abase.
 
     abase : 32B-aligned start address
     size  : number of bytes requested (must be > 0)
@@ -110,9 +109,9 @@ class ChannelMap:
         return addr >> self.region_w
 
     def in_range(self, addr: int, size: int) -> bool:
-        """Mirror of the DUT's request validation: a non-empty request that ends inside HBM and
-        inside the channel region it starts in."""
-        return (size > 0 and addr + size <= HBM_SIZE
+        """Mirror of the DUT's request validation: a non-empty request from a 32B-aligned address
+        that ends inside HBM and inside the channel region it starts in."""
+        return (addr % HBM_BYTE_W == 0 and size > 0 and addr + size <= HBM_SIZE
                 and (addr & (self.region - 1)) + size <= self.region)
 
 
@@ -274,21 +273,19 @@ class Testbench:
         """
         Program C2H_HBM_READER to read `size` bytes from HBM address `addr` and wait until DONE.
 
-        The DUT drops the low 5 address bits: it streams `size` bytes starting at the 32B-aligned
-        abase = addr & ~31, split into INCR AXI bursts of at most 16 beats that must not cross a
-        4 KiB boundary. `addr`/`size` must pass ChannelMap.in_range().
+        The DUT streams `size` bytes starting at `addr`, split into INCR AXI bursts of at most 16
+        beats that must not cross a 4 KiB boundary. `addr`/`size` must pass ChannelMap.in_range().
         """
         cm = self.cmap
         assert cm.in_range(addr, size), f"request addr=0x{addr:09X} size={size} is out of range"
         chan = cm.chan_of(addr)
-        abase = addr & ~(HBM_BYTE_W - 1)
 
         # Write random data for every beat the DUT will fetch
         nbeats = math.ceil(size / HBM_BYTE_W)
-        await self.mem.write(abase, random.randbytes(nbeats * HBM_BYTE_W))
+        await self.mem.write(addr, random.randbytes(nbeats * HBM_BYTE_W))
 
         # Build expected output and update model counters
-        exp_data = await build_expected_frame(self.mem, abase, size)
+        exp_data = await build_expected_frame(self.mem, addr, size)
         exp_meta = chan  # HDR_META=0 (high bits), CHAN=chan (low chan_w bits)
         self.expected_output.append(MfbTransactionWithMeta(data=exp_data, meta=exp_meta))
         self.exp_req_cnt   += 1
@@ -297,8 +294,8 @@ class Testbench:
         self.log.debug(f"ISSUE: chan={chan} addr=0x{addr:09X} size={size} nbeats={nbeats}")
 
         self.exp_chan = chan
-        self.exp_lo = abase
-        self.exp_hi = abase + nbeats * HBM_BYTE_W
+        self.exp_lo = addr
+        self.exp_hi = addr + nbeats * HBM_BYTE_W
         ar_beats0 = self.ar_beats
 
         await self._program(addr, size)
@@ -353,15 +350,14 @@ class Testbench:
 # Test helpers
 # ============================================================
 def _rand_addr(cmap, size):
-    """Random request address for `size` bytes: any channel, any 32B-aligned base, any sub-32B
-    offset, with no regard for 4 KiB pages. A share of requests ends exactly at the channel region's
-    end, which for the last channel is the end of HBM."""
+    """Random 32B-aligned request address for `size` bytes: any channel, with no regard for 4 KiB
+    pages. A share of requests fetches the last beat of the channel region, which for the last
+    channel is the end of HBM."""
     region_base = random.randrange(cmap.channels) << cmap.region_w
+    beats_bytes = -(-size // HBM_BYTE_W) * HBM_BYTE_W
     if random.random() < REGION_END_RATE:
-        return region_base + cmap.region - size
-    off = random.randrange(HBM_BYTE_W)
-    lbase = random.randrange(0, cmap.region - size - off + 1, HBM_BYTE_W)
-    return region_base + lbase + off
+        return region_base + cmap.region - beats_bytes
+    return region_base + random.randrange(0, cmap.region - beats_bytes + 1, HBM_BYTE_W)
 
 
 def _rand_request(cmap):
@@ -412,7 +408,7 @@ async def _wait_all_frames(tb, req_count, dut, timeout_clocks=10_000_000):
 @cocotb.test()
 async def run_random_read_test(dut, req_count: int = 1000):
     """
-    Single-burst-sized transfers: 1..512 B at random addresses and offsets, so bursts land across
+    Single-burst-sized transfers: 1..512 B at random aligned addresses, so bursts land across
     4 KiB pages and at channel region ends. Verifies SOF/EOF/EOF_POS, META, data and MI counters.
     """
     tb = await prepare(dut)
@@ -429,7 +425,7 @@ async def run_random_read_test(dut, req_count: int = 1000):
 @cocotb.test()
 async def run_large_read_test(dut, req_count: int = 50):
     """
-    Multi-burst transfers: 513 B..8 KiB at random addresses and offsets. Verifies that the DUT
+    Multi-burst transfers: 513 B..8 KiB at random aligned addresses. Verifies that the DUT
     chains bursts into a single MFB frame with SOF on the first beat and EOF on the last beat.
     """
     tb = await prepare(dut)
@@ -457,7 +453,7 @@ async def run_4k_boundary_test(dut):
         for size in (beats_before * HBM_BYTE_W + 1, MAX_BURST_BYTES, MAX_BURST_BYTES + 33, 3 * MAX_BURST_BYTES):
             chan = random.randrange(cm.channels)
             page = random.randrange(1, cm.region // AXI_PAGE - 4)
-            addr = (chan << cm.region_w) + page * AXI_PAGE - beats_before * HBM_BYTE_W + random.randrange(HBM_BYTE_W)
+            addr = (chan << cm.region_w) + page * AXI_PAGE - beats_before * HBM_BYTE_W
             await tb.issue_request(addr, size)
             req_count += 1
 
@@ -469,28 +465,31 @@ async def run_4k_boundary_test(dut):
 @cocotb.test()
 async def run_range_err_test(dut):
     """
-    Requests that cross a channel region, run past the end of HBM or are empty set RANGE_ERR and
-    issue no AR; in-range requests right at the region edges around them still complete.
+    Requests that start unaligned, cross a channel region, run past the end of HBM or are empty
+    set RANGE_ERR and issue no AR; in-range requests right at the region edges still complete.
     """
     tb = await prepare(dut)
     cm = tb.cmap
 
     req_count = 0
     for chan in sorted({0, random.randrange(1, cm.channels - 1), cm.channels - 1}):
-        region_end = (chan + 1) << cm.region_w
-        off = random.randrange(HBM_BYTE_W)
+        region_base = chan << cm.region_w
+        region_end = region_base + cm.region
         # Ends exactly at the region end (for the last channel, the end of HBM): accepted.
-        size = random.randint(1, 3 * MAX_BURST_BYTES)
+        size = random.randint(1, 3 * MAX_BURST_BEATS) * HBM_BYTE_W
         await tb.issue_request(region_end - size, size)
         req_count += 1
         # One byte too long: crosses into the next region, or past the end of HBM.
         await tb.issue_rejected_request(region_end - size, size + 1)
         # Starts inside the region and ends a whole burst into the next one.
-        await tb.issue_rejected_request(region_end - HBM_BYTE_W + off, MAX_BURST_BYTES)
+        await tb.issue_rejected_request(region_end - HBM_BYTE_W, MAX_BURST_BYTES)
         # Starts at the region base: accepted, and served from this channel.
         size = random.randint(1, MAX_BURST_BYTES)
-        await tb.issue_request((chan << cm.region_w) + off, size)
+        await tb.issue_request(region_base, size)
         req_count += 1
+        # Otherwise in range, but not 32B-aligned.
+        lbase = random.randrange(0, cm.region - 2 * MAX_BURST_BYTES, HBM_BYTE_W)
+        await tb.issue_rejected_request(region_base + lbase + random.randrange(1, HBM_BYTE_W), size)
 
     # Far past the end of HBM, and an empty request.
     await tb.issue_rejected_request(HBM_SIZE - MAX_BURST_BYTES, 2 * MAX_LARGE_BYTES)
