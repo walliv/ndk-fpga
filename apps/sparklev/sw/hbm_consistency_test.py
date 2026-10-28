@@ -340,7 +340,7 @@ def main() -> None:
         type=int,
         default=4096,
         metavar="BYTES",
-        help="Read chunk size in bytes — must be a multiple of 8 and <= DMA frame limit "
+        help="Read chunk size in bytes — must be a multiple of 32 and <= DMA frame limit "
              "(default: %(default)s)",
     )
     run_args.add_argument(
@@ -348,7 +348,8 @@ def main() -> None:
         type=lambda x: int(x, 0),
         default=0x4000000,
         metavar="BYTES",
-        help="Address stride between read positions per channel (default: 0x4000000 = 64 MiB)",
+        help="Address stride between read positions per channel, a multiple of 32 "
+             "(default: 0x4000000 = 64 MiB)",
     )
     run_args.add_argument(
         "--write-block",
@@ -379,8 +380,14 @@ def main() -> None:
     )
 
     # Validate arguments.
-    if args.chunk % 8 != 0:
-        log.error("--chunk must be a multiple of 8 (got %d)", args.chunk)
+    # Read positions are base + k * stride and the channel end minus chunk; the C2H reader accepts
+    # only 32B-aligned start addresses.
+    if args.chunk % C2HHBMReaderRegAccess.ADDR_ALIGN != 0:
+        log.error("--chunk must be a multiple of %d (got %d)", C2HHBMReaderRegAccess.ADDR_ALIGN, args.chunk)
+        sys.exit(1)
+
+    if args.stride % C2HHBMReaderRegAccess.ADDR_ALIGN != 0:
+        log.error("--stride must be a multiple of %d (got %d)", C2HHBMReaderRegAccess.ADDR_ALIGN, args.stride)
         sys.exit(1)
 
     if args.write_block % 8 != 0:
