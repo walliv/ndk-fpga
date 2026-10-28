@@ -5,10 +5,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass, fields
-import time
 
 import nfb
-from cocotbext.ofm.dma.hyperion import C2HReaderMIRegMap, C2HC2HCtrlRegBits, C2HC2HStatRegBits
+from cocotbext.ofm.dma.hyperion import C2HReaderMIRegMap, C2HCtrlRegBits, C2HStatRegBits
 
 
 @dataclass
@@ -34,6 +33,8 @@ class C2HReaderStats:
 
 class C2HHBMReaderRegAccess(nfb.BaseComp):
     DT_COMPATIBLE = "ziti,sparklev,c2h_hbm_reader"
+    # The reader fetches whole HBM beats and rejects a start address inside one.
+    ADDR_ALIGN = 32
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -95,10 +96,14 @@ class C2HHBMReaderRegAccess(nfb.BaseComp):
     def read(self, hbm_addr: int, size: int, timeout: float = 5.0) -> None:
         """Blocking helper: programs and starts a C2H HBM read, waits for completion.
 
-        Raises RuntimeError if the request is out of range, if the hardware
-        reports an AXI error, or if the operation does not complete within
-        *timeout* seconds.
+        Raises ValueError if *hbm_addr* is not ADDR_ALIGN-aligned, and
+        RuntimeError if the request is out of range, if the hardware reports
+        an AXI error, or if the operation does not complete within *timeout*
+        seconds.
         """
+        if hbm_addr % self.ADDR_ALIGN:
+            raise ValueError(f"C2H read address 0x{hbm_addr:x} is not {self.ADDR_ALIGN}B-aligned")
+
         self.clear_done()
         self.hbm_addr = hbm_addr
         self.size = size

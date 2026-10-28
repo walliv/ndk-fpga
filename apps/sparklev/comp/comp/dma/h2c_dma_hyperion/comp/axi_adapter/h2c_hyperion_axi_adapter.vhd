@@ -30,6 +30,9 @@ entity H2C_HYPERION_AXI_ADAPTER is
         HBM_RESP_WIDTH  : natural := 2
     );
     port (
+        CLK   : in std_logic;
+        RESET : in std_logic;
+
         -- =========================================================================================
         -- MFB interface (slave)
         -- =========================================================================================
@@ -74,8 +77,43 @@ architecture FULL of H2C_HYPERION_AXI_ADAPTER is
 
     signal tr_byte_offs : unsigned(4 downto 0);
     signal tr_len_u     : unsigned(RX_MFB_META_TR_LEN'range);
+
+    signal awvalid : std_logic;
+    signal wvalid  : std_logic;
+    -- The AW or the W of the word at the head was taken in an earlier cycle.
+    signal aw_done : std_logic;
+    signal w_done  : std_logic;
+    -- The AW or the W of the word at the head is taken by the end of this cycle.
+    signal aw_ok   : std_logic;
+    signal w_ok    : std_logic;
+
+    signal burst_too_long : std_logic;
 begin
-    RX_MFB_DST_RDY  <= HBM_AXI_AWREADY and HBM_AXI_WREADY;
+    -- AW and W are offered independently of each other's READY (AMBA A3.3.1) and held until taken (A3.2.1). The SOF word
+    -- feeds both channels, so it leaves the MFB once both have taken it, possibly in different cycles.
+    awvalid <= RX_MFB_SRC_RDY and RX_MFB_SOF and not aw_done;
+    wvalid  <= RX_MFB_SRC_RDY and not w_done;
+    aw_ok   <= (not RX_MFB_SOF) or aw_done or HBM_AXI_AWREADY;
+    w_ok    <= w_done or HBM_AXI_WREADY;
+
+    RX_MFB_DST_RDY <= aw_ok and w_ok;
+
+    handshake_done_p : process (CLK)
+    begin
+        if (rising_edge(CLK)) then
+            if (RESET = '1' or (RX_MFB_SRC_RDY = '1' and aw_ok = '1' and w_ok = '1')) then
+                aw_done <= '0';
+                w_done  <= '0';
+            else
+                if (awvalid = '1' and HBM_AXI_AWREADY = '1') then
+                    aw_done <= '1';
+                end if;
+                if (wvalid = '1' and HBM_AXI_WREADY = '1') then
+                    w_done <= '1';
+                end if;
+            end if;
+        end if;
+    end process;
 
     HBM_AXI_AWID    <= RX_MFB_META_ADDR(HBM_ADDR_WIDTH -1 downto HBM_ADDR_WIDTH-HBM_ID_WIDTH);
     HBM_AXI_AWADDR  <= RX_MFB_META_ADDR(HBM_ADDR_WIDTH -1 downto 5) & "00000";
@@ -83,17 +121,25 @@ begin
     tr_byte_offs    <= unsigned(RX_MFB_META_ADDR(4 downto 0));
     tr_len_u        <= unsigned(RX_MFB_META_TR_LEN) + tr_byte_offs + MFB_BYTE_W -1;
     HBM_AXI_AWLEN   <= std_logic_vector(resize(shift_right(tr_len_u, log2(MFB_BYTE_W)), HBM_LEN_WIDTH) -1);
+
+    -- One TLP becomes one burst, so a TLP needing more beats than AWLEN encodes would wrap it; the PCIe payload cap must prevent that.
+    burst_too_long <= awvalid when shift_right(tr_len_u, log2(MFB_BYTE_W)) > 2**HBM_LEN_WIDTH else '0';
+
+    -- psl default clock is rising_edge(CLK);
+
+    -- psl assert_burst_fits_awlen :
+    --      assert always (burst_too_long = '0') abort (RESET)
+    --      report "H2C_HYPERION_AXI_ADAPTER: a write TLP spans more beats than one AXI3 burst holds!";
     HBM_AXI_AWSIZE  <= "101";
     HBM_AXI_AWBURST <= "01";            -- NOTE: INCREMENTING BURST ONLY for our own risk :)
-    -- The setting of address and transaction ID is actually a one clock cycle event and it
-    -- is therefore tied to the SOF signal.
-    HBM_AXI_AWVALID <= RX_MFB_SOF and RX_MFB_SRC_RDY and HBM_AXI_WREADY;
+    -- The address and transaction ID of a burst come with its SOF word.
+    HBM_AXI_AWVALID <= awvalid;
 
     HBM_AXI_WDATA        <= RX_MFB_DATA;
     HBM_AXI_WSTRB        <= RX_MFB_META_BE;
     HBM_AXI_WDATA_PARITY <= (others => '0');  -- NOTE: implement parity if needed
     HBM_AXI_WLAST        <= RX_MFB_EOF;
-    HBM_AXI_WVALID       <= RX_MFB_SRC_RDY and HBM_AXI_AWREADY;
+    HBM_AXI_WVALID       <= wvalid;
 
     HBM_AXI_BREADY <= '1';  -- Always ready to accept write responses
 end architecture;
