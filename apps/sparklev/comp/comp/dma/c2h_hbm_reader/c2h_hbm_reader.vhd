@@ -75,7 +75,7 @@ entity C2H_HBM_READER is
         -- USER RX MFB output
         -- =========================================================================================
         -- USER_RX_MFB_META layout:
-        --   bits [log2(CHANNELS)-1 : 0]                             = CHAN (= RID low bits = top HBM addr bits)
+        --   bits [log2(CHANNELS)-1 : 0]                             = CHAN (= RID low bits = top log2(CHANNELS) HBM addr bits)
         --   bits [HDR_META_WIDTH+log2(CHANNELS)-1 : log2(CHANNELS)] = HDR_META (= 0)
         USER_RX_MFB_META : out std_logic_vector(HDR_META_WIDTH + log2(CHANNELS) - 1 downto 0);
 
@@ -95,6 +95,9 @@ architecture FULL of C2H_HBM_READER is
     constant HBM_BYTE_W : natural := HBM_DATA_WIDTH / 8;
 
     constant META_WIDTH    : natural := HDR_META_WIDTH + log2(CHANNELS);
+    -- The top CHAN_W HBM address bits select the channel, so each channel owns a region of 2**REGION_W bytes.
+    constant CHAN_W        : natural := log2(CHANNELS);
+    constant REGION_W      : natural := HBM_ADDR_WIDTH - CHAN_W;
     constant SOF_POS_WIDTH : natural := MFB_REGIONS*max(1, log2(MFB_REGION_SIZE));
     constant EOF_POS_WIDTH : natural := MFB_REGIONS*max(1, log2(MFB_REGION_SIZE*MFB_BLOCK_SIZE));
 
@@ -286,11 +289,11 @@ begin
                     -- Validate before issuing any read:
                     --  * non-zero size
                     --  * do not read past the end of HBM:  addr + size <= 2**HBM_ADDR_WIDTH
-                    --  * do not cross the channel's 2 GB region: addr[30:0] + size <= 2**31
+                    --  * do not cross the channel's region: addr[REGION_W-1:0] + size <= 2**REGION_W
                     --    (ARID/CHAN follows the running address; a straddle would mis-route mid-transfer)
                     if (size_reg = 0
                        or (resize(addr_reg, 65) + resize(size_reg, 65)) > shift_left(to_unsigned(1, 65), HBM_ADDR_WIDTH)
-                       or (resize(addr_reg(30 downto 0), 65) + resize(size_reg, 65)) > shift_left(to_unsigned(1, 65), 31)) then
+                       or (resize(addr_reg(REGION_W-1 downto 0), 65) + resize(size_reg, 65)) > shift_left(to_unsigned(1, 65), REGION_W)) then
                         range_err <= '1';
                         busy      <= '0';
                     else
@@ -359,8 +362,8 @@ begin
         end if;
     end process;
 
-    -- Channel = top 3 HBM address bits (2 GB stride); carried in ARID[2:0], echoed as RID[2:0] -> CHAN.
-    HBM_AXI_ARID    <= std_logic_vector(resize(araddr_r(HBM_ADDR_WIDTH-1 downto HBM_ADDR_WIDTH-3), HBM_ID_WIDTH));
+    -- Channel = top CHAN_W HBM address bits; carried in ARID[CHAN_W-1:0], echoed as RID[CHAN_W-1:0] -> CHAN.
+    HBM_AXI_ARID    <= std_logic_vector(resize(araddr_r(HBM_ADDR_WIDTH-1 downto REGION_W), HBM_ID_WIDTH));
     HBM_AXI_ARADDR  <= std_logic_vector(araddr_r);
     HBM_AXI_ARLEN   <= std_logic_vector(arlen_r);
     HBM_AXI_ARSIZE  <= std_logic_vector(to_unsigned(log2(HBM_BYTE_W), HBM_SIZE_WIDTH));
