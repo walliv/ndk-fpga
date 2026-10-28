@@ -8,7 +8,7 @@ from dataclasses import dataclass, fields
 import time
 
 import nfb
-from cocotbext.ofm.dma.hyperion import C2HReaderMIRegMap, C2HC2HCtrlRegBits, C2HC2HStatRegBits
+from cocotbext.ofm.dma.hyperion import C2HReaderMIRegMap, C2HCtrlRegBits, C2HStatRegBits
 
 
 @dataclass
