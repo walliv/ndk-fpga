@@ -101,6 +101,10 @@ architecture FULL of C2H_HBM_READER is
     constant SOF_POS_WIDTH : natural := MFB_REGIONS*max(1, log2(MFB_REGION_SIZE));
     constant EOF_POS_WIDTH : natural := MFB_REGIONS*max(1, log2(MFB_REGION_SIZE*MFB_BLOCK_SIZE));
 
+    -- An AXI3 burst must not cross a 4 KiB boundary (AMBA A3.4.1).
+    constant AXI_PAGE_W : natural := 12;
+    constant BEAT_W     : natural := log2(HBM_BYTE_W);
+
     -- Output MFB FIFO depth: must be >= max AXI burst length (2**HBM_LEN_WIDTH = 16 beats).
     constant MFB_FIFO_DEPTH : natural := 2**HBM_LEN_WIDTH;
 
@@ -243,6 +247,7 @@ begin
         variable beats_needed     : unsigned(HBM_LEN_WIDTH downto 0);
         variable next_burst_beats : unsigned(HBM_LEN_WIDTH downto 0);
         variable rem_bytes        : unsigned(63 downto 0);
+        variable page_beats       : unsigned(AXI_PAGE_W-BEAT_W downto 0);
     begin
         if rising_edge(CLK) then
             if (RESET = '1') then
@@ -323,6 +328,12 @@ begin
                                 beats_needed := to_unsigned(1, beats_needed'length);
                             end if;
                             next_burst_beats := beats_needed;
+                        end if;
+                        -- Beats left to the next 4 KiB boundary (1 to 2**(AXI_PAGE_W-BEAT_W)); the burst ends there at the latest.
+                        page_beats := to_unsigned(2**(AXI_PAGE_W-BEAT_W), page_beats'length)
+                                      - resize(addr_reg(AXI_PAGE_W-1 downto BEAT_W), page_beats'length);
+                        if (page_beats < next_burst_beats) then
+                            next_burst_beats := resize(page_beats, next_burst_beats'length);
                         end if;
 
                         araddr_r      <= addr_reg(HBM_ADDR_WIDTH-1 downto 5) & "00000";
