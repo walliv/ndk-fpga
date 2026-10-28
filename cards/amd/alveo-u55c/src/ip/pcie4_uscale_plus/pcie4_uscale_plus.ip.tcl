@@ -129,10 +129,11 @@ if {$PARAMS(PCIE_ENDPOINT_MODE) == 2 && $PARAMS(PCIE_GEN) == 3} {
         CONFIG.axisten_if_width {512_bit}
 }
 
-# DMA Hyperion (type 6): PF0 BAR2 is a 64-bit prefetchable 16 GB window for direct HBM writes.
-# Prefetchable is required to place it above 4 GB; the H2C AXI adapter uses addr[33:0] as AWADDR.
+# DMA Hyperion (type 6): PF0 BAR2 is a 64-bit prefetchable 16 GB window for direct HBM writes, prefetchable to sit above
+# 4 GB. H2C writes each TLP as one AXI3 burst of up to 16 beats, which a 256 B payload always fits.
 if {$PARAMS(DMA_TYPE) == 6} {
     lappend config_list \
+        CONFIG.pf0_dev_cap_max_payload {256_bytes} \
         CONFIG.pf0_bar2_enabled {true} \
         CONFIG.pf0_bar2_64bit {true} \
         CONFIG.pf0_bar2_prefetchable {true} \
