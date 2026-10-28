@@ -46,8 +46,8 @@ set DMA_TYPE              $env(DMA_TYPE)
 # The minimum number of RX/TX DMA channels is 2.
 set C2H_DMA_CHANNELS      8
 set H2C_DMA_CHANNELS      32
-# Maximums size of a packet transferred througb DMA in bytes
-set DMA_PKT_SIZE_MAX      4096
+# Maximum size of a packet transferred through DMA in bytes; it matches the 256 B PCIe payload cap of DMA Hyperion.
+set DMA_PKT_SIZE_MAX      256
 # Enable Gen Loop switch for DMA
 set DMA_GEN_LOOP_EN      false
 # Separately enable each of the DMA controllers
