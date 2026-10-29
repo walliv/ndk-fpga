@@ -152,15 +152,17 @@ class TransBufferTestbench:
         return vld, (int(self.dut.RD_DATA_A.value).to_bytes(self.mfb_bytes, 'little') if vld else None)
 
 
-async def _collision_probe_one(tb, chan: int, addr_byte: int, p_old: bytes, p_new: bytes, delay: int):
-    """Restores the row at `addr_byte` of `chan` to p_old, writes p_new there with one word and issues one read `delay`
-    cycles from the write's edge. Writer and reader are separate coroutines. Returns (vld, data)."""
-    dut = tb.dut
+def collision_patterns(nbytes: int):
+    """(p_old, p_new): the two distinct row patterns a collision probe writes, `nbytes` each."""
+    return (bytes((i * 7 + 0x11) & 0xFF for i in range(nbytes)),
+            bytes((i * 3 + 0xA5) & 0xFF for i in range(nbytes)))
 
-    # ---- restore the row to a known old pattern and let it fully settle -----------------------
-    await tb.write_row(chan, addr_byte, p_old)
-    await tb.drive_idle(WRITE_SETTLE_MARGIN)
-    w = tb.row_word(chan, addr_byte, p_new)
+
+async def collision_probe(tb, chan: int, wr_byte: int, rd_byte: int, p_new: bytes, delay: int):
+    """Writes p_new to the row at `wr_byte` of `chan` with one word and reads at `rd_byte` `delay` cycles from the
+    write's edge. Writer and reader are separate coroutines. Returns (vld, data)."""
+    dut = tb.dut
+    w = tb.row_word(chan, wr_byte, p_new)
 
     # PRE must be >= -min(delay) so the reader's idle-cycle count below never goes negative.
     PRE, POST = 4, 20
@@ -183,7 +185,7 @@ async def _collision_probe_one(tb, chan: int, addr_byte: int, p_old: bytes, p_ne
         for _ in range(wait_cycles):
             dut.RD_EN_A.value = 0
             await RisingEdge(dut.CLK)
-        tb.set_read(chan, addr_byte)
+        tb.set_read(chan, rd_byte)
         await RisingEdge(dut.CLK)  # the read's own capturing edge
         dut.RD_EN_A.value = 0
         await tb.read_latency_wait()
@@ -197,19 +199,31 @@ async def _collision_probe_one(tb, chan: int, addr_byte: int, p_old: bytes, p_ne
     reader_task = cocotb.start_soon(reader())
     await writer_task
     await reader_task
+    return result["vld"], result["data"]
+
+
+async def _collision_probe_one(tb, chan: int, addr_byte: int, p_old: bytes, p_new: bytes, delay: int):
+    """Restores the row at `addr_byte` of `chan` to p_old, then collision_probe writes p_new there and reads it back
+    `delay` cycles from the write's edge. Returns (vld, data)."""
+    dut = tb.dut
+
+    # ---- restore the row to a known old pattern and let it fully settle -----------------------
+    await tb.write_row(chan, addr_byte, p_old)
+    await tb.drive_idle(WRITE_SETTLE_MARGIN)
+
+    result = await collision_probe(tb, chan, addr_byte, addr_byte, p_new, delay)
 
     dut.PCIE_MFB_SRC_RDY.value = 0
     dut.RD_EN_A.value = 0
     await tb.drive_idle(WRITE_SETTLE_MARGIN)
 
-    return result["vld"], result["data"]
+    return result
 
 
 async def collision_sweep(tb, chan: int, addr_byte: int, label: str):
     """Sweeps delay in -2..+14 at a fixed (chan, addr_byte), logging one line per delay and a final
     summary. Returns the list of (delay, vld, verdict, data) tuples for the caller to inspect."""
-    p_old = bytes((i * 7 + 0x11) & 0xFF for i in range(tb.mfb_bytes))
-    p_new = bytes((i * 3 + 0xA5) & 0xFF for i in range(tb.mfb_bytes))
+    p_old, p_new = collision_patterns(tb.mfb_bytes)
     assert p_old != p_new
 
     results = []
