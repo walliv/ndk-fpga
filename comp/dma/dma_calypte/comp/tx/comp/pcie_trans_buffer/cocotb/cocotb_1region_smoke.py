@@ -13,7 +13,7 @@ import cocotb
 from cocotb.triggers import RisingEdge, ClockCycles
 
 from trans_buffer_model import TransBufferModel
-from trans_buffer_tb import TransBufferTestbench, WRITE_SETTLE_MARGIN, collision_sweep
+from trans_buffer_tb import TransBufferTestbench, WRITE_SETTLE_MARGIN, collision_patterns, collision_probe, collision_sweep
 
 
 class Testbench(TransBufferTestbench):
@@ -150,3 +150,35 @@ async def test_1region_collision_gating(dut):
 
     cocotb.log.info(f"test_1region_collision_gating: gate fired at delay(s) {landing_delays}, "
                     f"clean NEW reads confirmed after landing={landing}")
+
+
+@cocotb.test()
+async def test_1region_collision_neighbour_row(dut):
+    """A row-aligned read takes every byte from its own row's bank, so a write landing in the next row neither drops nor
+    alters it at any delay; a read at an offset, which also takes bytes of that row, is still dropped when it lands."""
+    tb = await Testbench.setup(dut, 1)
+    if not hasattr(dut.tx_dma_pcie_trans_buffer_i.impl_g.trans_buffer_i, "wr_bank_be"):
+        cocotb.log.info("test_1region_collision_neighbour_row: per-byte implementation, no bank collision gate")
+        return
+
+    row = tb.mfb_bytes
+    p_row0 = bytes((i * 5 + 0x3C) & 0xFF for i in range(row))
+    p_row1, p_new = collision_patterns(row)
+    straddle_drops = []
+    for delay in range(-2, 15):
+        for rd_byte in (0, 4):
+            await tb.write_row(0, 0, p_row0)
+            await tb.write_row(0, row, p_row1)
+            await tb.drive_idle(WRITE_SETTLE_MARGIN)
+            vld, data = await collision_probe(tb, 0, row, rd_byte, p_new, delay)
+            if rd_byte == 0:
+                assert vld and data == p_row0, (
+                    f"neighbour_row: aligned read at delay={delay} gave VLD={int(vld)}, data ok={data == p_row0}")
+            elif not vld:
+                straddle_drops.append(delay)
+            else:
+                assert data in ((p_row0 + p_row1)[4:4 + row], (p_row0 + p_new)[4:4 + row]), (
+                    f"neighbour_row: offset read at delay={delay} returned neither the old nor the new bytes")
+    assert straddle_drops, "neighbour_row: the offset read was never dropped -- the collision gate never fired"
+    cocotb.log.info(f"test_1region_collision_neighbour_row: aligned reads clean at every delay, offset read dropped "
+                    f"at delay(s) {straddle_drops}")

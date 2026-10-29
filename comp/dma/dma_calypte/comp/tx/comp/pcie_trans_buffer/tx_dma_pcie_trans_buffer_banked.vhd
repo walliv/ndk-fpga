@@ -929,17 +929,23 @@ begin
         end process;
 
         rd_data_sel_g : if (MFB_REGIONS = 1) generate
-            -- Same-address read/write collision (mirrors the 2-region path): a read landing this
-            -- cycle races a write to the same bank address, compared at ADDRA/ADDRB's own final
-            -- registered stage -- exactly what the memory sees.
+            -- A read landing this cycle races a write to the same bank address, compared at ADDRA/ADDRB's
+            -- final registered stage as the memory sees it. A row-aligned read takes every byte from its own
+            -- row's bank, so a write to the other bank cannot corrupt it.
             signal rd_1rgn_collision : std_logic_vector(1 downto 0);
+            signal rd_unaligned      : std_logic;
+            signal rd_bank_used      : std_logic_vector(1 downto 0);
         begin
+            rd_unaligned    <= or rd_addr_eff(0)(log2(MFB_BYTES) -1 downto 0);
+            rd_bank_used(0) <= rd_unaligned or (not rd_addr_eff(0)(log2(MFB_BYTES)));
+            rd_bank_used(1) <= rd_unaligned or rd_addr_eff(0)(log2(MFB_BYTES));
+
             rd_1rgn_collision_p : process (all) is
             begin
                 rd_1rgn_collision <= (others => '0');
                 for a in 0 to (MEM_ARRAYS -1) loop
                     for bnk in 0 to 1 loop
-                        if (rd_en_bram_demux(a)(0) = '1' and (or we(a)(0)(bnk)) = '1'
+                        if (rd_en_bram_demux(a)(0) = '1' and (or we(a)(0)(bnk)) = '1' and rd_bank_used(bnk) = '1'
                             and wr_bank_addr_reg(BRAM_REG_NUM)(0)(bnk) = rd_bank_addr(0)(bnk)) then
                             rd_1rgn_collision(bnk) <= '1';
                         end if;
