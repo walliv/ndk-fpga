@@ -244,6 +244,8 @@ architecture FULL of CORE_LOGIC is
 
     signal pcie_link_up     : std_logic_vector(PCIE_ENDPOINTS-1 downto 0);
     signal app_pcie_link_up : std_logic_vector(PCIE_ENDPOINTS-1 downto 0) := (others => '0');
+    -- Programmed Max_Payload_Size per endpoint (Device Control encoding), each in its pcie_clks(i).
+    signal pcie_mps         : slv_array_t(PCIE_ENDPOINTS-1 downto 0)(2 downto 0);
 
     signal fpga_id      : std_logic_vector(FPGA_ID_WIDTH-1 downto 0);
     signal fpga_id_vld  : std_logic := '0';
@@ -1765,7 +1767,7 @@ begin
             PCIE_USER_RESET => pcie_rsts,
 
             PCIE_LINK_UP        => pcie_link_up,
-            PCIE_MPS            => open,
+            PCIE_MPS            => pcie_mps,
             PCIE_MRRS           => open,
             PCIE_EXT_TAG_EN     => open,
             PCIE_10B_TAG_REQ_EN => open,
@@ -2077,6 +2079,9 @@ begin
             CQ_SINK      => CQ_SINK,
             CQ_SINK_FREQ => 250,
 
+            -- Peer-read completions are cut at multiples of min(MPS, 512 B).
+            CC_CPL_SIZE_MAX => 512,
+
             HBM_WR_BASE => (others => (others => HBM_ZERO_BASE)),
             HBM_RD_BASE => (others => (others => HBM_ZERO_BASE))
         )
@@ -2089,6 +2094,8 @@ begin
             -- come through their two-stage pipes (ep1_g).
             PCIE_EP_CLK => pcie_clks,
             PCIE_EP_RST => dma_pcie_ep_rst,
+            -- Element i is registered in pcie_clks(i), endpoint i's own DMA clock.
+            PCIE_MPS    => pcie_mps,
 
             NVME_RD_REQ_LBA_NUM => nvme_rd_req_lba_num,
             NVME_RD_REQ_NPAGES_ALL => nvme_rd_req_npages_all,
