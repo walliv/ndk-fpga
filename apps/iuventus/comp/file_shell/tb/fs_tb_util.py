@@ -5,13 +5,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """Seeding, clocking, reset release and signal reads every FS_* bench needs."""
 
+import os
 import random
+import time
 
 import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import ClockCycles, RisingEdge, Timer
 
 CLK_NS = 4
+WALL_CAP_S = float(os.environ.get("WALL_CAP_S", "600"))
 
 
 def seeded(salt):
@@ -20,8 +23,23 @@ def seeded(salt):
     return random.Random(cocotb.RANDOM_SEED * 2654435761 + salt)
 
 
+async def _wall_cap(clk, t0):
+    while True:
+        await ClockCycles(clk, 1000)
+        elapsed = time.monotonic() - t0
+        if elapsed > WALL_CAP_S:
+            raise AssertionError(f"scenario exceeded the {WALL_CAP_S:g} s wall cap ({elapsed:.1f} s)")
+
+
+def start_wall_cap(clk):
+    """Fails the running test once it has taken WALL_CAP_S seconds of wall time."""
+    cocotb.start_soon(_wall_cap(clk, time.monotonic()))
+
+
 def start_clock(dut):
+    # Every bench calls this once at the start of each test, so the cap rides on it.
     cocotb.start_soon(Clock(dut.CLK, CLK_NS, unit="ns").start())
+    start_wall_cap(dut.CLK)
 
 
 async def settle(dut):
