@@ -39,6 +39,12 @@ entity USER_CORE is
         -- payload (user_core_test_arch.vhd, data_check_g). Off, none of that logic exists.
         DATA_CHECK : boolean := false;
 
+        -- HBM AXI3 port geometry, as core_logic drives hbm_ip (SIZE, BURST and RESP are fixed by AXI3).
+        HBM_ADDR_WIDTH : natural := 34;
+        HBM_DATA_WIDTH : natural := 256;
+        HBM_ID_WIDTH   : natural := 6;
+        HBM_LEN_WIDTH  : natural := 4;
+
         FPGA_ID_WIDTH : integer := 16;
         DEVICE        : string  := "ULTRASCALE"
     );
@@ -139,6 +145,45 @@ entity USER_CORE is
         NVME_WR_MFB_EOF_POS : out std_logic_vector(DMA_MFB_REGIONS*log2(DMA_MFB_REGION_SIZE*DMA_MFB_BLOCK_SIZE)-1 downto 0);
         NVME_WR_MFB_SRC_RDY : out std_logic;
         NVME_WR_MFB_DST_RDY : in  std_logic;
+
+        -- =========================================================================================
+        -- HBM port: one AXI3 master on its own pseudo-channel, in DMA_CLK
+        -- =========================================================================================
+        -- HBM initialisation done, synchronised to DMA_CLK; nothing may be issued before it.
+        HBM_READY : in std_logic;
+        -- The port's own reset, in DMA_CLK, held until the port clocks run; it outlasts DMA_RST.
+        HBM_RESET : in std_logic;
+
+        HBM_AXI_ARADDR       : out std_logic_vector(HBM_ADDR_WIDTH-1 downto 0);
+        HBM_AXI_ARBURST      : out std_logic_vector(1 downto 0);
+        HBM_AXI_ARID         : out std_logic_vector(HBM_ID_WIDTH-1 downto 0);
+        HBM_AXI_ARLEN        : out std_logic_vector(HBM_LEN_WIDTH-1 downto 0);
+        HBM_AXI_ARSIZE       : out std_logic_vector(2 downto 0);
+        HBM_AXI_ARVALID      : out std_logic;
+        HBM_AXI_ARREADY      : in  std_logic;
+        HBM_AXI_AWADDR       : out std_logic_vector(HBM_ADDR_WIDTH-1 downto 0);
+        HBM_AXI_AWBURST      : out std_logic_vector(1 downto 0);
+        HBM_AXI_AWID         : out std_logic_vector(HBM_ID_WIDTH-1 downto 0);
+        HBM_AXI_AWLEN        : out std_logic_vector(HBM_LEN_WIDTH-1 downto 0);
+        HBM_AXI_AWSIZE       : out std_logic_vector(2 downto 0);
+        HBM_AXI_AWVALID      : out std_logic;
+        HBM_AXI_AWREADY      : in  std_logic;
+        HBM_AXI_WDATA        : out std_logic_vector(HBM_DATA_WIDTH-1 downto 0);
+        HBM_AXI_WDATA_PARITY : out std_logic_vector(HBM_DATA_WIDTH/8-1 downto 0);
+        HBM_AXI_WLAST        : out std_logic;
+        HBM_AXI_WSTRB        : out std_logic_vector(HBM_DATA_WIDTH/8-1 downto 0);
+        HBM_AXI_WVALID       : out std_logic;
+        HBM_AXI_WREADY       : in  std_logic;
+        HBM_AXI_BID          : in  std_logic_vector(HBM_ID_WIDTH-1 downto 0);
+        HBM_AXI_BRESP        : in  std_logic_vector(1 downto 0);
+        HBM_AXI_BVALID       : in  std_logic;
+        HBM_AXI_BREADY       : out std_logic;
+        HBM_AXI_RDATA        : in  std_logic_vector(HBM_DATA_WIDTH-1 downto 0);
+        HBM_AXI_RID          : in  std_logic_vector(HBM_ID_WIDTH-1 downto 0);
+        HBM_AXI_RLAST        : in  std_logic;
+        HBM_AXI_RRESP        : in  std_logic_vector(1 downto 0);
+        HBM_AXI_RVALID       : in  std_logic;
+        HBM_AXI_RREADY       : out std_logic;
 
         -- =========================================================================================
         -- Status signals

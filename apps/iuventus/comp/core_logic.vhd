@@ -157,9 +157,14 @@ architecture FULL of CORE_LOGIC is
     constant HBM_EP_PORTS : natural := work.iuventus_sizing_pkg.HBM_EP_PORTS;
 
     -- Index = ep*HBM_EP_PORTS + slot: slots 0-3 WRBUFF, 4-5 RDBUFF, one pseudo-channel each. The DMA
-    -- keeps to the contiguous 18-29 (X4Y0-X6Y0), leaving 0-17 free; endpoint 0's WRBUFF stays
+    -- keeps to the contiguous 18-29 (X4Y0-X6Y0), leaving 0-17 to USER_CORE; endpoint 0's WRBUFF stays
     -- within X5Y0 (ports 20-24).
     constant HBM_DMA_PORT : n_array_t(0 to 11) := (20, 21, 22, 23, 18, 19, 24, 25, 26, 27, 28, 29);
+
+    -- USER_CORE's own port, on DMA_CLK, in X0Y0 under the user-core pblock.
+    constant HBM_USER_PORT        : natural := 0;
+    -- AXI_PIPE stages between USER_CORE (pblock X0-X2) and that port.
+    constant HBM_USER_PIPE_STAGES : natural := 2;
 
     -- Every port addresses only its own pseudo-channel, so every base is 0.
     constant HBM_ZERO_BASE : std_logic_vector(34-1 downto 0) := (others => '0');
@@ -387,7 +392,41 @@ architecture FULL of CORE_LOGIC is
     signal hbm_cattrip_int  : std_logic_vector(1 downto 0);
     signal hbm_init_done    : std_logic;
 
-    -- Dedicated 450 MHz port clock (MMCME4_BASE from SYSCLK) for every HBM port.
+    -- USER_CORE's port: its side of the AXI_PIPE, its DMA_CLK reset, and HBM init done in DMA_CLK.
+    signal uc_hbm_awaddr  : std_logic_vector(HBM_ADDR_WIDTH-1 downto 0);
+    signal uc_hbm_awburst : std_logic_vector(HBM_BURST_WIDTH-1 downto 0);
+    signal uc_hbm_awid    : std_logic_vector(HBM_ID_WIDTH-1 downto 0);
+    signal uc_hbm_awlen   : std_logic_vector(HBM_LEN_WIDTH-1 downto 0);
+    signal uc_hbm_awsize  : std_logic_vector(HBM_SIZE_WIDTH-1 downto 0);
+    signal uc_hbm_awvalid : std_logic;
+    signal uc_hbm_awready : std_logic;
+    signal uc_hbm_wdata   : std_logic_vector(HBM_DATA_WIDTH-1 downto 0);
+    signal uc_hbm_wlast   : std_logic;
+    signal uc_hbm_wstrb   : std_logic_vector((HBM_DATA_WIDTH/8)-1 downto 0);
+    signal uc_hbm_wvalid  : std_logic;
+    signal uc_hbm_wready  : std_logic;
+    signal uc_hbm_bid     : std_logic_vector(HBM_ID_WIDTH-1 downto 0);
+    signal uc_hbm_bresp   : std_logic_vector(HBM_RESP_WIDTH-1 downto 0);
+    signal uc_hbm_bvalid  : std_logic;
+    signal uc_hbm_bready  : std_logic;
+    signal uc_hbm_araddr  : std_logic_vector(HBM_ADDR_WIDTH-1 downto 0);
+    signal uc_hbm_arburst : std_logic_vector(HBM_BURST_WIDTH-1 downto 0);
+    signal uc_hbm_arid    : std_logic_vector(HBM_ID_WIDTH-1 downto 0);
+    signal uc_hbm_arlen   : std_logic_vector(HBM_LEN_WIDTH-1 downto 0);
+    signal uc_hbm_arsize  : std_logic_vector(HBM_SIZE_WIDTH-1 downto 0);
+    signal uc_hbm_arvalid : std_logic;
+    signal uc_hbm_arready : std_logic;
+    signal uc_hbm_rdata   : std_logic_vector(HBM_DATA_WIDTH-1 downto 0);
+    signal uc_hbm_rid     : std_logic_vector(HBM_ID_WIDTH-1 downto 0);
+    signal uc_hbm_rlast   : std_logic;
+    signal uc_hbm_rresp   : std_logic_vector(HBM_RESP_WIDTH-1 downto 0);
+    signal uc_hbm_rvalid  : std_logic;
+    signal uc_hbm_rready  : std_logic;
+    signal uc_hbm_ready   : std_logic;
+    -- Replica 0 drives the port's ARESET_N, replica 1 the AXI_PIPE in front of it, replica 2 USER_CORE.
+    signal uc_hbm_rst     : std_logic_vector(2 downto 0);
+
+    -- Dedicated 450 MHz port clock (MMCME4_BASE from SYSCLK) for every HBM port but HBM_USER_PORT.
     signal hbm_450_clkfbout : std_logic;
     signal hbm_450_clk_raw : std_logic;
     signal hbm_450_clk     : std_logic;
@@ -1616,7 +1655,7 @@ begin
     end generate;
 
     -- Dedicated 450 MHz HBM port clock from SYSCLK: VCO = 100 MHz * 13.5 = 1350 MHz, / 3.0 =
-    -- 450 MHz. Every HBM port runs on it, per PG276's shared ARESET_N across the switch.
+    -- 450 MHz. Every HBM port but HBM_USER_PORT (DMA_CLK) runs on it.
     mmcm_450_i : component MMCME4_BASE
         generic map (
             BANDWIDTH        => "OPTIMIZED",
@@ -2424,6 +2463,11 @@ begin
             -- Build knob USR_DATA_CHECK (app_conf.tcl); only the TEST architecture reads it.
             DATA_CHECK => USR_DATA_CHECK,
 
+            HBM_ADDR_WIDTH => HBM_ADDR_WIDTH,
+            HBM_DATA_WIDTH => HBM_DATA_WIDTH,
+            HBM_ID_WIDTH   => HBM_ID_WIDTH,
+            HBM_LEN_WIDTH  => HBM_LEN_WIDTH,
+
             FPGA_ID_WIDTH => FPGA_ID_WIDTH,
             DEVICE        => DEVICE
         )
@@ -2479,6 +2523,41 @@ begin
             NVME_RD_MFB_SRC_RDY => uc_rd_mfb_src_rdy,
             NVME_RD_MFB_DST_RDY => uc_rd_mfb_dst_rdy,
 
+            HBM_READY => uc_hbm_ready,
+            HBM_RESET => uc_hbm_rst(2),
+
+            HBM_AXI_ARADDR       => uc_hbm_araddr,
+            HBM_AXI_ARBURST      => uc_hbm_arburst,
+            HBM_AXI_ARID         => uc_hbm_arid,
+            HBM_AXI_ARLEN        => uc_hbm_arlen,
+            HBM_AXI_ARSIZE       => uc_hbm_arsize,
+            HBM_AXI_ARVALID      => uc_hbm_arvalid,
+            HBM_AXI_ARREADY      => uc_hbm_arready,
+            HBM_AXI_AWADDR       => uc_hbm_awaddr,
+            HBM_AXI_AWBURST      => uc_hbm_awburst,
+            HBM_AXI_AWID         => uc_hbm_awid,
+            HBM_AXI_AWLEN        => uc_hbm_awlen,
+            HBM_AXI_AWSIZE       => uc_hbm_awsize,
+            HBM_AXI_AWVALID      => uc_hbm_awvalid,
+            HBM_AXI_AWREADY      => uc_hbm_awready,
+            HBM_AXI_WDATA        => uc_hbm_wdata,
+            -- AXI_PIPE carries no parity; the port gets zero parity like every other one.
+            HBM_AXI_WDATA_PARITY => open,
+            HBM_AXI_WLAST        => uc_hbm_wlast,
+            HBM_AXI_WSTRB        => uc_hbm_wstrb,
+            HBM_AXI_WVALID       => uc_hbm_wvalid,
+            HBM_AXI_WREADY       => uc_hbm_wready,
+            HBM_AXI_BID          => uc_hbm_bid,
+            HBM_AXI_BRESP        => uc_hbm_bresp,
+            HBM_AXI_BVALID       => uc_hbm_bvalid,
+            HBM_AXI_BREADY       => uc_hbm_bready,
+            HBM_AXI_RDATA        => uc_hbm_rdata,
+            HBM_AXI_RID          => uc_hbm_rid,
+            HBM_AXI_RLAST        => uc_hbm_rlast,
+            HBM_AXI_RRESP        => uc_hbm_rresp,
+            HBM_AXI_RVALID       => uc_hbm_rvalid,
+            HBM_AXI_RREADY       => uc_hbm_rready,
+
             PCIE_LINK_UP => app_pcie_link_up(0),
             FPGA_ID      => fpga_id,
             FPGA_ID_VLD  => fpga_id_vld
@@ -2501,15 +2580,48 @@ begin
 
     STATUS_LEDS(1) <= (and app_pcie_link_up);
 
-    -- PG276: the switch ties every port's ARESET_N together, so an unused port held in reset would
-    -- reset the whole stack. Every port gets the same clock and a deasserted reset; unused ports
-    -- tie their master-driven inputs inactive.
-    hbm_port_wiring_g : for i in 0 to HBM_PORTS-1 generate
-        hbm_axi_aclk(i)     <= hbm_450_clk;
-        hbm_axi_areset_n(i) <= not hbm_450_rst_r(i);
+    assert (not hbm_dma_driven_port_f(HBM_USER_PORT))
+        report "CORE_LOGIC: HBM_USER_PORT is one of the DMA's ports."
+        severity FAILURE;
 
-        -- DMA-driven ports take DMA_IUVENTUS's 450 MHz AXI through an AXI_PIPE; dma_driven_port_g
-        -- and unused_port_g partition HBM_PORTS exactly.
+    -- USER_CORE's port reset, asserted with every other port's and released in DMA_CLK.
+    hbm_uc_rst_i : entity work.ASYNC_RESET
+    generic map (
+        TWO_REG  => FALSE,
+        OUT_REG  => TRUE,
+        REPLICAS => 3
+    )
+    port map (
+        CLK       => pcie_clks(0),
+        ASYNC_RST => (not pll_locked) or (not hbm_450_locked),
+        OUT_RST   => uc_hbm_rst
+    );
+
+    -- Both stacks' APB_COMPLETE, combined in SYSCLK and synchronised to DMA_CLK for USER_CORE.
+    hbm_uc_ready_i : entity work.ASYNC_OPEN_LOOP
+    generic map (
+        IN_REG  => TRUE,
+        TWO_REG => FALSE
+    )
+    port map (
+        ACLK     => SYSCLK,
+        BCLK     => pcie_clks(0),
+        ARST     => '0',
+        BRST     => '0',
+        ADATAIN  => hbm_ready(0) and hbm_ready(1),
+        BDATAOUT => uc_hbm_ready
+    );
+
+    -- PG276: the switch ties every port's ARESET_N together, so an unused port held in reset would
+    -- reset the whole stack. Every port gets a deasserted reset in its own clock: 450 MHz, except
+    -- HBM_USER_PORT on DMA_CLK.
+    hbm_port_wiring_g : for i in 0 to HBM_PORTS-1 generate
+        hbm_axi_aclk(i)     <= pcie_clks(0) when (i = HBM_USER_PORT) else hbm_450_clk;
+        hbm_axi_areset_n(i) <= not uc_hbm_rst(0) when (i = HBM_USER_PORT) else not hbm_450_rst_r(i);
+
+        -- DMA-driven ports take DMA_IUVENTUS's 450 MHz AXI through an AXI_PIPE, HBM_USER_PORT takes
+        -- USER_CORE's DMA_CLK AXI through one; dma_driven_port_g, user_port_g and unused_port_g
+        -- partition HBM_PORTS exactly.
         dma_driven_port_g : if (hbm_dma_driven_port_f(i)) generate
             hbm_axi_wdata_parity(i) <= (others => '0');
             hbm_450_pipe_i : entity work.AXI_PIPE
@@ -2602,7 +2714,99 @@ begin
             );
         end generate;
 
-        unused_port_g : if (not hbm_dma_driven_port_f(i)) generate
+        user_port_g : if (i = HBM_USER_PORT) generate
+            hbm_axi_wdata_parity(i) <= (others => '0');
+            hbm_uc_pipe_i : entity work.AXI_PIPE
+            generic map (
+                AXI_ADDR_WIDTH  => HBM_ADDR_WIDTH,
+                AXI_DATA_WIDTH  => HBM_DATA_WIDTH,
+                AXI_ID_WIDTH    => HBM_ID_WIDTH,
+                AXI_LEN_WIDTH   => HBM_LEN_WIDTH,
+                AXI_SIZE_WIDTH  => HBM_SIZE_WIDTH,
+                AXI_BURST_WIDTH => HBM_BURST_WIDTH,
+                AXI_RESP_WIDTH  => HBM_RESP_WIDTH,
+
+                WRITE_EN => true,
+                READ_EN  => true,
+
+                STAGES => HBM_USER_PIPE_STAGES,
+                DEVICE => DEVICE
+            )
+            port map (
+                CLK   => pcie_clks(0),
+                RESET => uc_hbm_rst(1),
+
+                M_AXI_AWADDR  => uc_hbm_awaddr,
+                M_AXI_AWID    => uc_hbm_awid,
+                M_AXI_AWLEN   => uc_hbm_awlen,
+                M_AXI_AWSIZE  => uc_hbm_awsize,
+                M_AXI_AWBURST => uc_hbm_awburst,
+                M_AXI_AWVALID => uc_hbm_awvalid,
+                M_AXI_AWREADY => uc_hbm_awready,
+
+                M_AXI_WDATA  => uc_hbm_wdata,
+                M_AXI_WSTRB  => uc_hbm_wstrb,
+                M_AXI_WLAST  => uc_hbm_wlast,
+                M_AXI_WVALID => uc_hbm_wvalid,
+                M_AXI_WREADY => uc_hbm_wready,
+
+                M_AXI_BID    => uc_hbm_bid,
+                M_AXI_BRESP  => uc_hbm_bresp,
+                M_AXI_BVALID => uc_hbm_bvalid,
+                M_AXI_BREADY => uc_hbm_bready,
+
+                M_AXI_ARADDR  => uc_hbm_araddr,
+                M_AXI_ARID    => uc_hbm_arid,
+                M_AXI_ARLEN   => uc_hbm_arlen,
+                M_AXI_ARSIZE  => uc_hbm_arsize,
+                M_AXI_ARBURST => uc_hbm_arburst,
+                M_AXI_ARVALID => uc_hbm_arvalid,
+                M_AXI_ARREADY => uc_hbm_arready,
+
+                M_AXI_RDATA  => uc_hbm_rdata,
+                M_AXI_RID    => uc_hbm_rid,
+                M_AXI_RRESP  => uc_hbm_rresp,
+                M_AXI_RLAST  => uc_hbm_rlast,
+                M_AXI_RVALID => uc_hbm_rvalid,
+                M_AXI_RREADY => uc_hbm_rready,
+
+                S_AXI_AWADDR  => hbm_axi_awaddr(i),
+                S_AXI_AWID    => hbm_axi_awid(i),
+                S_AXI_AWLEN   => hbm_axi_awlen(i),
+                S_AXI_AWSIZE  => hbm_axi_awsize(i),
+                S_AXI_AWBURST => hbm_axi_awburst(i),
+                S_AXI_AWVALID => hbm_axi_awvalid(i),
+                S_AXI_AWREADY => hbm_axi_awready(i),
+
+                S_AXI_WDATA  => hbm_axi_wdata(i),
+                S_AXI_WSTRB  => hbm_axi_wstrb(i),
+                S_AXI_WLAST  => hbm_axi_wlast(i),
+                S_AXI_WVALID => hbm_axi_wvalid(i),
+                S_AXI_WREADY => hbm_axi_wready(i),
+
+                S_AXI_BID    => hbm_axi_bid(i),
+                S_AXI_BRESP  => hbm_axi_bresp(i),
+                S_AXI_BVALID => hbm_axi_bvalid(i),
+                S_AXI_BREADY => hbm_axi_bready(i),
+
+                S_AXI_ARADDR  => hbm_axi_araddr(i),
+                S_AXI_ARID    => hbm_axi_arid(i),
+                S_AXI_ARLEN   => hbm_axi_arlen(i),
+                S_AXI_ARSIZE  => hbm_axi_arsize(i),
+                S_AXI_ARBURST => hbm_axi_arburst(i),
+                S_AXI_ARVALID => hbm_axi_arvalid(i),
+                S_AXI_ARREADY => hbm_axi_arready(i),
+
+                S_AXI_RDATA  => hbm_axi_rdata(i),
+                S_AXI_RID    => hbm_axi_rid(i),
+                S_AXI_RRESP  => hbm_axi_rresp(i),
+                S_AXI_RLAST  => hbm_axi_rlast(i),
+                S_AXI_RVALID => hbm_axi_rvalid(i),
+                S_AXI_RREADY => hbm_axi_rready(i)
+            );
+        end generate;
+
+        unused_port_g : if (not hbm_dma_driven_port_f(i) and i /= HBM_USER_PORT) generate
             -- tie ALL master-driven inputs of unused ports inactive
             hbm_axi_araddr(i)       <= (others => '0');
             hbm_axi_arburst(i)      <= (others => '0');
