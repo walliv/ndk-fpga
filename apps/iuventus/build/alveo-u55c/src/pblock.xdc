@@ -12,10 +12,10 @@ set_property IS_SOFT 0 [get_pblocks pblock_pcie_i]
 # The DMA is left to the placer: the builds that closed timing ran with it unconstrained.
 
 create_pblock pblock_user_core
-# Everything USER_CORE builds except its interface pipeline. Direct children, not user_core_i, so
-# the architecture-level MI register file (no instance name) is caught; *if_pipe_i* matches both
-# GROUPBY's if_pipe_i and TEST's user_core_if_pipe_i.
-add_cells_to_pblock [get_pblocks pblock_user_core] [get_cells -filter {NAME !~ "*if_pipe_i*"} core_logic_i/user_core_i/*]
+# Every USER_CORE cell but its interface pipeline. Direct children catch the unnamed MI register
+# file; FILE's if_pipe_i sits inside file_shell_i. XDC has no if, so one get_cells over both levels
+# keeps the list non-empty in every architecture.
+add_cells_to_pblock [get_pblocks pblock_user_core] [get_cells -quiet -filter {NAME !~ "*if_pipe_i*" && NAME != "core_logic_i/user_core_i/file_shell_i"} [list core_logic_i/user_core_i/* core_logic_i/user_core_i/file_shell_i/*]]
 # Except the pipeline's engine end: the read credits, the first request stage and the first write
 # stage handshake with the engine in the same cycle, so they sit beside it, not out in the gap.
 add_cells_to_pblock [get_pblocks pblock_user_core] [get_cells -quiet -hier -filter {NAME =~ "core_logic_i/user_core_i/*if_pipe_i/credit_reg*" || NAME =~ "core_logic_i/user_core_i/*if_pipe_i/req_chain_g?1?.req_*_reg*" || (NAME =~ "core_logic_i/user_core_i/*if_pipe_i/wr_pipe_g?1?.wr_pipe_i/*" && IS_PRIMITIVE)}]

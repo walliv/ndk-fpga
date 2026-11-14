@@ -4,13 +4,23 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-# Emit the built architecture's node set: TEST and GROUPBY register maps share nothing, so the
-# wrong layout would hand software addresses that decode to something else.
+# Emit the built architecture's node set: the TEST, GROUPBY and FILE register maps share nothing,
+# so the wrong layout would hand software addresses that decode to something else.
 proc dts_application {DTS base arch_type} {
     upvar 1 $DTS dts
 
     set mfb_gen_base     [expr $base + 0x100]
     set data_logger_base [expr $base + 0x200]
+
+    # The host library opens the shell by its compatible; the node spans the whole 32 MiB window.
+    if {$arch_type eq "FILE"} {
+        dts_create_node dts "user_core" {
+            dts_create_node dts "file_shell" {
+                dts_appendprop_comp_node dts $base 0x02000000 "ziti,iuventus_file_shell"
+            }
+        }
+        return
+    }
 
     if {$arch_type eq "GROUPBY"} {
         dts_create_node dts "user_core" {

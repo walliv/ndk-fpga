@@ -104,6 +104,11 @@ if {$ARCHGRP_ARR(USR_CORE_ARCH) == "FULL"} {
     lappend MOD "$ENTITY_BASE/iuventus_groupby_engine.vhd"
     lappend MOD "$ENTITY_BASE/user_core_if_pipe.vhd"
     lappend MOD "$ENTITY_BASE/user_core_groupby_arch.vhd"
+} elseif {$ARCHGRP_ARR(USR_CORE_ARCH) == "FILE"} {
+    # FILE_SHELL's Modules.tcl brings its packages, MI_ASYNC, FIFOX, MFB_PIPE and the if_pipe.
+    lappend COMPONENTS [list "FILE_SHELL" "$ENTITY_BASE/file_shell" "FULL"]
+
+    lappend MOD "$ENTITY_BASE/user_core_file_arch.vhd"
 } else {
     error "Unknown USR_CORE_ARCH '$ARCHGRP_ARR(USR_CORE_ARCH)'. Without a matching arm the design\
            elaborates USER_CORE with no architecture, which fails later with an unrelated message."
