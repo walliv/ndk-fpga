@@ -156,10 +156,10 @@ architecture FULL of CORE_LOGIC is
 
     constant HBM_EP_PORTS : natural := work.iuventus_sizing_pkg.HBM_EP_PORTS;
 
-    -- One port per bank, both directions (fill on AW/W/B, drain on AR/R). Index = ep*HBM_EP_PORTS + slot:
-    -- slots 0-3 WRBUFF, one pseudo-channel each, 4-5 RDBUFF. Stack-1 clock regions: X4Y0 16-19, X5Y0
-    -- 20-24, X6Y0 25-29, X7Y0 30-31; 30/31 stay free.
-    constant HBM_DMA_PORT : n_array_t(0 to 11) := (16, 17, 18, 19, 20, 21, 24, 25, 26, 27, 28, 29);
+    -- Index = ep*HBM_EP_PORTS + slot: slots 0-3 WRBUFF, 4-5 RDBUFF, one pseudo-channel each. The DMA
+    -- keeps to the contiguous 18-29 (X4Y0-X6Y0), leaving 0-17 free; endpoint 0's WRBUFF stays
+    -- within X5Y0 (ports 20-24).
+    constant HBM_DMA_PORT : n_array_t(0 to 11) := (20, 21, 22, 23, 18, 19, 24, 25, 26, 27, 28, 29);
 
     -- Every port addresses only its own pseudo-channel, so every base is 0.
     constant HBM_ZERO_BASE : std_logic_vector(34-1 downto 0) := (others => '0');
