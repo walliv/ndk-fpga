@@ -607,4 +607,27 @@ begin
         DMA_WR_MFB_DST_RDY => NVME_WR_MFB_DST_RDY
     );
 
+    -- =============================================================================================
+    -- HBM port: unused by this architecture
+    -- =============================================================================================
+    HBM_AXI_ARADDR       <= (others => '0');
+    HBM_AXI_ARBURST      <= (others => '0');
+    HBM_AXI_ARID         <= (others => '0');
+    HBM_AXI_ARLEN        <= (others => '0');
+    HBM_AXI_ARSIZE       <= (others => '0');
+    HBM_AXI_ARVALID      <= '0';
+    HBM_AXI_AWADDR       <= (others => '0');
+    HBM_AXI_AWBURST      <= (others => '0');
+    HBM_AXI_AWID         <= (others => '0');
+    HBM_AXI_AWLEN        <= (others => '0');
+    HBM_AXI_AWSIZE       <= (others => '0');
+    HBM_AXI_AWVALID      <= '0';
+    HBM_AXI_WDATA        <= (others => '0');
+    HBM_AXI_WDATA_PARITY <= (others => '0');
+    HBM_AXI_WLAST        <= '0';
+    HBM_AXI_WSTRB        <= (others => '0');
+    HBM_AXI_WVALID       <= '0';
+    HBM_AXI_BREADY       <= '0';
+    HBM_AXI_RREADY       <= '0';
+
 end architecture;
