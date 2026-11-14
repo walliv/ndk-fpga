@@ -1,4 +1,4 @@
-# CMakeLists.txt: host exFAT metadata library and tests of the Iuventus file layer
+# CMakeLists.txt: host exFAT metadata library, CLI and tests of the Iuventus file layer
 # Copyright (C) 2026 Universitaet Heidelberg, Institut fuer Technische Informatik (ZITI)
 # Author(s): Vladislav Valek <vladislav.valek@stud.uni-heidelberg.de>
 #
@@ -52,6 +52,10 @@ if(NOT IUV_EXFAT_WITH_NFB STREQUAL "OFF")
     endif()
 endif()
 
+add_executable(iuv-exfat tools/iuv_exfat.cpp)
+target_link_libraries(iuv-exfat PRIVATE iuv_exfat)
+target_compile_options(iuv-exfat PRIVATE ${IUV_WARNINGS})
+
 include(CTest)
 if(BUILD_TESTING)
     find_program(MKFS_EXFAT mkfs.exfat)
@@ -78,4 +82,8 @@ if(BUILD_TESTING)
         add_test(NAME ${t} COMMAND ${t})
         set_tests_properties(${t} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1200)
     endforeach()
+
+    add_test(NAME cli_smoke COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_smoke.sh $<TARGET_FILE:iuv-exfat>
+        ${IUV_TEST_TMP}/cli_smoke ${CMAKE_CURRENT_SOURCE_DIR}/tests/exfat_bitmap_check.py)
+    set_tests_properties(cli_smoke PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
 endif()
