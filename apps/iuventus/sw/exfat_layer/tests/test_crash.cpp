@@ -141,11 +141,16 @@ int main()
         for (int it = 0; it < iterations; ++it) {
             const uint64_t session_seed = rng();
             uint64_t total_ops = 0;
+            // Odd iterations hold the volume's writes in a write-back cache above the crashing device, as iuv-fs does.
+            const bool write_back = it % 2 == 1;
+            auto wrap = [&](std::unique_ptr<BlockDevice> d) {
+                return write_back ? make_write_back_device(std::move(d)) : std::move(d);
+            };
             {
                 std::filesystem::copy_file(tmpl, image, std::filesystem::copy_options::overwrite_existing);
                 auto dev = std::make_unique<CrashDevice>(open_block_device(image), 0, 0);
                 CrashDevice* cd = dev.get();
-                auto vol = Volume::open(std::move(dev));
+                auto vol = Volume::open(wrap(std::move(dev)));
                 Session s {inputs, session_seed, {}};
                 s.run(*vol);
                 total_ops = cd->ops();
@@ -158,7 +163,7 @@ int main()
             {
                 auto dev = std::make_unique<CrashDevice>(open_block_device(image), rng(), crash_at);
                 CrashDevice* cd = dev.get();
-                auto vol = Volume::open(std::move(dev));
+                auto vol = Volume::open(wrap(std::move(dev)));
                 try {
                     s.run(*vol);
                 } catch (const CrashError&) {
@@ -200,7 +205,8 @@ int main()
                 }
                 CHECK(vol->check().clean());
             } catch (const TestFailure&) {
-                std::printf("iteration %d: crash at op %llu of %llu, kept %llu dropped %llu unflushed writes\n", it,
+                std::printf("iteration %d%s: crash at op %llu of %llu, kept %llu dropped %llu unflushed writes\n", it,
+                            write_back ? " (write-back)" : "",
                             static_cast<unsigned long long>(crash_at), static_cast<unsigned long long>(total_ops),
                             static_cast<unsigned long long>(kept), static_cast<unsigned long long>(dropped));
                 throw;
