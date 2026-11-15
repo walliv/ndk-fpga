@@ -84,6 +84,8 @@ struct RecoverReport {
     uint32_t truncated_chains   = 0;
     // Finished files cut back to their ValidDataLength, the size their last finalize committed.
     uint32_t trimmed_files      = 0;
+    // Old sets and replaced files of renames cut off before their commit, deleted.
+    uint32_t superseded_sets    = 0;
     uint64_t bits_cleared       = 0;
     uint64_t bits_set           = 0;
 };
@@ -108,6 +110,8 @@ public:
     virtual void make_directory(const std::string& path) = 0;
     // Staged like abandon: the entry set and the clusters are released by the next commit().
     virtual void remove(const std::string& path) = 0;
+    // Replaces a file, or an empty directory, at to like POSIX rename; open outputs move along. Durable at the next commit().
+    virtual void rename(const std::string& from, const std::string& to) = 0;
 
     virtual Output reserve(const std::string& path, uint64_t nbytes) = 0;
     // Returns the extents appended to output.extents.

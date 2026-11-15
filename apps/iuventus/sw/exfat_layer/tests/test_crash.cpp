@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <map>
+#include <optional>
 #include <system_error>
 
 #include "crash_device.hpp"
@@ -22,18 +23,42 @@ namespace {
 enum class Fate { ABSENT, PRESENT, EITHER };
 
 struct Expect {
-    std::vector<uint8_t> data;
-    Fate                 fate;
+    std::vector<uint8_t>                data;
+    Fate                                fate;
+    // What a rename's target held before it, which a crash ahead of the commit may leave.
+    std::optional<std::vector<uint8_t>> before;
 };
 
 // Every file the session may touch, with what a crash at the current point allows.
 struct Ledger {
     std::map<std::string, Expect> files;
+    // Renames since the last commit; a crash leaves the data under exactly one of the two names.
+    std::vector<std::pair<std::string, std::string>> moves;
 
-    void pending(const std::string& p, std::vector<uint8_t> d) { files[p] = {std::move(d), Fate::ABSENT}; }
+    void pending(const std::string& p, std::vector<uint8_t> d) { files[p] = {std::move(d), Fate::ABSENT, {}}; }
     void committing(const std::string& p) { files[p].fate = Fate::EITHER; }
     void committed(const std::string& p) { files[p].fate = Fate::PRESENT; }
     void removed(const std::string& p) { files[p].fate = Fate::ABSENT; }
+
+    void moving(const std::string& from, const std::string& to)
+    {
+        std::optional<std::vector<uint8_t>> before;
+        if (auto it = files.find(to); it != files.end() && it->second.fate == Fate::PRESENT)
+            before = it->second.data;
+        files[to] = {files.at(from).data, Fate::EITHER, std::move(before)};
+        files[from].fate = Fate::EITHER;
+        moves.emplace_back(from, to);
+    }
+
+    void moved()
+    {
+        for (const auto& [from, to] : moves) {
+            files[from].fate = Fate::ABSENT;
+            files[to].fate   = Fate::PRESENT;
+            files[to].before.reset();
+        }
+        moves.clear();
+    }
 };
 
 struct Session {
@@ -99,8 +124,29 @@ struct Session {
         put_file(vol, "/out/put.bin", pdata);
         ledger.committed("/out/put.bin");
         run_job(vol, 2, true, rng, "/out");
+        // Renames to a longer name in another directory and onto an existing file, then of a whole directory.
+        vol.make_directory("/out/mv");
+        for (const std::string p : {"/out/r1", "/out/r2"}) {
+            auto d = random_bytes(rng, 1 + rng() % (2 * CLUSTER));
+            ledger.pending(p, d);
+            ledger.committing(p);
+            put_file(vol, p, d);
+            ledger.committed(p);
+        }
+        const std::string moved_put = "/out/mv/put_moved_to_a_name_long_enough_for_new_entries.bin";
+        ledger.moving("/out/put.bin", moved_put);
+        vol.rename("/out/put.bin", moved_put);
+        ledger.moving("/out/r1", "/out/r2");
+        vol.rename("/out/r1", "/out/r2");
+        vol.commit();
+        ledger.moved();
+        const std::string moved_dir = "/out/mv_renamed_with_a_longer_name";
+        ledger.moving(moved_put, moved_dir + moved_put.substr(7));
+        vol.rename("/out/mv", moved_dir);
+        vol.commit();
+        ledger.moved();
         const std::string victim = inputs.begin()->first;
-        ledger.files[victim] = {inputs.begin()->second, Fate::EITHER};
+        ledger.files[victim] = {inputs.begin()->second, Fate::EITHER, {}};
         vol.remove(victim);
         vol.commit();
         ledger.removed(victim);
@@ -137,7 +183,7 @@ int main()
         }
         const std::string image = tmp.file("crash.img");
         const int iterations = static_cast<int>(env_u64("IUV_CRASH_ITERS").value_or(40));
-        uint32_t recovered_dirty = 0, deleted = 0, truncated = 0, past_eod = 0;
+        uint32_t recovered_dirty = 0, deleted = 0, truncated = 0, past_eod = 0, superseded = 0;
         for (int it = 0; it < iterations; ++it) {
             const uint64_t session_seed = rng();
             uint64_t total_ops = 0;
@@ -183,6 +229,7 @@ int main()
                 deleted += rep.deleted_unfinished;
                 truncated += rep.truncated_chains;
                 past_eod += rep.entries_past_eod;
+                superseded += rep.superseded_sets;
                 CHECK(!vol->dirty());
                 vol->close();
             }
@@ -200,9 +247,12 @@ int main()
                         CHECK(!there);
                     if (there) {
                         CHECK(!vol->stat(p).unfinished);
-                        CHECK(read_file(*vol, p) == e.data);
+                        const auto got = read_file(*vol, p);
+                        CHECK(got == e.data || (e.before && got == *e.before));
                     }
                 }
+                for (const auto& [from, to] : s.ledger.moves)
+                    CHECK(vol->exists(from) != (vol->exists(to) && read_file(*vol, to) == s.ledger.files.at(to).data));
                 CHECK(vol->check().clean());
             } catch (const TestFailure&) {
                 std::printf("iteration %d%s: crash at op %llu of %llu, kept %llu dropped %llu unflushed writes\n", it,
@@ -212,7 +262,8 @@ int main()
                 throw;
             }
         }
-        std::printf("%d crashes: %u reopened dirty, %u unfinished outputs deleted, %u chains truncated, %u entries past EOD wiped\n",
-                    iterations, recovered_dirty, deleted, truncated, past_eod);
+        std::printf("%d crashes: %u reopened dirty, %u unfinished outputs deleted, %u chains truncated, %u entries past EOD wiped, "
+                    "%u superseded sets deleted\n",
+                    iterations, recovered_dirty, deleted, truncated, past_eod, superseded);
     });
 }

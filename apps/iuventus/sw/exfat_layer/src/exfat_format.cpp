@@ -145,7 +145,7 @@ std::u16string utf8_to_utf16(std::string_view s)
             cp = (cp << 6) | (b & 0x3F);
         }
         static constexpr uint32_t MIN_CP[] = {0, 0, 0x80, 0x800, 0x10000};
-        if (cp < MIN_CP[len] || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF))
+        if (cp < MIN_CP[len] || cp > 0x10FFFF)
             throw std::invalid_argument("invalid UTF-8 code point");
         if (cp >= 0x10000) {
             cp -= 0x10000;
@@ -167,8 +167,6 @@ std::string utf16_to_utf8(std::u16string_view s)
         if (cp >= 0xD800 && cp <= 0xDBFF && i + 1 < s.size() && s[i + 1] >= 0xDC00 && s[i + 1] <= 0xDFFF) {
             cp = 0x10000 + ((cp - 0xD800) << 10) + (s[i + 1] - 0xDC00);
             ++i;
-        } else if (cp >= 0xD800 && cp <= 0xDFFF) {
-            cp = 0xFFFD;
         }
         if (cp < 0x80) {
             out.push_back(static_cast<char>(cp));

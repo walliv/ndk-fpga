@@ -76,7 +76,8 @@ if(BUILD_TESTING)
         IUV_PYTHON="${Python3_EXECUTABLE}"
         IUV_BITMAP_CHECK="${CMAKE_CURRENT_SOURCE_DIR}/tests/exfat_bitmap_check.py")
 
-    set(IUV_TESTS test_open_put test_reserve test_job test_crash test_large_open test_loop_mount)
+    set(IUV_TESTS test_open_put test_reserve test_rename test_job test_crash test_large_open
+        test_loop_mount test_foreign_entries)
     foreach(t IN LISTS IUV_TESTS)
         add_executable(${t} tests/${t}.cpp)
         target_link_libraries(${t} PRIVATE iuv_test_util)
@@ -84,7 +85,7 @@ if(BUILD_TESTING)
         add_test(NAME ${t} COMMAND ${t})
         set_tests_properties(${t} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1200)
     endforeach()
-    foreach(t IN ITEMS test_open_put test_reserve test_job)
+    foreach(t IN ITEMS test_open_put test_reserve test_rename test_job)
         add_test(NAME ${t}_write_back COMMAND ${t})
         set_tests_properties(${t}_write_back PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1200 ENVIRONMENT IUV_TEST_WRITE_BACK=1)
     endforeach()

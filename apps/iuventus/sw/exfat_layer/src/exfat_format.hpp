@@ -55,6 +55,7 @@ constexpr uint16_t ATTR_ARCHIVE   = 0x0020;
 constexpr uint32_t FILE_SECONDARY_COUNT = 1;
 constexpr uint32_t FILE_SET_CHECKSUM    = 2;
 constexpr uint32_t FILE_ATTRIBUTES      = 4;
+constexpr uint32_t FILE_RESERVED1       = 6;
 constexpr uint32_t FILE_CREATE_TS       = 8;
 constexpr uint32_t FILE_MODIFY_TS       = 12;
 constexpr uint32_t FILE_ACCESS_TS       = 16;
@@ -63,6 +64,7 @@ constexpr uint32_t FILE_MODIFY_10MS     = 21;
 constexpr uint32_t FILE_CREATE_UTC      = 22;
 constexpr uint32_t FILE_MODIFY_UTC      = 23;
 constexpr uint32_t FILE_ACCESS_UTC      = 24;
+constexpr uint32_t FILE_RESERVED2       = 25;
 
 // Stream extension and generic allocation secondary field offsets.
 constexpr uint32_t SEC_FLAGS         = 1;
@@ -127,7 +129,7 @@ private:
     std::vector<char16_t> map_;
 };
 
-// Throws std::invalid_argument on malformed input.
+// Throws std::invalid_argument on malformed input. An unpaired surrogate goes through as its own 3-byte sequence, so any on-disk name can be listed and looked up again.
 std::u16string utf8_to_utf16(std::string_view s);
 std::string utf16_to_utf8(std::u16string_view s);
 bool valid_name(std::u16string_view name);

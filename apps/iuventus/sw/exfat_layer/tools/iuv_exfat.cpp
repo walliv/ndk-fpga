@@ -40,6 +40,7 @@ void usage()
         "  put <host-file> <path>     copy a host file onto the volume\n"
         "  get <path> <host-file>     copy a file off the volume\n"
         "  rm <path>                  remove a file or an empty directory\n"
+        "  mv <path> <new-path>       rename, replacing a file or an empty directory\n"
         "  check                      compare the allocation bitmap with its owners\n"
         "  recover                    crash cleanup, then clear VolumeDirty\n"
         "  reserve <path> <bytes>     reserve and flush, print '<lba> <count>' lines, leave it unfinished\n"
@@ -147,7 +148,7 @@ int main(int argc, char** argv)
         usage();
         return 2;
     }
-    static const char* const COMMANDS[] = {"info", "ls", "extents", "mkdir", "put", "get", "rm",
+    static const char* const COMMANDS[] = {"info", "ls", "extents", "mkdir", "put", "get", "rm", "mv",
                                            "check", "recover", "run", "reserve", "finalize"};
     const bool cmd_first = std::find(std::begin(COMMANDS), std::end(COMMANDS), args[i]) != std::end(COMMANDS);
     const std::string dev = cmd_first ? args[i + 1] : args[i];
@@ -199,6 +200,9 @@ int main(int argc, char** argv)
         } else if (cmd == "rm" && rest.size() == 1) {
             vol->remove(rest[0]);
             vol->commit();
+        } else if (cmd == "mv" && rest.size() == 2) {
+            vol->rename(rest[0], rest[1]);
+            vol->commit();
         } else if (cmd == "check") {
             const auto r = vol->check();
             std::printf("owned %" PRIu64 " leaked %" PRIu64 " missing %" PRIu64 " cross-linked %" PRIu64 "\n",
@@ -206,9 +210,10 @@ int main(int argc, char** argv)
             rc = r.clean() ? 0 : 1;
         } else if (cmd == "recover") {
             const auto r = vol->recover();
-            std::printf("deleted unfinished %u, truncated chains %u, trimmed files %u, bits cleared %" PRIu64
+            std::printf("deleted unfinished %u, truncated chains %u, trimmed files %u, superseded sets %u, bits cleared %" PRIu64
                         ", bits set %" PRIu64 "\n",
-                        r.deleted_unfinished, r.truncated_chains, r.trimmed_files, r.bits_cleared, r.bits_set);
+                        r.deleted_unfinished, r.truncated_chains, r.trimmed_files, r.superseded_sets, r.bits_cleared,
+                        r.bits_set);
         } else if (cmd == "run") {
             rc = cmd_run(*vol, rest);
         } else {
