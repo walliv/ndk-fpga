@@ -135,6 +135,8 @@ proc filelist_EvalFile {FNAME OPT} {
         }
     } elseif {$opt(TYPE) == "CONSTR_VIVADO" && $fext == ".xdc"} {
         append cmds "read_xdc $fname\n"
+    } elseif {$opt(TYPE) == "CONSTR_VIVADO" && $fext == ".tcl"} {
+        append cmds "read_xdc -unmanaged $fname\n"
     } elseif {$opt(TYPE) == "VIVADO_IP_XACT"} {
         append cmds "read_ip $fname\n"
         append cmds "generate_target all \[get_files $fname\]\n"
