@@ -29,16 +29,20 @@ void write_extents(BlockDevice& dev, const std::vector<Extent>& extents, uint64_
 
 std::vector<uint8_t> read_file(Volume& vol, const std::string& path)
 {
+    return read_file_range(vol, path, 0, UINT64_MAX);
+}
+
+std::vector<uint8_t> read_file_range(Volume& vol, const std::string& path, uint64_t offset, uint64_t len)
+{
     const auto fe = vol.extents(path);
-    std::vector<uint8_t> out(fe.size, 0);
-    uint64_t pos = 0;
-    for (const auto& e : fe.extents) {
-        if (pos >= fe.valid_size)
-            break;
-        const uint64_t len = std::min<uint64_t>(static_cast<uint64_t>(e.count) * LBA_BYTES, fe.valid_size - pos);
-        vol.device().read(e.lba * LBA_BYTES, std::span(out.data() + pos, len));
-        pos += len;
-    }
+    const uint64_t lo = std::min(offset, fe.size);
+    const uint64_t hi = lo + std::min(len, fe.size - lo);
+    const uint64_t valid_hi = std::min(hi, fe.valid_size);
+    std::vector<uint8_t> out(hi - lo, 0);
+    if (lo < valid_hi)
+        for_each_dev_range(fe.extents, lo, valid_hi - lo, [&](uint64_t dev_off, uint64_t at, uint64_t n) {
+            vol.device().read(dev_off, std::span(out.data() + at, n));
+        });
     return out;
 }
 
