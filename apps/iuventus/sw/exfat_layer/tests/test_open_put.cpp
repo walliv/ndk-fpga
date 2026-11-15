@@ -84,6 +84,10 @@ int main()
         std::vector<std::string> dir_list {""};
 
         auto vol = open_volume(image);
+        // key() folds through the up-case table, not ASCII only: e/E acute, and a 3-byte to 2-byte UTF-8 pair.
+        CHECK(vol->key("/d/\xC3\xA9t\xC3\xA9.bin") == vol->key("/D/\xC3\x89T\xC3\x89.BIN"));
+        CHECK(vol->key("/\xE2\xB1\xA5") == vol->key("/\xC8\xBA"));
+        CHECK(vol->key("/a") != vol->key("/b"));
         const int ndirs = 3 + static_cast<int>(rng() % 8);
         for (int i = 0; i < ndirs; ++i) {
             const std::string parent = dir_list[rng() % dir_list.size()];

@@ -190,6 +190,49 @@ with SIGINT in between. ``-t`` and ``--profile`` both take ``--queues``.
    count. If you wrap it in a timeout, make it generous -- a short one truncates the sweep silently
    and leaves a partial dataset that still looks like a successful run.
 
+Files on the exFAT volume
+=========================
+
+``exfat_layer/`` holds the host library that owns the exFAT metadata of the RAID0 volume ``fzc -S``
+exposes, the ``iuv-exfat`` command line tool, and ``iuv-fs``, a FUSE daemon that mounts the volume
+so ordinary tools work on it and runs file shell jobs through a control file. Build them with CMake;
+``iuv-fs`` needs libfuse 3.12 or newer, the card access needs libnfb.
+
+.. code-block:: bash
+
+   iuv-fs --drives 4 --card /dev/nfb1 /dev/ublkb8 /mnt/iuv
+   mkdir /mnt/iuv/in /mnt/iuv/out
+   cp data.bin /mnt/iuv/in/
+   echo "run --fill-bytes 1048576 /out/a.bin /in/data.bin" > /mnt/iuv/.iuv-job
+   cat /mnt/iuv/.iuv-job              # the job report
+   sha256sum /mnt/iuv/out/a.bin
+   fusermount3 -u /mnt/iuv
+
+A line written to ``.iuv-job`` takes the ``iuv-exfat run`` arguments without ``--card``; the write
+returns once the job has finished and fails with EIO when it failed. Without ``--card`` the jobs run
+on the library's software model. The outputs are visible, with their final size, as soon as the
+write returns. One job runs at a time, and the files it reads or writes cannot be changed or removed
+while it runs.
+
+Behaviour that differs from a kernel file system:
+
+* There are no links, owners or modes; names compare case-insensitively.
+* A closed file, a rename or a removal becomes durable with the next commit, within 100 ms;
+  ``fsync`` of any file or directory commits at once. A crash before it leaves either the old or the
+  new state.
+* A file unlinked while open moves to a hidden name in the root until its last close. Its handles
+  keep working, except ``fstat``, which fails with ESTALE. Root names starting with
+  ``.iuv-fs-unlinked-`` are reserved for this and refused with EPERM.
+* Freed clusters are not discarded unless the daemon runs with ``--discard``.
+* ``--direct-io`` bypasses the kernel page cache for every file.
+* A volume left dirty by a crash mounts only with ``--recover``, which deletes unfinished outputs
+  and finishes renames cut off before their commit.
+* A commit that fails part-way (an I/O error) makes every later change fail with EIO, writes and
+  ``fsync`` of files already open included, and is logged to syslog. A rename, create or directory
+  change that fails part-way makes every later change to the volume fail with EIO. Either way,
+  unmount and mount again with ``--recover``.
+* Never mount the volume with the kernel's exFAT driver while ``iuv-fs`` has it mounted.
+
 Reading device state
 ====================
 

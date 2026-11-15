@@ -7,12 +7,17 @@
 #pragma once
 
 #include <algorithm>
+#include <filesystem>
+#include <functional>
 #include <memory>
 #include <random>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include "iuv_exfat/block_device.hpp"
+#include "iuv_exfat/volume.hpp"
+#include "test_util.hpp"
 
 namespace iuv_test {
 
@@ -100,5 +105,51 @@ private:
     bool                                     crashed_ = false;
     std::vector<Pending>                     pending_;
 };
+
+// Sits between the crash device and the volume, like the write-back cache of iuv-fs.
+using DeviceWrap = std::function<std::unique_ptr<iuv_exfat::BlockDevice>(std::unique_ptr<iuv_exfat::BlockDevice>)>;
+
+struct CrashCounts {
+    uint64_t kept    = 0;
+    uint64_t dropped = 0;
+};
+
+// A volume on a fresh copy of tmpl above a CrashDevice crashing at operation crash_at; cd receives that device.
+inline std::unique_ptr<iuv_exfat::Volume> crash_volume(const std::string& tmpl, const std::string& image, uint64_t seed,
+                                                       uint64_t crash_at, const DeviceWrap& wrap, CrashDevice*& cd)
+{
+    std::filesystem::copy_file(tmpl, image, std::filesystem::copy_options::overwrite_existing);
+    auto crash = std::make_unique<CrashDevice>(iuv_exfat::open_block_device(image), seed, crash_at);
+    cd = crash.get();
+    std::unique_ptr<iuv_exfat::BlockDevice> dev = std::move(crash);
+    return iuv_exfat::Volume::open(wrap ? wrap(std::move(dev)) : std::move(dev));
+}
+
+// Device operations fn issues on a fresh copy of tmpl, crashing nowhere.
+inline uint64_t count_ops(const std::string& tmpl, const std::string& image,
+                          const std::function<void(iuv_exfat::Volume&)>& fn, const DeviceWrap& wrap = nullptr)
+{
+    CrashDevice* cd = nullptr;
+    auto vol = crash_volume(tmpl, image, 0, 0, wrap, cd);
+    const uint64_t before = cd->ops();
+    fn(*vol);
+    return cd->ops() - before;
+}
+
+// Runs fn crashing at its op-th device operation (1-based); the volume is dropped like a killed process.
+inline CrashCounts crash_in(const std::string& tmpl, const std::string& image, uint64_t seed, uint64_t op,
+                            const std::function<void(iuv_exfat::Volume&)>& fn, const DeviceWrap& wrap = nullptr)
+{
+    CrashDevice* cd = nullptr;
+    auto vol = crash_volume(tmpl, image, seed, op, wrap, cd);
+    bool crashed = false;
+    try {
+        fn(*vol);
+    } catch (const CrashError&) {
+        crashed = true;
+    }
+    CHECK(crashed);
+    return {cd->kept(), cd->dropped()};
+}
 
 } // namespace iuv_test

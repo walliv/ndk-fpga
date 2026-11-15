@@ -237,6 +237,16 @@ int main()
             auto v = open_volume(image3);
             CHECK(v->dirty());
             CHECK(throws_errc(std::errc::device_or_resource_busy, [&] { v->reserve("/needs_recover", 1); }));
+            // Without continue_session the bitmap may predate a crash, so adopting leaves recover() required.
+            Output s0 = v->adopt("/S0");
+            CHECK(throws_errc(std::errc::device_or_resource_busy, [&] { v->finalize(s0, 0); }));
+            CHECK(throws_errc(std::errc::device_or_resource_busy, [&] { v->reserve("/needs_recover", 1); }));
+            v->close();
+        }
+        {
+            VolumeOptions o;
+            o.continue_session = true;
+            auto v = Volume::open(open_block_device(image3), o);
             Output s0 = v->adopt("/S0");
             CHECK_EQ(s0.reserved_bytes, 2 * CLUSTER);
             const auto d0 = random_bytes(rng, CLUSTER + 9);

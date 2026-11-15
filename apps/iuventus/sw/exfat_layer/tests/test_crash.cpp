@@ -186,39 +186,14 @@ int main()
         uint32_t recovered_dirty = 0, deleted = 0, truncated = 0, past_eod = 0, superseded = 0;
         for (int it = 0; it < iterations; ++it) {
             const uint64_t session_seed = rng();
-            uint64_t total_ops = 0;
             // Odd iterations hold the volume's writes in a write-back cache above the crashing device, as iuv-fs does.
             const bool write_back = it % 2 == 1;
-            auto wrap = [&](std::unique_ptr<BlockDevice> d) {
-                return write_back ? make_write_back_device(std::move(d)) : std::move(d);
-            };
-            {
-                std::filesystem::copy_file(tmpl, image, std::filesystem::copy_options::overwrite_existing);
-                auto dev = std::make_unique<CrashDevice>(open_block_device(image), 0, 0);
-                CrashDevice* cd = dev.get();
-                auto vol = Volume::open(wrap(std::move(dev)));
-                Session s {inputs, session_seed, {}};
-                s.run(*vol);
-                total_ops = cd->ops();
-            }
+            const DeviceWrap wrap = write_back ? DeviceWrap(make_write_back_device) : nullptr;
+            Session counted {inputs, session_seed, {}};
+            const uint64_t total_ops = count_ops(tmpl, image, [&](Volume& v) { counted.run(v); }, wrap);
             const uint64_t crash_at = 1 + rng() % total_ops;
-            std::filesystem::copy_file(tmpl, image, std::filesystem::copy_options::overwrite_existing);
             Session s {inputs, session_seed, {}};
-            bool crashed = false;
-            uint64_t kept = 0, dropped = 0;
-            {
-                auto dev = std::make_unique<CrashDevice>(open_block_device(image), rng(), crash_at);
-                CrashDevice* cd = dev.get();
-                auto vol = Volume::open(wrap(std::move(dev)));
-                try {
-                    s.run(*vol);
-                } catch (const CrashError&) {
-                    crashed = true;
-                }
-                kept = cd->kept();
-                dropped = cd->dropped();
-            }
-            CHECK(crashed);
+            const auto [kept, dropped] = crash_in(tmpl, image, rng(), crash_at, [&](Volume& v) { s.run(v); }, wrap);
             {
                 auto vol = open_volume(image);
                 if (vol->dirty()) {
