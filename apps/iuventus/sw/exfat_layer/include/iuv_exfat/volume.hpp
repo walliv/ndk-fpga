@@ -44,6 +44,8 @@ struct DirEntryInfo {
     uint16_t    attributes = 0;
     uint64_t    size       = 0;
     uint64_t    valid_size = 0;
+    // Unix seconds; 0 for the root directory, which has no entry set.
+    int64_t     mtime      = 0;
 };
 
 // Handle of a reserved output file; extents cover whole reserved clusters.

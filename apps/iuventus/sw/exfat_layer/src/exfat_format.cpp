@@ -223,6 +223,23 @@ Timestamp now_timestamp()
     return ts;
 }
 
+int64_t unix_seconds(const Timestamp& ts)
+{
+    std::tm tm {};
+    tm.tm_year = static_cast<int>(ts.stamp >> 25) + 80;
+    tm.tm_mon  = static_cast<int>((ts.stamp >> 21) & 0xF) - 1;
+    tm.tm_mday = static_cast<int>((ts.stamp >> 16) & 0x1F);
+    tm.tm_hour = static_cast<int>((ts.stamp >> 11) & 0x1F);
+    tm.tm_min  = static_cast<int>((ts.stamp >> 5) & 0x3F);
+    tm.tm_sec  = static_cast<int>(ts.stamp & 0x1F) * 2 + ts.ms10 / 100;
+    int64_t secs = timegm(&tm);
+    if (ts.utc & 0x80) {
+        const int offset_15min = static_cast<int8_t>(static_cast<uint8_t>(ts.utc << 1)) / 2;
+        secs -= static_cast<int64_t>(offset_15min) * 15 * 60;
+    }
+    return secs;
+}
+
 std::vector<std::string> split_path(std::string_view path)
 {
     std::vector<std::string> parts;
