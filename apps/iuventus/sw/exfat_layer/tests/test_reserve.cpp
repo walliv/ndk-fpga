@@ -318,5 +318,20 @@ int main()
         }
         check_volume(image4, tmp, "reopen cut off");
         verify(image4, files4);
+
+        // A directory whose removal is staged takes no new entries.
+        {
+            auto v = open_volume(image4);
+            v->make_directory("/doomed");
+            v->commit();
+            v->remove("/doomed");
+            CHECK(throws_errc(std::errc::no_such_file_or_directory, [&] { v->reserve("/doomed/x", 1); }));
+            CHECK(throws_errc(std::errc::no_such_file_or_directory, [&] { v->make_directory("/doomed/d"); }));
+            v->commit();
+            CHECK(!v->exists("/doomed"));
+            v->close();
+        }
+        check_volume(image4, tmp, "removed directory");
+        verify(image4, files4);
     });
 }
