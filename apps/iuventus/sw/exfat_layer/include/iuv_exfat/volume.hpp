@@ -100,7 +100,10 @@ public:
     virtual VolumeOptions options() const = 0;
     virtual VolumeInfo info() const = 0;
     virtual bool dirty() const = 0;
-    virtual bool reservations_flushed() const = 0;
+    // info() without the tree walk, for callers that poll free space.
+    virtual uint32_t free_clusters() const = 0;
+    // The path up-cased as the volume compares names: two paths name the same entry exactly when their keys are equal.
+    virtual std::string key(const std::string& path) const = 0;
 
     virtual std::vector<DirEntryInfo> list(const std::string& path) = 0;
     virtual DirEntryInfo stat(const std::string& path) = 0;
@@ -118,7 +121,7 @@ public:
     virtual std::vector<Extent> extend(Output& output, uint64_t nbytes) = 0;
     virtual void finalize(Output& output, uint64_t nbytes) = 0;
     virtual void abandon(Output& output) = 0;
-    // Takes over the unfinished entry at path as a live output; continues the session on a dirty volume.
+    // Takes over the unfinished entry at path as a live output; a dirty volume must be opened with continue_session to use it.
     virtual Output adopt(const std::string& path) = 0;
     // Takes a finished file over as an output that keeps its data and can grow; finalize it, since abandon would delete it.
     virtual Output reopen(const std::string& path) = 0;

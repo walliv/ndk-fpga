@@ -54,16 +54,18 @@ public:
         check_range(inner_->size(), offset, buf.size(), "the device");
         const uint64_t end = offset + buf.size();
         for (uint64_t page = offset - offset % PAGE; page < end; page += PAGE) {
-            auto& mem = pages_[page];
             const uint64_t lo = std::max(offset, page);
             const uint64_t hi = std::min(end, page + PAGE);
-            if (!mem) {
-                mem = alloc_aligned(PAGE);
+            auto it = pages_.find(page);
+            if (it == pages_.end()) {
+                // Cached only once filled, so a failed read leaves no page that a retry would take as media content.
+                AlignedBuf mem = alloc_aligned(PAGE);
                 const uint64_t valid = std::min(PAGE, inner_->size() - page);
                 if (lo > page || hi < page + valid)
                     inner_->read(page, std::span(mem.get(), valid));
+                it = pages_.emplace(page, std::move(mem)).first;
             }
-            std::memcpy(mem.get() + (lo - page), buf.data() + (lo - offset), hi - lo);
+            std::memcpy(it->second.get() + (lo - page), buf.data() + (lo - offset), hi - lo);
         }
     }
 

@@ -279,12 +279,19 @@ int main()
         raw_error_cases(*vol, vol->extents(biggest).extents[0].lba);
 
         {
-            Output o = vol->reserve("/unflushed", CLUSTER);
+            // A reservation of another file, made after the job's outputs were flushed, must not keep the job from starting.
+            Output o = vol->reserve("/flushed", CLUSTER);
+            vol->flush();
+            Output other = vol->reserve("/other", CLUSTER);
             auto m = make_file_shell_model(vol->device());
             Job j(*m, *vol);
-            j.add_stream({names[0]}, o, digest_fill_args(0, 0));
-            CHECK(throws_errc(std::errc::operation_not_permitted, [&] { j.submit(); }));
-            vol->abandon(o);
+            j.add_stream({biggest}, o, digest_fill_args(64, 5));
+            j.submit();
+            CHECK(j.wait().ok);
+            vol->abandon(other);
+            vol->commit();
+            CHECK(read_file(*vol, "/flushed") == digest_fill_expected({inputs.at(biggest)}, 64, 5));
+            vol->remove("/flushed");
             vol->commit();
         }
         {

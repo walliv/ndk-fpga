@@ -13,8 +13,6 @@
 #include <system_error>
 #include <thread>
 
-#include "error.hpp"
-
 namespace iuv_exfat {
 
 namespace {
@@ -245,8 +243,8 @@ void Job::submit()
     if (im.streams.empty())
         throw std::invalid_argument("job without streams");
     auto lock = im.lock_volume();
-    if (!im.vol.reservations_flushed())
-        fail(std::errc::operation_not_permitted, "output reservations are not flushed: call Volume::flush() before submit()");
+    // The outputs' clusters must be owned on the media before the shell writes them; flushing here covers every reservation.
+    im.vol.flush();
     if (const uint32_t v = im.bus.read32(REG_VERSION); v != LAYOUT_VERSION)
         throw std::runtime_error("file shell layout version " + std::to_string(v) + ", expected " + std::to_string(LAYOUT_VERSION));
     if (const uint32_t k = im.bus.read32(REG_KERNEL_ID); k != im.opts.kernel_id)

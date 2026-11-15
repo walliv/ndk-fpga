@@ -289,6 +289,29 @@ int main()
             vol->remove("/gone");
             CHECK(throws_errc(std::errc::no_such_file_or_directory, [&] { vol->rename("/c.bin", "/gone/c.bin"); }));
             vol->commit();
+            // A directory emptied by removals still staged can go in the same commit.
+            vol->make_directory("/emptied");
+            vol->make_directory("/emptied/sub");
+            for (int k = 0; k < 3; ++k)
+                put_file(*vol, "/emptied/f" + std::to_string(k), random_bytes(rng, rng() % CLUSTER));
+            put_file(*vol, "/emptied/sub/g", random_bytes(rng, 1));
+            vol->remove("/emptied/sub/g");
+            vol->remove("/emptied/sub");
+            CHECK(throws_errc(std::errc::directory_not_empty, [&] { vol->remove("/emptied"); }));
+            for (int k = 0; k < 3; ++k)
+                vol->remove("/emptied/f" + std::to_string(k));
+            vol->remove("/emptied");
+            vol->commit();
+            CHECK(!vol->exists("/emptied"));
+            vol->make_directory("/src_dir");
+            vol->make_directory("/dst_dir");
+            put_file(*vol, "/dst_dir/f", random_bytes(rng, 1));
+            vol->remove("/dst_dir/f");
+            vol->rename("/src_dir", "/dst_dir");
+            vol->commit();
+            CHECK(vol->exists("/dst_dir") && !vol->exists("/src_dir") && vol->list("/dst_dir").empty());
+            vol->remove("/dst_dir");
+            vol->commit();
         }
         verify(*vol, files, dirs);
 

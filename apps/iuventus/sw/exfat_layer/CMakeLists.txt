@@ -17,6 +17,8 @@ endif()
 set(IUV_EXFAT_WITH_NFB "AUTO" CACHE STRING "Build the libnfb MI bus: AUTO, ON or OFF")
 set_property(CACHE IUV_EXFAT_WITH_NFB PROPERTY STRINGS AUTO ON OFF)
 set(NFB_ROOT "" CACHE PATH "Optional libnfb install or build prefix")
+set(IUV_EXFAT_WITH_FUSE "AUTO" CACHE STRING "Build the iuv-fs FUSE daemon: AUTO, ON or OFF")
+set_property(CACHE IUV_EXFAT_WITH_FUSE PROPERTY STRINGS AUTO ON OFF)
 
 set(IUV_WARNINGS -Wall -Wextra -Werror)
 
@@ -58,6 +60,22 @@ add_executable(iuv-exfat tools/iuv_exfat.cpp)
 target_link_libraries(iuv-exfat PRIVATE iuv_exfat)
 target_compile_options(iuv-exfat PRIVATE ${IUV_WARNINGS})
 
+if(NOT IUV_EXFAT_WITH_FUSE STREQUAL "OFF")
+    find_package(PkgConfig)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(FUSE3 IMPORTED_TARGET fuse3>=3.12)
+    endif()
+    if(FUSE3_FOUND)
+        add_executable(iuv-fs tools/iuv_fs.cpp)
+        target_link_libraries(iuv-fs PRIVATE iuv_exfat PkgConfig::FUSE3)
+        target_compile_options(iuv-fs PRIVATE ${IUV_WARNINGS})
+    elseif(IUV_EXFAT_WITH_FUSE STREQUAL "ON")
+        message(FATAL_ERROR "IUV_EXFAT_WITH_FUSE=ON but libfuse3 >= 3.12 was not found")
+    else()
+        message(STATUS "libfuse3 not found: building without iuv-fs")
+    endif()
+endif()
+
 include(CTest)
 if(BUILD_TESTING)
     find_program(MKFS_EXFAT mkfs.exfat)
@@ -76,7 +94,7 @@ if(BUILD_TESTING)
         IUV_PYTHON="${Python3_EXECUTABLE}"
         IUV_BITMAP_CHECK="${CMAKE_CURRENT_SOURCE_DIR}/tests/exfat_bitmap_check.py")
 
-    set(IUV_TESTS test_open_put test_reserve test_rename test_job test_crash test_large_open
+    set(IUV_TESTS test_open_put test_reserve test_rename test_job test_crash test_crash_points test_commit_error test_large_open
         test_loop_mount test_foreign_entries)
     foreach(t IN LISTS IUV_TESTS)
         add_executable(${t} tests/${t}.cpp)
@@ -93,4 +111,9 @@ if(BUILD_TESTING)
     add_test(NAME cli_smoke COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_smoke.sh $<TARGET_FILE:iuv-exfat>
         ${IUV_TEST_TMP}/cli_smoke ${CMAKE_CURRENT_SOURCE_DIR}/tests/exfat_bitmap_check.py)
     set_tests_properties(cli_smoke PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
+    if(TARGET iuv-fs)
+        add_test(NAME fuse_smoke COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/fuse_smoke.sh $<TARGET_FILE:iuv-fs>
+            $<TARGET_FILE:iuv-exfat> ${IUV_TEST_TMP}/fuse_smoke)
+        set_tests_properties(fuse_smoke PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+    endif()
 endif()

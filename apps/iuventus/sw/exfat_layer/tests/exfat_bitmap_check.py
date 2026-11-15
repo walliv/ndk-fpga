@@ -140,7 +140,8 @@ def main():
                             problems.append("unfinished output left: " + full)
                 i += 1 + sc
             else:
-                i += 1 + (e[1] if not t & 0x40 else 0)
+                # Only benign primaries (0xA0-0xBF) carry a SecondaryCount; byte 1 of a label (0x83) is its length.
+                i += 1 + (e[1] if (t & 0xE0) == 0xA0 else 0)
     if bitmap_clusters is None:
         raise SystemExit("no allocation bitmap")
     bitmap = v.data(bitmap_clusters, bitmap_len)

@@ -1,4 +1,4 @@
-// test_foreign_entries.cpp: entry sets other exFAT writers produce (lone surrogate names)
+// test_foreign_entries.cpp: entry sets other exFAT writers produce (lone surrogate names, empty files without flags)
 // Copyright (C) 2026 Universitaet Heidelberg, Institut fuer Technische Informatik (ZITI)
 // Author(s): Vladislav Valek <vladislav.valek@stud.uni-heidelberg.de>
 //
@@ -69,13 +69,17 @@ int main()
         {
             auto vol = open_volume(image);
             put_file(*vol, "/SURRX", data);
+            put_file(*vol, "/EMPTY", {});
             put_file(*vol, "/keep", random_bytes(rng, 100));
             vol->close();
         }
 
         // Windows names may hold unpaired UTF-16 surrogates; the name listed has to reach the file again.
         patch_root_set(image, u"SURRX", [](uint8_t* e) { put16(e + 2 * ENTRY_BYTES + 2 + 2 * 4, 0xD800); });
+        // Writers other than this library may leave an empty file's stream flags all clear.
+        patch_root_set(image, u"EMPTY", [](uint8_t* e) { e[ENTRY_BYTES + SEC_FLAGS] = 0; });
 
+        const auto grown = random_bytes(rng, 1 + rng() % (2 * CLUSTER));
         {
             auto vol = open_volume(image);
             std::string surr;
@@ -94,10 +98,16 @@ int main()
             vol->commit();
             CHECK(!vol->exists(surr));
 
+            Output o = vol->reopen("/EMPTY");
+            vol->extend(o, grown.size());
+            write_extents(vol->device(), o.extents, 0, grown);
+            vol->finalize(o, grown.size());
+            vol->commit();
             vol->close();
         }
         check_volume(image, tmp, "foreign entries");
         auto vol = open_volume(image, true);
+        CHECK(read_file(*vol, "/EMPTY") == grown);
         CHECK(vol->check().clean());
     });
 }

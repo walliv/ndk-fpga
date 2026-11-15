@@ -184,7 +184,8 @@ public:
     VolumeOptions options() const override { return opts_; }
     VolumeInfo info() const override;
     bool dirty() const override { return dirty_on_disk_; }
-    bool reservations_flushed() const override { return !unflushed_; }
+    uint32_t free_clusters() const override { return static_cast<uint32_t>(free_count_); }
+    std::string key(const std::string& path) const override { return utf16_to_utf8(upcase_.up(utf8_to_utf16(path))); }
 
     std::vector<DirEntryInfo> list(const std::string& path) override;
     DirEntryInfo stat(const std::string& path) override;
@@ -291,8 +292,24 @@ private:
     static void for_each_node(Node* dir, const std::function<void(Node*)>& fn);
 
     // state
+    // Runs a mutator's changes; a failure in them leaves memory and media apart, except ENOSPC, raised before the first change.
+    template <class F>
+    void changing(F&& f)
+    {
+        try {
+            f();
+        } catch (const std::system_error& e) {
+            if (e.code() != std::errc::no_space_on_device)
+                failed_ = true;
+            throw;
+        } catch (...) {
+            failed_ = true;
+            throw;
+        }
+    }
     void ensure_writable() const;
     void ensure_open_writable() const;
+    void apply_staged();
     Output make_output(Node* n, const std::string& path, const std::vector<Run>& runs) const;
     void ensure_dirty();
     void write_boot_flags(bool dirty);
@@ -339,8 +356,8 @@ private:
     bool                         dirty_on_disk_ = false;
     bool                         needs_recover_ = false;
     uint64_t                     orphan_unfinished_ = 0;
-    bool                         unflushed_     = false;
     bool                         closed_        = false;
+    bool                         failed_        = false;
 };
 
 // ---------------------------------------------------------------- FAT
@@ -1130,12 +1147,15 @@ void VolumeImpl::ensure_writable() const
         fail(std::errc::bad_file_descriptor, "volume closed");
     if (needs_recover_)
         fail(std::errc::device_or_resource_busy, "volume is dirty: run recover() first");
+    ensure_open_writable();
 }
 
 void VolumeImpl::ensure_open_writable() const
 {
     if (opts_.read_only || closed_)
         fail(std::errc::read_only_file_system, "volume not writable");
+    if (failed_)
+        fail(std::errc::io_error, "a change failed part-way: close the volume and recover() it on the next open");
 }
 
 Output VolumeImpl::make_output(Node* n, const std::string& path, const std::vector<Run>& runs) const
@@ -1372,21 +1392,29 @@ void VolumeImpl::make_directory(const std::string& path)
 {
     ensure_writable();
     auto [parent, name] = resolve_parent(path);
-    ensure_dirty();
-    const uint32_t slot = claim_slots(parent, file_set_count(name.size()));
-    const auto runs = allocate(1);
-    const uint32_t c = runs[0].start;
-    zero_cluster(c);
-    bits_set(runs[0], true);
-    bitmap_write_dirty();
-    dev_->flush();
-    auto set = build_set(name, ATTR_DIRECTORY, FLAG_ALLOC_POSSIBLE | FLAG_NO_FAT_CHAIN, c, cluster_bytes_, cluster_bytes_,
-                         now_timestamp(), false);
-    Node* n = insert_new_set(parent, name, set, slot);
-    n->runs       = runs;
-    n->runs_known = true;
-    n->data.assign(cluster_bytes_, 0);
-    dev_->flush();
+    changing([&] {
+        ensure_dirty();
+        const uint32_t slot = claim_slots(parent, file_set_count(name.size()));
+        const auto runs = allocate(1);
+        const uint32_t c = runs[0].start;
+        zero_cluster(c);
+        bits_set(runs[0], true);
+        bitmap_write_dirty();
+        dev_->flush();
+        auto set = build_set(name, ATTR_DIRECTORY, FLAG_ALLOC_POSSIBLE | FLAG_NO_FAT_CHAIN, c, cluster_bytes_, cluster_bytes_,
+                             now_timestamp(), false);
+        Node* n = insert_new_set(parent, name, set, slot);
+        n->runs       = runs;
+        n->runs_known = true;
+        n->data.assign(cluster_bytes_, 0);
+        dev_->flush();
+    });
+}
+
+// Busy children are removals staged ahead of this change in the same commit.
+bool has_live_children(const Node* dir)
+{
+    return std::any_of(dir->children.begin(), dir->children.end(), [](const auto& c) { return !c.second->busy; });
 }
 
 void VolumeImpl::remove(const std::string& path)
@@ -1397,7 +1425,7 @@ void VolumeImpl::remove(const std::string& path)
         fail(std::errc::invalid_argument, "cannot remove the root directory");
     if (n->output != 0 || n->busy)
         fail(std::errc::device_or_resource_busy, path);
-    if (n->is_dir && !n->children.empty())
+    if (n->is_dir && has_live_children(n))
         fail(std::errc::directory_not_empty, path);
     ensure_dirty();
     n->busy = true;
@@ -1422,7 +1450,7 @@ void VolumeImpl::rename(const std::string& from, const std::string& to)
         target = it->second.get();
         if (target->is_dir != n->is_dir)
             fail(n->is_dir ? std::errc::not_a_directory : std::errc::is_a_directory, to);
-        if (!target->children.empty())
+        if (has_live_children(target))
             fail(std::errc::directory_not_empty, to);
         if (target->output != 0 || target->busy)
             fail(std::errc::device_or_resource_busy, to);
@@ -1434,49 +1462,51 @@ void VolumeImpl::rename(const std::string& from, const std::string& to)
     // A marked set supersedes one older set only, so the pending rename of a moved or replaced marked file commits first.
     if ((n->marked && !in_place) || (target && target->marked))
         commit();
-    ensure_dirty();
-    // Any other set of this file or of its name survives a crash until the commit, so the new set has to be told apart.
-    const bool marked = target || n->marked || !in_place || pending_names_.count({dir, key});
-    if (!n->marked) {
-        n->ref_dir   = dir_id(n->parent);
-        n->ref_index = n->set_index;
-    }
-    const auto set = renamed_set(n, name, marked);
-    Node* from_dir = n->parent;
-    uint32_t slot  = n->set_index;
-    if (in_place) {
-        std::copy(set.begin(), set.end(), from_dir->entry(slot));
-        for (uint32_t k = count; k < n->set_count; ++k)
-            *from_dir->entry(slot + k) &= static_cast<uint8_t>(~TYPE_IN_USE);
-        dir_write(from_dir, slot, n->set_count);
-        if (count < n->set_count)
-            from_dir->free_hint = std::min(from_dir->free_hint, slot + count);
-    } else {
-        slot = claim_slots(dir, count);
-        std::copy(set.begin(), set.end(), dir->entry(slot));
-        dir_write(dir, slot, count);
-        staged_.push_back({StagedKind::DROP_SET, from_dir, 0, 0, {}, n->set_index, n->set_count});
-        pending_names_.insert({from_dir, n->key});
-    }
-    if (target) {
-        auto it = dir->children.find(key);
-        detached_.push_back(std::move(it->second));
-        dir->children.erase(it);
-        staged_.push_back({StagedKind::DROP_TARGET, target, 0, 0, {}, 0, 0});
-        pending_names_.insert({dir, key});
-    }
-    auto it   = from_dir->children.find(n->key);
-    auto self = std::move(it->second);
-    from_dir->children.erase(it);
-    n->parent    = dir;
-    n->set_index = slot;
-    n->set_count = count;
-    n->name      = name;
-    n->key       = key;
-    n->marked    = marked;
-    dir->children.emplace(key, std::move(self));
-    if (marked)
-        marked_.insert(n);
+    changing([&] {
+        ensure_dirty();
+        // Any other set of this file or of its name survives a crash until the commit, so the new set has to be told apart.
+        const bool marked = target || n->marked || !in_place || pending_names_.count({dir, key});
+        if (!n->marked) {
+            n->ref_dir   = dir_id(n->parent);
+            n->ref_index = n->set_index;
+        }
+        const auto set = renamed_set(n, name, marked);
+        Node* from_dir = n->parent;
+        uint32_t slot  = n->set_index;
+        if (in_place) {
+            std::copy(set.begin(), set.end(), from_dir->entry(slot));
+            for (uint32_t k = count; k < n->set_count; ++k)
+                *from_dir->entry(slot + k) &= static_cast<uint8_t>(~TYPE_IN_USE);
+            dir_write(from_dir, slot, n->set_count);
+            if (count < n->set_count)
+                from_dir->free_hint = std::min(from_dir->free_hint, slot + count);
+        } else {
+            slot = claim_slots(dir, count);
+            std::copy(set.begin(), set.end(), dir->entry(slot));
+            dir_write(dir, slot, count);
+            staged_.push_back({StagedKind::DROP_SET, from_dir, 0, 0, {}, n->set_index, n->set_count});
+            pending_names_.insert({from_dir, n->key});
+        }
+        if (target) {
+            auto it = dir->children.find(key);
+            detached_.push_back(std::move(it->second));
+            dir->children.erase(it);
+            staged_.push_back({StagedKind::DROP_TARGET, target, 0, 0, {}, 0, 0});
+            pending_names_.insert({dir, key});
+        }
+        auto it   = from_dir->children.find(n->key);
+        auto self = std::move(it->second);
+        from_dir->children.erase(it);
+        n->parent    = dir;
+        n->set_index = slot;
+        n->set_count = count;
+        n->name      = name;
+        n->key       = key;
+        n->marked    = marked;
+        dir->children.emplace(key, std::move(self));
+        if (marked)
+            marked_.insert(n);
+    });
 }
 
 Output VolumeImpl::reserve(const std::string& path, uint64_t nbytes)
@@ -1486,29 +1516,31 @@ Output VolumeImpl::reserve(const std::string& path, uint64_t nbytes)
     const uint64_t n = clusters_for(nbytes);
     if (n > free_count_)
         fail(std::errc::no_space_on_device, "cannot reserve " + std::to_string(nbytes) + " B for " + path);
-    ensure_dirty();
-    const uint32_t slot = claim_slots(parent, file_set_count(name.size()));
-    auto runs = allocate(n);
-    for (const auto& r : runs)
-        bits_set(r, true);
-    bitmap_write_dirty();
-    if (runs.size() > 1) {
-        write_chain(runs);
-        fat_write_dirty();
-    }
-    uint8_t flags = FLAG_ALLOC_POSSIBLE;
-    if (runs.size() == 1)
-        flags |= FLAG_NO_FAT_CHAIN;
-    const uint64_t size = n << cluster_shift_;
-    auto set = build_set(name, ATTR_ARCHIVE, flags, runs.empty() ? 0 : runs[0].start, size, 0, now_timestamp(), true);
-    Node* node = insert_new_set(parent, name, set, slot);
-    node->runs       = runs;
-    node->runs_known = true;
-    node->output     = next_handle_++;
-    outputs_[node->output] = {node, runs, false};
-    unflushed_ = true;
-
-    return make_output(node, path, runs);
+    Output out;
+    changing([&] {
+        ensure_dirty();
+        const uint32_t slot = claim_slots(parent, file_set_count(name.size()));
+        auto runs = allocate(n);
+        for (const auto& r : runs)
+            bits_set(r, true);
+        bitmap_write_dirty();
+        if (runs.size() > 1) {
+            write_chain(runs);
+            fat_write_dirty();
+        }
+        uint8_t flags = FLAG_ALLOC_POSSIBLE;
+        if (runs.size() == 1)
+            flags |= FLAG_NO_FAT_CHAIN;
+        const uint64_t size = n << cluster_shift_;
+        auto set = build_set(name, ATTR_ARCHIVE, flags, runs.empty() ? 0 : runs[0].start, size, 0, now_timestamp(), true);
+        Node* node = insert_new_set(parent, name, set, slot);
+        node->runs       = runs;
+        node->runs_known = true;
+        node->output     = next_handle_++;
+        outputs_[node->output] = {node, runs, false};
+        out = make_output(node, path, runs);
+    });
+    return out;
 }
 
 std::vector<Extent> VolumeImpl::extend(Output& output, uint64_t nbytes)
@@ -1520,56 +1552,63 @@ std::vector<Extent> VolumeImpl::extend(Output& output, uint64_t nbytes)
         return {};
     if (n > free_count_)
         fail(std::errc::no_space_on_device, "cannot extend " + output.path);
-    Node* node = st.node;
-    std::vector<Run> added;
-    uint64_t rem = n;
-    if (!st.runs.empty()) {
-        const uint32_t last = st.runs.back().last();
-        auto adj = free_by_start_.find(last + 1);
-        if (adj != free_by_start_.end()) {
-            const auto take = static_cast<uint32_t>(std::min<uint64_t>(adj->second, rem));
-            free_take(last + 1, take);
-            added.push_back({last + 1, take});
-            rem -= take;
+    std::vector<Extent> ret;
+    changing([&] {
+        Node* node = st.node;
+        std::vector<Run> added;
+        uint64_t rem = n;
+        if (!st.runs.empty()) {
+            const uint32_t last = st.runs.back().last();
+            auto adj = free_by_start_.find(last + 1);
+            if (adj != free_by_start_.end()) {
+                const auto take = static_cast<uint32_t>(std::min<uint64_t>(adj->second, rem));
+                free_take(last + 1, take);
+                added.push_back({last + 1, take});
+                rem -= take;
+            }
         }
-    }
-    if (rem > 0) {
-        auto more = allocate(rem);
-        added.insert(added.end(), more.begin(), more.end());
-    }
-    for (const auto& r : added)
-        bits_set(r, true);
-    bitmap_write_dirty();
+        if (rem > 0) {
+            auto more = allocate(rem);
+            added.insert(added.end(), more.begin(), more.end());
+        }
+        for (const auto& r : added)
+            bits_set(r, true);
+        bitmap_write_dirty();
 
-    const bool was_empty  = st.runs.empty();
-    const bool was_no_fat = (node->flags & FLAG_NO_FAT_CHAIN) != 0;
-    std::vector<Run> merged = st.runs;
-    for (const auto& r : added)
-        append_run(merged, r);
-    if (merged.size() > 1) {
-        if (was_empty || was_no_fat) {
-            write_chain(merged);
+        const bool was_empty  = st.runs.empty();
+        const bool was_no_fat = (node->flags & FLAG_NO_FAT_CHAIN) != 0;
+        std::vector<Run> merged = st.runs;
+        for (const auto& r : added)
+            append_run(merged, r);
+        if (merged.size() > 1) {
+            if (was_empty || was_no_fat) {
+                write_chain(merged);
+            } else {
+                fat_set(st.runs.back().last(), added.front().start);
+                write_chain(added);
+            }
+            fat_write_dirty();
+            // The entry must not reach the media naming a chain the FAT does not hold yet.
+            dev_->flush();
+            node->flags &= static_cast<uint8_t>(~FLAG_NO_FAT_CHAIN);
         } else {
-            fat_set(st.runs.back().last(), added.front().start);
-            write_chain(added);
+            node->flags |= FLAG_NO_FAT_CHAIN;
         }
-        fat_write_dirty();
-        node->flags &= static_cast<uint8_t>(~FLAG_NO_FAT_CHAIN);
-    } else {
-        node->flags |= FLAG_NO_FAT_CHAIN;
-    }
-    node->first_cluster = merged.front().start;
-    node->size += n << cluster_shift_;
-    update_stream(node);
-    dir_write(node->parent, node->set_index, node->set_count);
-    st.runs    = merged;
-    node->runs = merged;
-    dev_->flush();
-    unflushed_ = false;
+        // Other writers leave it clear on an empty file, and without it the clusters belong to no one on reload.
+        node->flags |= FLAG_ALLOC_POSSIBLE;
+        node->first_cluster = merged.front().start;
+        node->size += n << cluster_shift_;
+        update_stream(node);
+        dir_write(node->parent, node->set_index, node->set_count);
+        st.runs    = merged;
+        node->runs = merged;
+        dev_->flush();
 
-    output.reserved_bytes = node->size;
-    output.extents        = runs_to_extents(merged, UINT64_MAX);
-    return runs_to_extents(added, UINT64_MAX);
+        output.reserved_bytes = node->size;
+        output.extents        = runs_to_extents(merged, UINT64_MAX);
+        ret = runs_to_extents(added, UINT64_MAX);
+    });
+    return ret;
 }
 
 void VolumeImpl::finalize(Output& output, uint64_t nbytes)
@@ -1602,7 +1641,6 @@ Output VolumeImpl::adopt(const std::string& path)
     n->output = next_handle_++;
     outputs_[n->output] = {n, runs, false};
     --orphan_unfinished_;
-    needs_recover_ = rename_debris_;
     return make_output(n, path, runs);
 }
 
@@ -1631,6 +1669,17 @@ void VolumeImpl::commit()
         maybe_clear_dirty();
         return;
     }
+    // A failure leaves some staged operations applied and some not; running them again would touch freed nodes.
+    try {
+        apply_staged();
+    } catch (...) {
+        failed_ = true;
+        throw;
+    }
+}
+
+void VolumeImpl::apply_staged()
+{
     dev_->flush();
     std::vector<Run> freed;
     for (const auto& op : staged_) {
@@ -1727,7 +1776,6 @@ void VolumeImpl::commit()
 void VolumeImpl::flush()
 {
     dev_->flush();
-    unflushed_ = false;
 }
 
 // ---------------------------------------------------------------- check and recover
@@ -1970,7 +2018,8 @@ void VolumeImpl::close()
     if (!opts_.read_only) {
         staged_.clear();
         pending_names_.clear();
-        if (outputs_.empty())
+        // After a failed commit VolumeDirty stays set, so the next open runs recover().
+        if (outputs_.empty() && !failed_)
             maybe_clear_dirty();
         dev_->flush();
     }
