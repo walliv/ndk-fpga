@@ -49,7 +49,11 @@ proc EvalFile {FNAME OPT} {
         }
     } elseif {$opt(TYPE) == "CONSTR_VIVADO"} {
         puts "Constraints file added: $FNAME"
-        read_xdc $FNAME
+        if {$FEXT == ".tcl"} {
+            read_xdc -unmanaged $FNAME
+        } else {
+            read_xdc $FNAME
+        }
     } elseif {$opt(TYPE) == "VIVADO_IP_XACT"} {
         read_ip $FNAME
         puts "IP added: $FNAME"
