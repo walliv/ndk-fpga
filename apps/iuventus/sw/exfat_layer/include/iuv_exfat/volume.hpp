@@ -144,6 +144,8 @@ void for_each_dev_range(const std::vector<Extent>& extents, uint64_t off, uint64
 void write_extents(BlockDevice& dev, const std::vector<Extent>& extents, uint64_t file_offset, std::span<const uint8_t> data);
 // Bytes past ValidDataLength read as zero.
 std::vector<uint8_t> read_file(Volume& vol, const std::string& path);
+// len bytes from offset, clipped at DataLength.
+std::vector<uint8_t> read_file_range(Volume& vol, const std::string& path, uint64_t offset, uint64_t len);
 // reserve, write, finalize, commit.
 void put_file(Volume& vol, const std::string& path, std::span<const uint8_t> data);
 
