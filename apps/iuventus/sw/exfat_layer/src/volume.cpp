@@ -921,6 +921,10 @@ DirEntryInfo VolumeImpl::describe(const Node* n) const
     d.attributes = n->attributes;
     d.size       = n->size;
     d.valid_size = n->valid_size;
+    if (!n->is_root) {
+        const uint8_t* e = n->parent->entry(n->set_index);
+        d.mtime = unix_seconds({get32(e + FILE_MODIFY_TS), e[FILE_MODIFY_10MS], e[FILE_MODIFY_UTC]});
+    }
     return d;
 }
 

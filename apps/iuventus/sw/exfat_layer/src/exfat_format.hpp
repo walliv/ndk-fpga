@@ -139,6 +139,8 @@ struct Timestamp {
 };
 // UTC with the OffsetValid bit set and offset 0.
 Timestamp now_timestamp();
+// Seconds since the Unix epoch; a stamp without OffsetValid is taken as UTC.
+int64_t unix_seconds(const Timestamp& ts);
 
 std::vector<std::string> split_path(std::string_view path);
 
