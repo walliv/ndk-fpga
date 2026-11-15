@@ -80,6 +80,8 @@ struct RecoverReport {
     uint32_t deleted_unfinished = 0;
     uint32_t entries_past_eod   = 0;
     uint32_t truncated_chains   = 0;
+    // Finished files cut back to their ValidDataLength, the size their last finalize committed.
+    uint32_t trimmed_files      = 0;
     uint64_t bits_cleared       = 0;
     uint64_t bits_set           = 0;
 };
@@ -112,6 +114,8 @@ public:
     virtual void abandon(Output& output) = 0;
     // Takes over the unfinished entry at path as a live output; continues the session on a dirty volume.
     virtual Output adopt(const std::string& path) = 0;
+    // Takes a finished file over as an output that keeps its data and can grow; finalize it, since abandon would delete it.
+    virtual Output reopen(const std::string& path) = 0;
     virtual void commit() = 0;
     virtual void flush() = 0;
     virtual RecoverReport recover() = 0;
