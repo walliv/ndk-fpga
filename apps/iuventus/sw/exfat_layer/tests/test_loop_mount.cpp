@@ -118,6 +118,35 @@ int main()
             CHECK(job.wait().ok);
             vol->commit();
             files["/job_output.bin"] = digest_fill_expected(in_data, fill, 99);
+
+            // Renamed entries: a longer name in another directory, a replaced file and a moved directory.
+            auto move = [&](const std::string& from, const std::string& to) {
+                vol->rename(from, to);
+                std::map<std::string, std::vector<uint8_t>> moved;
+                for (auto it = files.begin(); it != files.end();)
+                    if (it->first == from || it->first.rfind(from + "/", 0) == 0) {
+                        moved[to + it->first.substr(from.size())] = std::move(it->second);
+                        it = files.erase(it);
+                    } else {
+                        ++it;
+                    }
+                files.merge(moved);
+                std::set<std::string> moved_dirs;
+                for (auto it = dirs.begin(); it != dirs.end();)
+                    if (*it == from || it->rfind(from + "/", 0) == 0) {
+                        moved_dirs.insert(to + it->substr(from.size()));
+                        it = dirs.erase(it);
+                    } else {
+                        ++it;
+                    }
+                dirs.merge(moved_dirs);
+            };
+            move("/job_output.bin", dir_list.back() + "/job output renamed to a name of more than thirty characters");
+            files.erase("/gap3");
+            move("/gap1", "/gap3");
+            if (dir_list.size() > 1)
+                move(dir_list[1], "/moved directory " + random_name(rng, 8));
+            vol->commit();
             vol->close();
         }
         check_volume(image, tmp, "before mount");

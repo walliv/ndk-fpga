@@ -143,6 +143,12 @@ awk -v want=$(((fill + 32 + 511) / 512)) 'NR > 1 { n += $2 } END { exit n != wan
 echo "reserve/finalize bench flow verified"
 
 "$CLI" "$img" check
+"$CLI" "$img" mv /dir/A.bin /moved_out_of_dir_with_a_longer_name.bin
+"$CLI" "$img" get /moved_out_of_dir_with_a_longer_name.bin "$TMP/a.moved"
+cmp "$TMP/a.bin" "$TMP/a.moved"
+"$CLI" "$img" mv /empty /bench1
+"$CLI" "$img" ls / | grep -q " 0 /bench1$"
+"$CLI" "$img" info | grep -q "dirty no"
 "$CLI" "$img" rm /dir/c.bin
 "$CLI" "$img" recover
 "$CLI" "$img" info | grep -q "dirty no"

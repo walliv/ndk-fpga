@@ -73,6 +73,31 @@ void put_access(uint8_t* e, const Timestamp& ts)
     e[FILE_ACCESS_UTC] = ts.utc;
 }
 
+void put_name_entries(uint8_t* first, const std::u16string& name)
+{
+    for (uint32_t k = 0; k < name_entry_count(name.size()); ++k) {
+        uint8_t* ne = first + static_cast<size_t>(k) * ENTRY_BYTES;
+        ne[0] = TYPE_NAME;
+        for (uint32_t u = 0; u < NAME_UNITS_PER_ENTRY; ++u) {
+            const size_t idx = static_cast<size_t>(k) * NAME_UNITS_PER_ENTRY + u;
+            if (idx < name.size())
+                put16(ne + 2 + 2 * u, name[idx]);
+        }
+    }
+}
+
+// Until the commit that drops the set a rename moved a file from, the new set locates it in its reserved fields, so
+// recover() can tell the two apart.
+constexpr uint16_t RENAME_MARK = 0x4952;
+
+void put_rename_ref(uint8_t* e, bool marked, uint32_t dir, uint32_t index)
+{
+    put16(e + FILE_RESERVED1, marked ? RENAME_MARK : 0);
+    put32(e + FILE_RESERVED2, marked ? dir : 0);
+    for (uint32_t k = 0; k < 3; ++k)
+        e[FILE_RESERVED2 + 4 + k] = marked ? static_cast<uint8_t>(index >> (8 * k)) : 0;
+}
+
 // Cluster allocation described by a directory entry.
 struct Alloc {
     uint32_t first  = 0;
@@ -102,6 +127,12 @@ struct Node {
     std::unordered_map<std::u16string, std::unique_ptr<Node>> children;
     uint64_t output = 0;
     bool     busy   = false;
+    // A rename's new set until its commit; ref_dir (directory cluster) and ref_index locate the set it supersedes.
+    bool     marked    = false;
+    uint32_t ref_dir   = 0;
+    uint32_t ref_index = 0;
+    // Second set of a directory whose entries the first one holds, left by a cut-off rename.
+    bool     alias     = false;
 
     Alloc alloc() const { return {first_cluster, size, (flags & FLAG_NO_FAT_CHAIN) != 0}; }
     bool unfinished() const { return !is_dir && access_ts == 0 && valid_size == 0; }
@@ -121,6 +152,9 @@ void unpack_set(Node& n, const uint8_t* e)
     n.valid_size    = get64(s + STREAM_VALID_LEN);
     n.size          = get64(s + SEC_DATA_LENGTH);
     n.first_cluster = get32(s + SEC_FIRST_CLUSTER);
+    n.marked        = get16(e + FILE_RESERVED1) == RENAME_MARK;
+    n.ref_dir       = get32(e + FILE_RESERVED2);
+    n.ref_index     = e[FILE_RESERVED2 + 4] | e[FILE_RESERVED2 + 5] << 8 | e[FILE_RESERVED2 + 6] << 16;
     if (!(n.flags & FLAG_ALLOC_POSSIBLE)) {
         n.first_cluster = 0;
         n.size          = 0;
@@ -159,6 +193,7 @@ public:
 
     void make_directory(const std::string& path) override;
     void remove(const std::string& path) override;
+    void rename(const std::string& from, const std::string& to) override;
 
     Output reserve(const std::string& path, uint64_t nbytes) override;
     std::vector<Extent> extend(Output& output, uint64_t nbytes) override;
@@ -173,13 +208,16 @@ public:
     void close() override;
 
 private:
-    enum class StagedKind { FINALIZE, ABANDON, REMOVE };
+    // DROP_SET clears the set a rename left behind (node is its directory), DROP_TARGET deletes a file a rename replaced.
+    enum class StagedKind { FINALIZE, ABANDON, REMOVE, DROP_SET, DROP_TARGET };
     struct Staged {
         StagedKind kind;
         Node*      node;
         uint64_t   handle;
         uint64_t   nbytes;
         Timestamp  ts;
+        uint32_t   index;
+        uint32_t   count;
     };
     struct OutputState {
         Node*            node     = nullptr;
@@ -230,8 +268,15 @@ private:
     void grow_dir(Node* dir);
     void dir_write(Node* dir, uint32_t index, uint32_t count);
     uint8_t* set_ptr(Node* n) { return n->parent->entry(n->set_index); }
+    uint32_t dir_id(const Node* dir) const { return dir->is_root ? root_cluster_ : dir->first_cluster; }
     void update_stream(Node* n);
+    void clear_set(Node* dir, uint32_t index, uint32_t count);
     void delete_set(Node* n);
+    std::vector<uint8_t> renamed_set(Node* n, const std::u16string& name, bool marked);
+    void clear_mark(Node* n);
+    Node* insert_new_set(Node* dir, const std::u16string& name, std::vector<uint8_t>& set, uint32_t slot);
+    bool same_origin(Node* a, Node* b);
+    void resolve_renames(RecoverReport& rep, std::vector<uint32_t>& stale_chain);
     void collect_chain(const Node* n, std::vector<uint32_t>& out);
     Node* insert_set(Node* dir, const std::u16string& name, const std::vector<uint8_t>& set, uint32_t slot);
     std::vector<uint8_t> build_set(const std::u16string& name, uint16_t attr, uint8_t flags, uint32_t first, uint64_t size,
@@ -240,6 +285,7 @@ private:
 
     // lookup
     Node* lookup(const std::string& path);
+    std::pair<Node*, std::u16string> parent_of(const std::string& path);
     std::pair<Node*, std::u16string> resolve_parent(const std::string& path);
     DirEntryInfo describe(const Node* n) const;
     static void for_each_node(Node* dir, const std::function<void(Node*)>& fn);
@@ -281,6 +327,14 @@ private:
     std::unordered_map<uint64_t, OutputState> outputs_;
     uint64_t                     next_handle_ = 1;
     std::vector<Staged>          staged_;
+    std::vector<std::unique_ptr<Node>> detached_;
+    std::set<Node*>              marked_;
+    // Names that sets of pending renames still hold on disk, per directory.
+    std::set<std::pair<const Node*, std::u16string>> pending_names_;
+    bool                         unflushed_marks_ = false;
+    // Sets a cut-off rename left behind under a name a marked set holds.
+    std::vector<std::unique_ptr<Node>> stale_;
+    bool                         rename_debris_ = false;
     std::vector<uint8_t>         zero_cluster_buf_;
     bool                         dirty_on_disk_ = false;
     bool                         needs_recover_ = false;
@@ -638,13 +692,22 @@ void VolumeImpl::parse_set(Node* dir, uint32_t index)
     node->set_index = index;
     node->set_count = count;
     unpack_set(*node, e);
+    node->marked = node->marked && dirty_on_disk_;
     if (node->valid_size > node->size)
         corrupt("valid data length beyond data length");
     if (node->is_dir && (node->size % cluster_bytes_ != 0 || node->size == 0))
         corrupt("directory size is not a cluster multiple");
-    auto key = node->key;
-    if (!dir->children.emplace(std::move(key), std::move(node)).second)
+    auto [it, fresh] = dir->children.try_emplace(node->key);
+    if (fresh) {
+        it->second = std::move(node);
+        return;
+    }
+    // A rename cut off before its commit leaves the set it replaced beside the marked set taking over the name.
+    if (it->second->marked == node->marked)
         corrupt("duplicate name in a directory");
+    if (node->marked)
+        std::swap(it->second, node);
+    stale_.push_back(std::move(node));
 }
 
 void VolumeImpl::parse_dir(Node* dir)
@@ -689,16 +752,28 @@ void VolumeImpl::parse_dir(Node* dir)
 
 void VolumeImpl::load_tree()
 {
+    std::unordered_map<uint32_t, Node*> loaded;
     std::deque<Node*> queue {root_.get()};
     while (!queue.empty()) {
         Node* dir = queue.front();
         queue.pop_front();
+        const size_t stale_from = stale_.size();
         parse_dir(dir);
-        for (auto& [key, child] : dir->children) {
-            if (!child->is_dir)
+        std::vector<Node*> subdirs;
+        for (auto& [key, child] : dir->children)
+            if (child->is_dir)
+                subdirs.push_back(child.get());
+        for (size_t i = stale_from; i < stale_.size(); ++i)
+            if (stale_[i]->is_dir)
+                subdirs.push_back(stale_[i].get());
+        for (Node* d : subdirs) {
+            // Two sets of one directory, left by a cut-off rename, would load its entries twice.
+            if (dirty_on_disk_ && !loaded.emplace(d->first_cluster, d).second) {
+                d->alias = true;
                 continue;
-            child->data = read_runs(node_runs(child.get()), child->size);
-            queue.push_back(child.get());
+            }
+            d->data = read_runs(node_runs(d), d->size);
+            queue.push_back(d);
         }
     }
 }
@@ -816,21 +891,82 @@ void VolumeImpl::update_stream(Node* n)
     put16(e + FILE_SET_CHECKSUM, entry_set_checksum(std::span(e, static_cast<size_t>(n->set_count) * ENTRY_BYTES)));
 }
 
+void VolumeImpl::clear_set(Node* dir, uint32_t index, uint32_t count)
+{
+    for (uint32_t k = 0; k < count; ++k)
+        *dir->entry(index + k) &= static_cast<uint8_t>(~TYPE_IN_USE);
+    dir_write(dir, index, count);
+    dir->free_hint = std::min(dir->free_hint, index);
+}
+
 void VolumeImpl::delete_set(Node* n)
 {
     Node* dir = n->parent;
-    for (uint32_t k = 0; k < n->set_count; ++k)
-        *dir->entry(n->set_index + k) &= static_cast<uint8_t>(~TYPE_IN_USE);
-    dir_write(dir, n->set_index, n->set_count);
-    dir->free_hint = std::min(dir->free_hint, n->set_index);
+    clear_set(dir, n->set_index, n->set_count);
+    marked_.erase(n);
     const std::u16string key = n->key;
     dir->children.erase(key);
+}
+
+// n's set as it is on disk, under a new name; a marked set references n's current place.
+std::vector<uint8_t> VolumeImpl::renamed_set(Node* n, const std::u16string& name, bool marked)
+{
+    const uint8_t* old       = set_ptr(n);
+    const uint32_t old_names = name_entry_count(n->name.size());
+    const uint32_t extras    = n->set_count - 2 - old_names;
+    const uint32_t names     = name_entry_count(name.size());
+    if (1 + names + extras > UINT8_MAX)
+        fail(std::errc::filename_too_long, utf16_to_utf8(name));
+    std::vector<uint8_t> set(static_cast<size_t>(2 + names + extras) * ENTRY_BYTES, 0);
+    std::copy_n(old, 2 * ENTRY_BYTES, set.data());
+    std::copy_n(old + static_cast<size_t>(2 + old_names) * ENTRY_BYTES, static_cast<size_t>(extras) * ENTRY_BYTES,
+                set.data() + static_cast<size_t>(2 + names) * ENTRY_BYTES);
+    uint8_t* e = set.data();
+    uint8_t* s = e + ENTRY_BYTES;
+    e[FILE_SECONDARY_COUNT] = static_cast<uint8_t>(1 + names + extras);
+    s[STREAM_NAME_LEN]      = static_cast<uint8_t>(name.size());
+    put16(s + STREAM_NAME_HASH, name_hash(upcase_.up(name)));
+    put_name_entries(e + 2 * ENTRY_BYTES, name);
+    put_rename_ref(e, marked, n->ref_dir, n->ref_index);
+    put16(e + FILE_SET_CHECKSUM, entry_set_checksum(set));
+    return set;
+}
+
+// A new set taking a name that a pending rename's old set holds is marked, so it keeps the name after a crash.
+Node* VolumeImpl::insert_new_set(Node* dir, const std::u16string& name, std::vector<uint8_t>& set, uint32_t slot)
+{
+    const bool marked = pending_names_.count({dir, upcase_.up(name)}) != 0;
+    if (marked) {
+        put_rename_ref(set.data(), true, dir_id(dir), slot);
+        put16(set.data() + FILE_SET_CHECKSUM, entry_set_checksum(set));
+    }
+    Node* n = insert_set(dir, name, set, slot);
+    if (marked)
+        marked_.insert(n);
+    return n;
+}
+
+void VolumeImpl::clear_mark(Node* n)
+{
+    uint8_t* e = set_ptr(n);
+    put_rename_ref(e, false, 0, 0);
+    put16(e + FILE_SET_CHECKSUM, entry_set_checksum(std::span(e, static_cast<size_t>(n->set_count) * ENTRY_BYTES)));
+    dir_write(n->parent, n->set_index, n->set_count);
+    n->marked = false;
+}
+
+// The sets of one file share its attributes and creation time, which a rename keeps.
+bool VolumeImpl::same_origin(Node* a, Node* b)
+{
+    const uint8_t* x = set_ptr(a);
+    const uint8_t* y = set_ptr(b);
+    return get16(x + FILE_ATTRIBUTES) == get16(y + FILE_ATTRIBUTES) && get32(x + FILE_CREATE_TS) == get32(y + FILE_CREATE_TS) &&
+           x[FILE_CREATE_10MS] == y[FILE_CREATE_10MS] && x[FILE_CREATE_UTC] == y[FILE_CREATE_UTC];
 }
 
 std::vector<uint8_t> VolumeImpl::build_set(const std::u16string& name, uint16_t attr, uint8_t flags, uint32_t first,
                                            uint64_t size, uint64_t valid, const Timestamp& ts, bool tag_unfinished) const
 {
-    const uint32_t names = name_entry_count(name.size());
     const uint32_t count = file_set_count(name.size());
     std::vector<uint8_t> set(static_cast<size_t>(count) * ENTRY_BYTES, 0);
     uint8_t* e = set.data();
@@ -848,15 +984,7 @@ std::vector<uint8_t> VolumeImpl::build_set(const std::u16string& name, uint16_t 
     put64(s + STREAM_VALID_LEN, valid);
     put32(s + SEC_FIRST_CLUSTER, first);
     put64(s + SEC_DATA_LENGTH, size);
-    for (uint32_t k = 0; k < names; ++k) {
-        uint8_t* ne = e + static_cast<size_t>(2 + k) * ENTRY_BYTES;
-        ne[0] = TYPE_NAME;
-        for (uint32_t u = 0; u < NAME_UNITS_PER_ENTRY; ++u) {
-            const size_t idx = static_cast<size_t>(k) * NAME_UNITS_PER_ENTRY + u;
-            if (idx < name.size())
-                put16(ne + 2 + 2 * u, name[idx]);
-        }
-    }
+    put_name_entries(e + 2 * ENTRY_BYTES, name);
     put16(e + FILE_SET_CHECKSUM, entry_set_checksum(set));
     return set;
 }
@@ -895,7 +1023,7 @@ Node* VolumeImpl::lookup(const std::string& path)
     return n;
 }
 
-std::pair<Node*, std::u16string> VolumeImpl::resolve_parent(const std::string& path)
+std::pair<Node*, std::u16string> VolumeImpl::parent_of(const std::string& path)
 {
     auto parts = split_path(path);
     if (parts.empty())
@@ -913,9 +1041,15 @@ std::pair<Node*, std::u16string> VolumeImpl::resolve_parent(const std::string& p
     // A directory whose removal is staged loses its entries with it at the commit.
     if (parent->busy)
         fail(std::errc::no_such_file_or_directory, parent_path);
-    if (parent->children.count(upcase_.up(name)))
-        fail(std::errc::file_exists, path);
     return {parent, name};
+}
+
+std::pair<Node*, std::u16string> VolumeImpl::resolve_parent(const std::string& path)
+{
+    auto pn = parent_of(path);
+    if (pn.first->children.count(upcase_.up(pn.second)))
+        fail(std::errc::file_exists, path);
+    return pn;
 }
 
 DirEntryInfo VolumeImpl::describe(const Node* n) const
@@ -1033,9 +1167,14 @@ void VolumeImpl::ensure_dirty()
 
 void VolumeImpl::maybe_clear_dirty()
 {
-    if (dirty_on_disk_ && outputs_.empty() && staged_.empty() && orphan_unfinished_ == 0 && !needs_recover_ &&
-        !opts_.read_only)
-        write_boot_flags(false);
+    if (!dirty_on_disk_ || !outputs_.empty() || !staged_.empty() || !marked_.empty() || orphan_unfinished_ != 0 ||
+        needs_recover_ || opts_.read_only)
+        return;
+    // Cleared rename marks must be on the media before the volume says it is clean.
+    if (unflushed_marks_)
+        dev_->flush();
+    unflushed_marks_ = false;
+    write_boot_flags(false);
 }
 
 VolumeImpl::OutputState& VolumeImpl::output_state(const Output& out)
@@ -1218,7 +1357,13 @@ void VolumeImpl::load()
 
     load_tree();
     build_free_index();
-    for_each_node(root_.get(), [&](Node* n) { orphan_unfinished_ += n->unfinished(); });
+    rename_debris_ = !stale_.empty();
+    for_each_node(root_.get(), [&](Node* n) {
+        orphan_unfinished_ += n->unfinished();
+        rename_debris_ = rename_debris_ || n->marked || n->alias;
+    });
+    // Sets a cut-off rename superseded still own their clusters; only recover() can drop them.
+    needs_recover_ = needs_recover_ || (rename_debris_ && !opts_.read_only);
 }
 
 // ---------------------------------------------------------------- mutation
@@ -1235,9 +1380,9 @@ void VolumeImpl::make_directory(const std::string& path)
     bits_set(runs[0], true);
     bitmap_write_dirty();
     dev_->flush();
-    const auto set = build_set(name, ATTR_DIRECTORY, FLAG_ALLOC_POSSIBLE | FLAG_NO_FAT_CHAIN, c, cluster_bytes_,
-                               cluster_bytes_, now_timestamp(), false);
-    Node* n = insert_set(parent, name, set, slot);
+    auto set = build_set(name, ATTR_DIRECTORY, FLAG_ALLOC_POSSIBLE | FLAG_NO_FAT_CHAIN, c, cluster_bytes_, cluster_bytes_,
+                         now_timestamp(), false);
+    Node* n = insert_new_set(parent, name, set, slot);
     n->runs       = runs;
     n->runs_known = true;
     n->data.assign(cluster_bytes_, 0);
@@ -1256,7 +1401,82 @@ void VolumeImpl::remove(const std::string& path)
         fail(std::errc::directory_not_empty, path);
     ensure_dirty();
     n->busy = true;
-    staged_.push_back({StagedKind::REMOVE, n, 0, 0, {}});
+    staged_.push_back({StagedKind::REMOVE, n, 0, 0, {}, 0, 0});
+}
+
+void VolumeImpl::rename(const std::string& from, const std::string& to)
+{
+    ensure_writable();
+    Node* n = lookup(from);
+    if (n->is_root)
+        fail(std::errc::invalid_argument, "cannot rename the root directory");
+    if (n->busy)
+        fail(std::errc::device_or_resource_busy, from);
+    auto [dir, name] = parent_of(to);
+    for (const Node* p = dir; p; p = p->parent)
+        if (p == n)
+            fail(std::errc::invalid_argument, "cannot move a directory into itself: " + to);
+    const std::u16string key = upcase_.up(name);
+    Node* target = nullptr;
+    if (auto it = dir->children.find(key); it != dir->children.end() && it->second.get() != n) {
+        target = it->second.get();
+        if (target->is_dir != n->is_dir)
+            fail(n->is_dir ? std::errc::not_a_directory : std::errc::is_a_directory, to);
+        if (!target->children.empty())
+            fail(std::errc::directory_not_empty, to);
+        if (target->output != 0 || target->busy)
+            fail(std::errc::device_or_resource_busy, to);
+    }
+    if (dir == n->parent && name == n->name)
+        return;
+    const uint32_t count    = n->set_count - file_set_count(n->name.size()) + file_set_count(name.size());
+    const bool     in_place = dir == n->parent && count <= n->set_count;
+    // A marked set supersedes one older set only, so the pending rename of a moved or replaced marked file commits first.
+    if ((n->marked && !in_place) || (target && target->marked))
+        commit();
+    ensure_dirty();
+    // Any other set of this file or of its name survives a crash until the commit, so the new set has to be told apart.
+    const bool marked = target || n->marked || !in_place || pending_names_.count({dir, key});
+    if (!n->marked) {
+        n->ref_dir   = dir_id(n->parent);
+        n->ref_index = n->set_index;
+    }
+    const auto set = renamed_set(n, name, marked);
+    Node* from_dir = n->parent;
+    uint32_t slot  = n->set_index;
+    if (in_place) {
+        std::copy(set.begin(), set.end(), from_dir->entry(slot));
+        for (uint32_t k = count; k < n->set_count; ++k)
+            *from_dir->entry(slot + k) &= static_cast<uint8_t>(~TYPE_IN_USE);
+        dir_write(from_dir, slot, n->set_count);
+        if (count < n->set_count)
+            from_dir->free_hint = std::min(from_dir->free_hint, slot + count);
+    } else {
+        slot = claim_slots(dir, count);
+        std::copy(set.begin(), set.end(), dir->entry(slot));
+        dir_write(dir, slot, count);
+        staged_.push_back({StagedKind::DROP_SET, from_dir, 0, 0, {}, n->set_index, n->set_count});
+        pending_names_.insert({from_dir, n->key});
+    }
+    if (target) {
+        auto it = dir->children.find(key);
+        detached_.push_back(std::move(it->second));
+        dir->children.erase(it);
+        staged_.push_back({StagedKind::DROP_TARGET, target, 0, 0, {}, 0, 0});
+        pending_names_.insert({dir, key});
+    }
+    auto it   = from_dir->children.find(n->key);
+    auto self = std::move(it->second);
+    from_dir->children.erase(it);
+    n->parent    = dir;
+    n->set_index = slot;
+    n->set_count = count;
+    n->name      = name;
+    n->key       = key;
+    n->marked    = marked;
+    dir->children.emplace(key, std::move(self));
+    if (marked)
+        marked_.insert(n);
 }
 
 Output VolumeImpl::reserve(const std::string& path, uint64_t nbytes)
@@ -1280,8 +1500,8 @@ Output VolumeImpl::reserve(const std::string& path, uint64_t nbytes)
     if (runs.size() == 1)
         flags |= FLAG_NO_FAT_CHAIN;
     const uint64_t size = n << cluster_shift_;
-    const auto set = build_set(name, ATTR_ARCHIVE, flags, runs.empty() ? 0 : runs[0].start, size, 0, now_timestamp(), true);
-    Node* node = insert_set(parent, name, set, slot);
+    auto set = build_set(name, ATTR_ARCHIVE, flags, runs.empty() ? 0 : runs[0].start, size, 0, now_timestamp(), true);
+    Node* node = insert_new_set(parent, name, set, slot);
     node->runs       = runs;
     node->runs_known = true;
     node->output     = next_handle_++;
@@ -1359,7 +1579,7 @@ void VolumeImpl::finalize(Output& output, uint64_t nbytes)
     if (nbytes > st.node->size)
         fail(std::errc::invalid_argument, "finalize beyond the reservation of " + output.path);
     st.staged = true;
-    staged_.push_back({StagedKind::FINALIZE, st.node, output.handle, nbytes, now_timestamp()});
+    staged_.push_back({StagedKind::FINALIZE, st.node, output.handle, nbytes, now_timestamp(), 0, 0});
 }
 
 void VolumeImpl::abandon(Output& output)
@@ -1369,7 +1589,7 @@ void VolumeImpl::abandon(Output& output)
     if (st.reopened)
         fail(std::errc::operation_not_permitted, "a reopened file is finalized, not abandoned: " + output.path);
     st.staged = true;
-    staged_.push_back({StagedKind::ABANDON, st.node, output.handle, 0, {}});
+    staged_.push_back({StagedKind::ABANDON, st.node, output.handle, 0, {}, 0, 0});
 }
 
 Output VolumeImpl::adopt(const std::string& path)
@@ -1382,7 +1602,7 @@ Output VolumeImpl::adopt(const std::string& path)
     n->output = next_handle_++;
     outputs_[n->output] = {n, runs, false};
     --orphan_unfinished_;
-    needs_recover_ = false;
+    needs_recover_ = rename_debris_;
     return make_output(n, path, runs);
 }
 
@@ -1455,9 +1675,11 @@ void VolumeImpl::commit()
             node->runs   = kept;
             node->output = 0;
             outputs_.erase(op.handle);
+        } else if (op.kind == StagedKind::DROP_SET) {
+            clear_set(node, op.index, op.count);
         } else {
             std::vector<Run> runs = op.kind == StagedKind::ABANDON ? outputs_.at(op.handle).runs : node_runs(node);
-            if (op.kind == StagedKind::REMOVE)
+            if (op.kind != StagedKind::ABANDON)
                 for (const auto& a : node->extra_allocs) {
                     auto extra = alloc_runs(a);
                     runs.insert(runs.end(), extra.begin(), extra.end());
@@ -1470,10 +1692,16 @@ void VolumeImpl::commit()
                 outputs_.erase(op.handle);
             else if (node->unfinished())
                 --orphan_unfinished_;
-            delete_set(node);
+            if (op.kind == StagedKind::DROP_TARGET) {
+                clear_set(node->parent, node->set_index, node->set_count);
+                std::erase_if(detached_, [&](const auto& d) { return d.get() == node; });
+            } else {
+                delete_set(node);
+            }
         }
     }
     staged_.clear();
+    pending_names_.clear();
     fat_write_dirty();
     for (const auto& r : freed)
         bits_set(r, false);
@@ -1488,6 +1716,11 @@ void VolumeImpl::commit()
     if (opts_.discard)
         for (const auto& r : merged)
             dev_->discard(cluster_off(r.start), static_cast<uint64_t>(r.len) << cluster_shift_);
+    // The superseded sets are gone from the media now, so the marks have nothing left to tell apart.
+    for (Node* m : marked_)
+        clear_mark(m);
+    unflushed_marks_ = unflushed_marks_ || !marked_.empty();
+    marked_.clear();
     maybe_clear_dirty();
 }
 
@@ -1540,6 +1773,68 @@ CheckReport VolumeImpl::check()
     return rep;
 }
 
+void VolumeImpl::resolve_renames(RecoverReport& rep, std::vector<uint32_t>& stale_chain)
+{
+    std::map<std::pair<uint32_t, uint32_t>, Node*> at;
+    std::vector<Node*> marked;
+    std::vector<Node*> dirs;
+    auto note = [&](Node* n) {
+        at[{dir_id(n->parent), n->set_index}] = n;
+        if (n->marked)
+            marked.push_back(n);
+        if (n->is_dir)
+            dirs.push_back(n);
+    };
+    for_each_node(root_.get(), note);
+    std::set<Node*> victims;
+    for (auto& s : stale_) {
+        note(s.get());
+        for_each_node(s.get(), note);
+        victims.insert(s.get());
+    }
+    for (Node* m : marked) {
+        auto it = at.find({m->ref_dir, m->ref_index});
+        if (it != at.end() && it->second != m && same_origin(it->second, m))
+            victims.insert(it->second);
+    }
+    for (Node* m : marked)
+        if (!victims.count(m))
+            clear_mark(m);
+    rep.superseded_sets = static_cast<uint32_t>(victims.size());
+    for (Node* v : victims) {
+        if (!v->is_dir || v->alias)
+            continue;
+        for (Node* d : dirs) {
+            if (!d->alias || d->first_cluster != v->first_cluster || victims.count(d))
+                continue;
+            d->children = std::move(v->children);
+            for (auto& [k, c] : d->children)
+                c->parent = d;
+            d->data       = std::move(v->data);
+            d->runs       = v->runs;
+            d->runs_known = v->runs_known;
+            d->free_hint  = v->free_hint;
+            d->alias      = false;
+            break;
+        }
+    }
+    for (Node* v : victims) {
+        collect_chain(v, stale_chain);
+        clear_set(v->parent, v->set_index, v->set_count);
+    }
+    // Held until all are unlinked, since a victim's parent may be another victim.
+    std::vector<std::unique_ptr<Node>> doomed;
+    for (Node* v : victims) {
+        auto it = v->parent->children.find(v->key);
+        if (it != v->parent->children.end() && it->second.get() == v) {
+            doomed.push_back(std::move(it->second));
+            v->parent->children.erase(it);
+        }
+    }
+    stale_.clear();
+    rename_debris_ = false;
+}
+
 // Clusters of n's FAT chain, for clearing the entries no owner keeps.
 void VolumeImpl::collect_chain(const Node* n, std::vector<uint32_t>& out)
 {
@@ -1581,12 +1876,14 @@ RecoverReport VolumeImpl::recover()
         }
     }
 
+    std::vector<uint32_t> stale_chain;
+    resolve_renames(rep, stale_chain);
+
     std::vector<Node*> unfinished;
     for_each_node(root_.get(), [&](Node* n) {
         if (n->unfinished())
             unfinished.push_back(n);
     });
-    std::vector<uint32_t> stale_chain;
     for (Node* n : unfinished) {
         collect_chain(n, stale_chain);
         delete_set(n);
@@ -1672,6 +1969,7 @@ void VolumeImpl::close()
         return;
     if (!opts_.read_only) {
         staged_.clear();
+        pending_names_.clear();
         if (outputs_.empty())
             maybe_clear_dirty();
         dev_->flush();
