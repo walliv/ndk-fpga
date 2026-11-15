@@ -7,9 +7,11 @@
 #include "iuv_exfat/block_device.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -73,10 +75,11 @@ public:
     void read(uint64_t offset, std::span<uint8_t> buf) override
     {
         check_range(offset, buf.size());
-        if (!direct_) {
+        if (!direct_ || aligned(offset, buf.data(), buf.size())) {
             pread_full(buf.data(), buf.size(), offset);
             return;
         }
+        std::lock_guard lock(bounce_mu_);
         uint64_t pos = offset;
         const uint64_t end = offset + buf.size();
         while (pos < end) {
@@ -92,10 +95,11 @@ public:
     void write(uint64_t offset, std::span<const uint8_t> buf) override
     {
         check_range(offset, buf.size());
-        if (!direct_) {
+        if (!direct_ || aligned(offset, buf.data(), buf.size())) {
             pwrite_full(buf.data(), buf.size(), offset);
             return;
         }
+        std::lock_guard lock(bounce_mu_);
         uint64_t pos = offset;
         const uint64_t end = offset + buf.size();
         while (pos < end) {
@@ -140,8 +144,10 @@ public:
     }
 
 private:
-    static uint64_t align_down(uint64_t v) { return v & ~(IO_ALIGN - 1); }
-    static uint64_t align_up(uint64_t v) { return align_down(v + IO_ALIGN - 1); }
+    static bool aligned(uint64_t offset, const void* p, uint64_t len)
+    {
+        return ((offset | reinterpret_cast<uintptr_t>(p) | len) & (IO_ALIGN - 1)) == 0;
+    }
 
     void check_range(uint64_t offset, uint64_t len) const { iuv_exfat::check_range(size_, offset, len, path_); }
 
@@ -201,10 +207,11 @@ private:
 
     std::string                          path_;
     int                                  fd_     = -1;
-    bool                                 direct_ = false;
+    std::atomic<bool>                    direct_ = false;
     bool                                 is_blk_ = false;
     uint64_t                             size_   = 0;
     std::unique_ptr<uint8_t, FreeDeleter> buf_;
+    std::mutex                           bounce_mu_;
 };
 
 } // namespace
