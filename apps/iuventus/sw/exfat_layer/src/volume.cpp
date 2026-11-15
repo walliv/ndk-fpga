@@ -910,6 +910,9 @@ std::pair<Node*, std::u16string> VolumeImpl::resolve_parent(const std::string& p
     Node* parent = lookup(parent_path);
     if (!parent->is_dir)
         fail(std::errc::not_a_directory, parent_path);
+    // A directory whose removal is staged loses its entries with it at the commit.
+    if (parent->busy)
+        fail(std::errc::no_such_file_or_directory, parent_path);
     if (parent->children.count(upcase_.up(name)))
         fail(std::errc::file_exists, path);
     return {parent, name};
