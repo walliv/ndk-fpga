@@ -12,12 +12,11 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
-#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
-#include "iuv_exfat/file_shell_model.hpp"
+#include "iuv_exfat/digest_fill_run.hpp"
 #include "iuv_exfat/job.hpp"
 #include "iuv_exfat/util.hpp"
 #include "iuv_exfat/volume.hpp"
@@ -102,102 +101,20 @@ int cmd_get(Volume& vol, const std::string& path, const std::string& host)
     return out ? 0 : 1;
 }
 
-int cmd_run(Volume& vol, std::vector<std::string> args)
+int cmd_run(Volume& vol, const std::vector<std::string>& args)
 {
-    uint64_t fill = 1 << 20, reserve = 0, extend = 64ull << 20, model_seed = 1;
-    uint32_t seed = 0x5EED;
-    std::string card, compatible = FILE_SHELL_COMPATIBLE;
-    std::vector<std::vector<std::string>> streams(1);
-    for (size_t i = 0; i < args.size(); ++i) {
-        const auto& a = args[i];
-        auto next = [&]() -> std::string {
-            if (i + 1 >= args.size())
-                throw std::invalid_argument(a + " needs a value");
-            return args[++i];
-        };
-        if (a == "--fill-bytes")
-            fill = parse_u64(next());
-        else if (a == "--seed")
-            seed = static_cast<uint32_t>(parse_u64(next(), UINT32_MAX));
-        else if (a == "--reserve")
-            reserve = parse_u64(next());
-        else if (a == "--extend")
-            extend = parse_u64(next());
-        else if (a == "--model-seed")
-            model_seed = parse_u64(next());
-        else if (a == "--card")
-            card = next();
-        else if (a == "--compatible")
-            compatible = next();
-        else if (a == "--")
-            streams.emplace_back();
-        else
-            streams.back().push_back(a);
-    }
-    for (const auto& s : streams)
-        if (s.size() < 2)
-            throw std::invalid_argument("each stream needs <out> and at least one <in>");
-    if (reserve == 0)
-        reserve = fill + 32;
-
-    std::unique_ptr<MiBus> bus;
-    if (!card.empty())
-        bus = open_nfb_mi_bus(card, compatible);
-    std::vector<Output> outs;
-    outs.reserve(streams.size());
-    auto abandon_all = [&] {
-        for (auto& o : outs)
-            vol.abandon(o);
-        vol.commit();
-    };
-    std::optional<Job> job;
-    try {
-        for (const auto& s : streams)
-            outs.push_back(vol.reserve(s[0], reserve));
-        vol.flush();
-        if (!bus) {
-            FileShellModelOptions mo;
-            mo.seed = model_seed;
-            bus = make_file_shell_model(vol.device(), mo);
-        }
-        JobOptions jo;
-        jo.extend_bytes = extend;
-        if (!card.empty())
-            jo.poll_interval = std::chrono::microseconds(50);
-        job.emplace(*bus, vol, jo);
-        for (size_t s = 0; s < streams.size(); ++s)
-            job->add_stream(std::vector<std::string>(streams[s].begin() + 1, streams[s].end()), outs[s],
-                            digest_fill_args(fill, seed));
-        job->submit();
-    } catch (...) {
-        // START was never written, so the shell cannot write into the outputs and they can go at once.
-        abandon_all();
-        throw;
-    }
-    // A failing wait() leaves the outputs reserved: the shell may still write into them, so recover() releases them.
-    const auto res = job->wait();
+    const auto run = parse_digest_fill_run(args);
+    // Opened ahead of the reservations, which a card that fails to open would otherwise leave behind.
+    std::unique_ptr<MiBus> card;
+    if (!run.card.empty())
+        card = open_nfb_mi_bus(run.card, run.compatible);
+    auto outs = reserve_digest_fill_outputs(vol, run);
+    const auto res = run_digest_fill(vol, run, outs, card.get(), &vol.device());
     vol.commit();
-    for (size_t s = 0; s < res.streams.size(); ++s) {
-        const auto& r = res.streams[s];
-        std::printf("stream %zu: in_files %" PRIu64 " in_bytes %" PRIu64 " out_bytes %" PRIu64 " extensions %u%s%s\n", s,
-                    r.in_files, r.in_bytes, r.out_bytes, r.extensions, r.failed ? " FAILED: " : "", r.err_text.c_str());
-    }
+    std::fputs(digest_fill_report(vol, run, res).c_str(), stdout);
     if (!res.ok) {
         std::fprintf(stderr, "job failed: %s\n", res.error.c_str());
         return 1;
-    }
-    for (size_t s = 0; s < streams.size(); ++s) {
-        const auto data = read_file(vol, streams[s][0]);
-        if (data.size() < 32)
-            throw std::runtime_error("output shorter than the record");
-        const uint8_t* rec = data.data() + data.size() - 32;
-        uint64_t f[3];
-        std::memcpy(f, rec, 24);
-        uint32_t cnt, magic;
-        std::memcpy(&cnt, rec + 24, 4);
-        std::memcpy(&magic, rec + 28, 4);
-        std::printf("stream %zu record: in_bytes %" PRIu64 " sum 0x%016" PRIx64 " xor 0x%016" PRIx64 " files %u magic 0x%08x\n",
-                    s, f[0], f[1], f[2], cnt, magic);
     }
     return 0;
 }

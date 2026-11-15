@@ -22,6 +22,7 @@ set(IUV_WARNINGS -Wall -Wextra -Werror)
 
 add_library(iuv_exfat STATIC
     src/block_device.cpp
+    src/digest_fill_run.cpp
     src/exfat_format.cpp
     src/file_io.cpp
     src/file_shell_model.cpp
