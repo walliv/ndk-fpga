@@ -44,7 +44,8 @@ public:
     virtual void discard(uint64_t offset, uint64_t len) = 0;
 };
 
-// O_DIRECT with 4 KiB aligned bounce buffers; buffered I/O only where O_DIRECT is refused.
+// O_DIRECT, through a bounce buffer unless offset, length and buffer are 4 KiB aligned; buffered I/O only where
+// O_DIRECT is refused. Safe to share between threads.
 std::unique_ptr<BlockDevice> open_block_device(const std::string& path, bool read_only = false);
 
 } // namespace iuv_exfat
