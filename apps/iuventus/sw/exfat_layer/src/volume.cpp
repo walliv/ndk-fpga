@@ -1476,10 +1476,14 @@ void VolumeImpl::commit()
         bits_set(r, false);
     bitmap_write_dirty();
     dev_->flush();
+    std::sort(freed.begin(), freed.end(), [](const Run& a, const Run& b) { return a.start < b.start; });
+    std::vector<Run> merged;
     for (const auto& r : freed) {
-        dev_->discard(cluster_off(r.start), static_cast<uint64_t>(r.len) << cluster_shift_);
+        append_run(merged, r);
         free_insert(r);
     }
+    for (const auto& r : merged)
+        dev_->discard(cluster_off(r.start), static_cast<uint64_t>(r.len) << cluster_shift_);
     maybe_clear_dirty();
 }
 
