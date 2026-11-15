@@ -29,6 +29,8 @@ struct VolumeOptions {
     bool     read_only   = false;
     // The caller asserts a dirty volume is its own uncrashed session continued in this process, so no recover() is needed.
     bool     continue_session = false;
+    // Discard the clusters a commit frees; commit() then waits until the drives have trimmed them.
+    bool     discard          = true;
 };
 
 struct FileExtents {

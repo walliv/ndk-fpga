@@ -1482,8 +1482,9 @@ void VolumeImpl::commit()
         append_run(merged, r);
         free_insert(r);
     }
-    for (const auto& r : merged)
-        dev_->discard(cluster_off(r.start), static_cast<uint64_t>(r.len) << cluster_shift_);
+    if (opts_.discard)
+        for (const auto& r : merged)
+            dev_->discard(cluster_off(r.start), static_cast<uint64_t>(r.len) << cluster_shift_);
     maybe_clear_dirty();
 }
 
