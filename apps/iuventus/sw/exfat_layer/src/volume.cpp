@@ -165,6 +165,7 @@ public:
     void finalize(Output& output, uint64_t nbytes) override;
     void abandon(Output& output) override;
     Output adopt(const std::string& path) override;
+    Output reopen(const std::string& path) override;
     void commit() override;
     void flush() override;
     RecoverReport recover() override;
@@ -181,9 +182,10 @@ private:
         Timestamp  ts;
     };
     struct OutputState {
-        Node*            node   = nullptr;
+        Node*            node     = nullptr;
         std::vector<Run> runs;
-        bool             staged = false;
+        bool             staged   = false;
+        bool             reopened = false;
     };
 
     // geometry
@@ -1360,6 +1362,8 @@ void VolumeImpl::abandon(Output& output)
 {
     ensure_writable();
     auto& st = output_state(output);
+    if (st.reopened)
+        fail(std::errc::operation_not_permitted, "a reopened file is finalized, not abandoned: " + output.path);
     st.staged = true;
     staged_.push_back({StagedKind::ABANDON, st.node, output.handle, 0, {}});
 }
@@ -1375,6 +1379,24 @@ Output VolumeImpl::adopt(const std::string& path)
     outputs_[n->output] = {n, runs, false};
     --orphan_unfinished_;
     needs_recover_ = false;
+    return make_output(n, path, runs);
+}
+
+Output VolumeImpl::reopen(const std::string& path)
+{
+    ensure_writable();
+    Node* n = lookup(path);
+    if (n->is_dir)
+        fail(std::errc::is_a_directory, path);
+    if (n->unfinished() || n->output != 0 || n->busy)
+        fail(std::errc::device_or_resource_busy, path);
+    // An extension raises DataLength above ValidDataLength on disk, which only recover() undoes after a crash.
+    ensure_dirty();
+    const auto runs = node_runs(n);
+    // The reservation is the whole last cluster; DataLength reaches the disk only through extend or finalize.
+    n->size   = clusters_for(n->size) << cluster_shift_;
+    n->output = next_handle_++;
+    outputs_[n->output] = {n, runs, false, true};
     return make_output(n, path, runs);
 }
 
@@ -1556,6 +1578,28 @@ RecoverReport VolumeImpl::recover()
         ++rep.deleted_unfinished;
     }
     orphan_unfinished_ = 0;
+
+    // finalize() always leaves DataLength equal to ValidDataLength; a larger one is a reopened file cut off before it.
+    for_each_node(root_.get(), [&](Node* n) {
+        if (n->is_dir || n->unfinished() || n->valid_size >= n->size)
+            return;
+        if (n->valid_size == 0 && !(n->flags & FLAG_NO_FAT_CHAIN) && valid_cluster(n->first_cluster)) {
+            uint32_t c = n->first_cluster;
+            for (uint64_t i = 0; i < clusters_for(n->size) && valid_cluster(c); ++i) {
+                stale_chain.push_back(c);
+                c = fat_get(c);
+            }
+        }
+        n->size       = n->valid_size;
+        n->runs_known = false;
+        if (n->size == 0) {
+            n->first_cluster = 0;
+            n->flags         = FLAG_ALLOC_POSSIBLE;
+        }
+        update_stream(n);
+        dir_write(n->parent, n->set_index, n->set_count);
+        ++rep.trimmed_files;
+    });
 
     std::vector<uint32_t> tails;
     auto normalize = [&](const Alloc& a, std::vector<Run>& runs_out) {

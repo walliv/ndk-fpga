@@ -206,8 +206,9 @@ int main(int argc, char** argv)
             rc = r.clean() ? 0 : 1;
         } else if (cmd == "recover") {
             const auto r = vol->recover();
-            std::printf("deleted unfinished %u, truncated chains %u, bits cleared %" PRIu64 ", bits set %" PRIu64 "\n",
-                        r.deleted_unfinished, r.truncated_chains, r.bits_cleared, r.bits_set);
+            std::printf("deleted unfinished %u, truncated chains %u, trimmed files %u, bits cleared %" PRIu64
+                        ", bits set %" PRIu64 "\n",
+                        r.deleted_unfinished, r.truncated_chains, r.trimmed_files, r.bits_cleared, r.bits_set);
         } else if (cmd == "run") {
             rc = cmd_run(*vol, rest);
         } else {

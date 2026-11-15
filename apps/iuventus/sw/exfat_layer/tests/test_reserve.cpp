@@ -264,5 +264,59 @@ int main()
         }
         check_volume(image3, tmp, "session across processes");
         verify(image3, files3);
+
+        // Reopened finished files: grow, shrink, no abandon, and a session cut off mid-growth that recover() trims back.
+        const std::string image4 = tmp.file("reopen.img");
+        make_image(image4, 64 * MIB);
+        Files files4;
+        {
+            auto v = open_volume(image4);
+            for (const auto& [path, len] : {std::pair<std::string, uint64_t> {"/grow", 100}, {"/shrink", 3 * CLUSTER + 7},
+                                            {"/cut", CLUSTER / 2 + 3}, {"/cut_empty", 0}}) {
+                files4[path] = random_bytes(rng, len);
+                put_file(*v, path, files4[path]);
+            }
+            Output g = v->reopen("/grow");
+            CHECK_EQ(g.reserved_bytes, CLUSTER);
+            CHECK(throws_errc(std::errc::operation_not_permitted, [&] { v->abandon(g); }));
+            CHECK(throws_errc(std::errc::device_or_resource_busy, [&] { v->reopen("/grow"); }));
+            v->extend(g, 2 * CLUSTER);
+            auto grown = files4["/grow"];
+            const auto more = random_bytes(rng, 2 * CLUSTER + 11);
+            grown.insert(grown.end(), more.begin(), more.end());
+            write_all(*v, g, grown);
+            v->finalize(g, grown.size());
+            files4["/grow"] = grown;
+            Output sh = v->reopen("/shrink");
+            v->finalize(sh, 10);
+            files4["/shrink"].resize(10);
+            v->commit();
+            CHECK(!v->dirty());
+            v->close();
+        }
+        check_volume(image4, tmp, "reopen grow and shrink");
+        verify(image4, files4);
+        {
+            auto v = open_volume(image4);
+            for (const std::string path : {"/cut", "/cut_empty"}) {
+                Output c = v->reopen(path);
+                v->extend(c, 3 * CLUSTER);
+                const auto written = random_bytes(rng, c.reserved_bytes);
+                write_all(*v, c, written);
+                // In-place writes are not undone; only the size returns to the last commit.
+                files4[path].assign(written.begin(), written.begin() + static_cast<ptrdiff_t>(files4[path].size()));
+            }
+            v->close();
+        }
+        {
+            auto v = open_volume(image4);
+            CHECK(v->dirty());
+            const auto rep = v->recover();
+            CHECK_EQ(rep.trimmed_files, 2u);
+            CHECK(!v->dirty());
+            v->close();
+        }
+        check_volume(image4, tmp, "reopen cut off");
+        verify(image4, files4);
     });
 }
