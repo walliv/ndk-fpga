@@ -232,6 +232,7 @@ private:
     uint8_t* set_ptr(Node* n) { return n->parent->entry(n->set_index); }
     void update_stream(Node* n);
     void delete_set(Node* n);
+    void collect_chain(const Node* n, std::vector<uint32_t>& out);
     Node* insert_set(Node* dir, const std::u16string& name, const std::vector<uint8_t>& set, uint32_t slot);
     std::vector<uint8_t> build_set(const std::u16string& name, uint16_t attr, uint8_t flags, uint32_t first, uint64_t size,
                                    uint64_t valid, const Timestamp& ts, bool tag_unfinished) const;
@@ -1531,6 +1532,18 @@ CheckReport VolumeImpl::check()
     return rep;
 }
 
+// Clusters of n's FAT chain, for clearing the entries no owner keeps.
+void VolumeImpl::collect_chain(const Node* n, std::vector<uint32_t>& out)
+{
+    if ((n->flags & FLAG_NO_FAT_CHAIN) || !valid_cluster(n->first_cluster))
+        return;
+    uint32_t c = n->first_cluster;
+    for (uint64_t i = 0; i < clusters_for(n->size) && valid_cluster(c); ++i) {
+        out.push_back(c);
+        c = fat_get(c);
+    }
+}
+
 RecoverReport VolumeImpl::recover()
 {
     ensure_open_writable();
@@ -1567,13 +1580,7 @@ RecoverReport VolumeImpl::recover()
     });
     std::vector<uint32_t> stale_chain;
     for (Node* n : unfinished) {
-        if (!(n->flags & FLAG_NO_FAT_CHAIN) && valid_cluster(n->first_cluster)) {
-            uint32_t c = n->first_cluster;
-            for (uint64_t i = 0; i < clusters_for(n->size) && valid_cluster(c); ++i) {
-                stale_chain.push_back(c);
-                c = fat_get(c);
-            }
-        }
+        collect_chain(n, stale_chain);
         delete_set(n);
         ++rep.deleted_unfinished;
     }
@@ -1583,13 +1590,8 @@ RecoverReport VolumeImpl::recover()
     for_each_node(root_.get(), [&](Node* n) {
         if (n->is_dir || n->unfinished() || n->valid_size >= n->size)
             return;
-        if (n->valid_size == 0 && !(n->flags & FLAG_NO_FAT_CHAIN) && valid_cluster(n->first_cluster)) {
-            uint32_t c = n->first_cluster;
-            for (uint64_t i = 0; i < clusters_for(n->size) && valid_cluster(c); ++i) {
-                stale_chain.push_back(c);
-                c = fat_get(c);
-            }
-        }
+        if (n->valid_size == 0)
+            collect_chain(n, stale_chain);
         n->size       = n->valid_size;
         n->runs_known = false;
         if (n->size == 0) {
