@@ -30,6 +30,7 @@ add_library(iuv_exfat STATIC
     src/nfb_mi_bus.cpp
     src/util.cpp
     src/volume.cpp
+    src/write_back_device.cpp
 )
 target_include_directories(iuv_exfat PUBLIC include PRIVATE src)
 target_compile_options(iuv_exfat PRIVATE ${IUV_WARNINGS})
@@ -82,6 +83,10 @@ if(BUILD_TESTING)
         target_compile_options(${t} PRIVATE ${IUV_WARNINGS})
         add_test(NAME ${t} COMMAND ${t})
         set_tests_properties(${t} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1200)
+    endforeach()
+    foreach(t IN ITEMS test_open_put test_reserve test_job)
+        add_test(NAME ${t}_write_back COMMAND ${t})
+        set_tests_properties(${t}_write_back PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1200 ENVIRONMENT IUV_TEST_WRITE_BACK=1)
     endforeach()
 
     add_test(NAME cli_smoke COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_smoke.sh $<TARGET_FILE:iuv-exfat>

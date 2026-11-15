@@ -239,7 +239,10 @@ std::unique_ptr<iuv_exfat::Volume> open_volume(const std::string& image, bool re
 {
     iuv_exfat::VolumeOptions o;
     o.read_only = read_only;
-    return iuv_exfat::Volume::open(iuv_exfat::open_block_device(image, read_only), o);
+    auto dev = iuv_exfat::open_block_device(image, read_only);
+    if (env_u64("IUV_TEST_WRITE_BACK").value_or(0))
+        dev = iuv_exfat::make_write_back_device(std::move(dev));
+    return iuv_exfat::Volume::open(std::move(dev), o);
 }
 
 std::vector<uint8_t> digest_fill_expected(const std::vector<std::vector<uint8_t>>& inputs, uint64_t fill, uint32_t seed)

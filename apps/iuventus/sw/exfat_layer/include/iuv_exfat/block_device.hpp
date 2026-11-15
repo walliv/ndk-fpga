@@ -48,4 +48,8 @@ public:
 // O_DIRECT is refused. Safe to share between threads.
 std::unique_ptr<BlockDevice> open_block_device(const std::string& path, bool read_only = false);
 
+// Keeps writes in memory until flush() or discard(); reads see them. Fits a volume's metadata, whose crash safety rests
+// on its flush points alone, and never file data written through another device.
+std::unique_ptr<BlockDevice> make_write_back_device(std::unique_ptr<BlockDevice> inner);
+
 } // namespace iuv_exfat
