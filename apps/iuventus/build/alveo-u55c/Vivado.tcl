@@ -109,6 +109,7 @@ lappend HIERARCHY(MOD) "$CARD_BASE/src/card_top.vhd"
 # --------- Add constraints to the design ---------------------------------------
 lappend SYNTH_FLAGS(CONSTR) "$CARD_BASE/src/general.xdc"
 lappend SYNTH_FLAGS(CONSTR) "$CARD_BASE/src/pblock.xdc"
+lappend SYNTH_FLAGS(CONSTR) [list "$CARD_BASE/src/hbm_pblock.tcl" USED_IN implementation]
 # ILA left out: its capture paths fail timing, and its counters are readable over MI.
 # lappend SYNTH_FLAGS(CONSTR) "$CARD_BASE/src/ilas.xdc"
 
