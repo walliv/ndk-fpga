@@ -135,6 +135,11 @@ struct Job::Impl {
     bool                submitted = false;
     bool                finished  = false;
 
+    std::unique_lock<std::mutex> lock_volume()
+    {
+        return opts.volume_mutex ? std::unique_lock(*opts.volume_mutex) : std::unique_lock<std::mutex>();
+    }
+
     uint64_t read64(uint64_t reg)
     {
         const uint64_t lo = bus.read32(reg);
@@ -201,6 +206,7 @@ struct Job::Impl {
             throw std::runtime_error(why + "; the shell stays BUSY, outputs left reserved for recover()");
         JobResult r;
         r.error = why;
+        const auto lock = lock_volume();
         for (auto& st : streams) {
             vol.abandon(*st.output);
             r.streams.push_back(st.res);
@@ -238,6 +244,7 @@ void Job::submit()
         throw std::logic_error("job already submitted");
     if (im.streams.empty())
         throw std::invalid_argument("job without streams");
+    auto lock = im.lock_volume();
     if (!im.vol.reservations_flushed())
         fail(std::errc::operation_not_permitted, "output reservations are not flushed: call Volume::flush() before submit()");
     if (const uint32_t v = im.bus.read32(REG_VERSION); v != LAYOUT_VERSION)
@@ -264,6 +271,8 @@ void Job::submit()
         st.in_entries.back()[3] |= ENTRY_LAST;
         st.out_pending.assign(st.output->extents.begin(), st.output->extents.end());
     }
+    const auto vo = im.vol.options();
+    lock = {};
 
     // CLEAR of a job left running drains it first; until then the shell ignores MASK, STRIPE and START.
     im.bus.write32(REG_CTRL, CTRL_CLEAR);
@@ -277,7 +286,6 @@ void Job::submit()
             im.bus.write32(ARGS_BASE + s * ARGS_STRIDE + 4 * w, im.streams[s].args[w]);
         mask |= 1u << s;
     }
-    const auto vo = im.vol.options();
     const uint32_t log2_drives = static_cast<uint32_t>(std::countr_zero(vo.drives));
     const uint32_t log2_chunk  = static_cast<uint32_t>(std::countr_zero(vo.chunk_bytes / LBA_BYTES));
     im.bus.write32(REG_STRIPE, log2_drives | (log2_chunk << 8));
@@ -330,6 +338,7 @@ JobResult Job::wait()
                 st.res.out_bytes = im.read64(sreg(s, S_OUT_BYTES));
                 st.res.in_bytes  = im.read64(sreg(s, S_IN_BYTES));
             }
+            const auto lock = im.lock_volume();
             for (auto& st : im.streams) {
                 if (st.res.out_bytes > st.output->reserved_bytes) {
                     for (auto& other : im.streams)
@@ -358,7 +367,9 @@ JobResult Job::wait()
                 (im.bus.read32(sreg(s, S_STATUS)) & SS_NEED_SPACE) &&
                 im.bus.read32(sreg(s, S_OUT_HEAD)) == static_cast<uint32_t>(st.out_tail)) {
                 try {
+                    auto lock = im.lock_volume();
                     const auto added = im.vol.extend(*st.output, im.opts.extend_bytes);
+                    lock = {};
                     st.out_pending.insert(st.out_pending.end(), added.begin(), added.end());
                     ++st.res.extensions;
                 } catch (const std::system_error& e) {
