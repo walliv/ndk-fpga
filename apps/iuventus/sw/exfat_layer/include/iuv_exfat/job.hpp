@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -32,6 +33,8 @@ struct JobOptions {
     std::chrono::microseconds poll_interval {0};
     // Longest stretch without IN_BYTES or OUT_BYTES moving before the job is aborted.
     std::chrono::milliseconds timeout       {60000};
+    // Held around every Volume call of the job, so other threads may use the volume between the polls.
+    std::mutex*               volume_mutex  = nullptr;
 };
 
 struct StreamResult {
