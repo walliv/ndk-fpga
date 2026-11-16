@@ -45,6 +45,10 @@ public:
 
     uint32_t read32(uint64_t offset) override { return nfb_comp_read32(comp_, static_cast<off_t>(offset)); }
     void write32(uint64_t offset, uint32_t value) override { nfb_comp_write32(comp_, static_cast<off_t>(offset), value); }
+    void write(uint64_t offset, const uint32_t* words, size_t count) override
+    {
+        nfb_comp_write(comp_, words, 4 * count, static_cast<off_t>(offset));
+    }
 
 private:
     struct nfb_device* dev_  = nullptr;

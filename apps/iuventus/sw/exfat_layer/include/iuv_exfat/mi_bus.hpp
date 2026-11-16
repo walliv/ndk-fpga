@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -19,6 +20,13 @@ public:
 
     virtual uint32_t read32(uint64_t offset) = 0;
     virtual void write32(uint64_t offset, uint32_t value) = 0;
+
+    // Consecutive words from offset; a PCIe bus overrides it because each uncached store costs the same whatever its width.
+    virtual void write(uint64_t offset, const uint32_t* words, size_t count)
+    {
+        for (size_t i = 0; i < count; ++i)
+            write32(offset + 4 * i, words[i]);
+    }
 };
 
 constexpr const char* FILE_SHELL_COMPATIBLE = "ziti,iuventus_file_shell";

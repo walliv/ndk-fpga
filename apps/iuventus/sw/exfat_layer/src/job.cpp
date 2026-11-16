@@ -6,6 +6,7 @@
 
 #include "iuv_exfat/job.hpp"
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <deque>
@@ -144,7 +145,7 @@ struct Job::Impl {
         return lo | (static_cast<uint64_t>(bus.read32(reg + 4)) << 32);
     }
 
-    // Fills the free slots of one ring from take(), then publishes the new tail.
+    // Fills the free slots of one ring from take(), one bulk write per run up to the ring's end, then publishes the new tail.
     template <class Pending, class Take>
     void push_ring(uint32_t s, uint64_t ring_base, uint64_t ring_stride, uint64_t head_reg, uint64_t tail_reg, uint64_t cap,
                    uint64_t& tail, Pending pending, Take take)
@@ -155,12 +156,17 @@ struct Job::Impl {
         const uint64_t used = (tail - head) & 0xFFFFFFFFu;
         uint64_t free = used < cap ? cap - used : 0;
         const uint64_t before = tail;
-        while (free-- > 0 && pending()) {
-            const RingEntry ent  = take();
-            const uint64_t  slot = tail % cap;
-            for (int w = 0; w < 4; ++w)
-                bus.write32(ring_base + s * ring_stride + slot * ENTRY_BYTES + 4 * w, ent[w]);
-            ++tail;
+        std::vector<uint32_t> run;
+        while (free > 0 && pending()) {
+            const uint64_t slot = tail % cap;
+            const uint64_t room = std::min(free, cap - slot);
+            run.clear();
+            for (uint64_t i = 0; i < room && pending(); ++i, ++tail) {
+                const RingEntry ent = take();
+                run.insert(run.end(), ent.begin(), ent.end());
+            }
+            free -= run.size() / 4;
+            bus.write(ring_base + s * ring_stride + slot * ENTRY_BYTES, run.data(), run.size());
         }
         if (tail != before)
             bus.write32(sreg(s, tail_reg), static_cast<uint32_t>(tail));
