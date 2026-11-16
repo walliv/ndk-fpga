@@ -6,7 +6,7 @@ resources/
 # cocotb and nvc build artifacts, generated in-tree next to each testbench
 nvcwork/
 __pycache__/
-results.xml
+results*.xml
 *.vivado.mk
 *.netcope_tmp/
 # The component benches write theirs to a bare netcope_tmp/, which the pattern above misses.
