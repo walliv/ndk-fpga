@@ -32,6 +32,53 @@ source $OFM_PATH/build/scripts/vivado/msg_filter/tcl_msg_filters.tcl
 #                     Procedures and functions
 # ---------------------------------------------------------------------
 
+# -----------------------------------------------------------------------------
+# Procedure ip_dir_prepare / ip_dir_finish / ip_dir_record
+# create_ip -dir needs its keyed directory to exist and renames a taken output folder to <name>_N, but not every IP
+# script passes -dir. The directory is emptied and made before the script runs, then removed if empty or else recorded
+# for "make clean".
+#
+proc ip_dir_prepare {dir} {
+    if {[string match ipcfg_* [file tail $dir]]} {
+        file delete -force $dir
+    }
+    file mkdir $dir
+}
+
+proc ip_dir_finish {dir} {
+    if {![llength [glob -nocomplain -directory $dir *]]} {
+        file delete $dir
+    }
+}
+
+proc ip_dir_record {dir list_file} {
+    set dir [file normalize $dir]
+    if {[file exists $list_file]} {
+        set fh [open $list_file r]
+        set known [split [read $fh] "\n"]
+        close $fh
+        if {$dir in $known} {
+            return
+        }
+    }
+    set fh [open $list_file a]
+    puts $fh $dir
+    close $fh
+}
+
+# -----------------------------------------------------------------------------
+# Procedure ip_dir_keyed
+# The keyed output directory of the IP script that a source entry runs, or an empty string if the entry has none.
+#
+proc ip_dir_keyed {OPT} {
+    array set opt $OPT
+    if {[info exists opt(IP_DIR_KEYED)] && $opt(IP_DIR_KEYED)} {
+        return $opt(IP_BUILD_DIR)
+    }
+    return ""
+}
+
+# -----------------------------------------------------------------------------
 # Procedure ParseDirective
 # If the directive passed from the user already contains '-directive' switch
 # then parse it as it is. However, when the directive only contains the name
@@ -124,7 +171,17 @@ proc EvalFile {FNAME OPT} {
             if {[info exists opt(VARS)]} {
                 set vars $opt(VARS)
             }
+            set keyed_ip_dir [ip_dir_keyed $OPT]
+            if {$keyed_ip_dir ne ""} {
+                ip_dir_prepare $keyed_ip_dir
+            }
             source_with_vars $FNAME $vars
+            if {$keyed_ip_dir ne ""} {
+                ip_dir_finish $keyed_ip_dir
+                if {[file isdirectory $keyed_ip_dir]} {
+                    ip_dir_record $keyed_ip_dir ipcfg_dirs.txt
+                }
+            }
         }
     }
 
