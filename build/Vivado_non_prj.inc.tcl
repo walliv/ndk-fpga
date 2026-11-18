@@ -217,13 +217,13 @@ proc SynthesizeDesignSetup {synth_flags} {
     # Set resource sharing
     if {[info exist SYNTH_FLAGS(RESOURCE_SHARING)] } {
         puts "Resource sharing set to: $SYNTH_FLAGS(RESOURCE_SHARING)"
-        lappend MOREOPT "-resource_sharing" $SYNTH_DESIGN(RESOURCE_SHARING)
+        lappend MOREOPT "-resource_sharing" $SYNTH_FLAGS(RESOURCE_SHARING)
     }
 
     # Set the number of BUFGs
     if {[info exist SYNTH_FLAGS(BUFG)] } {
         puts "The number of BUFGs set to: $SYNTH_FLAGS(BUFG)"
-        lappend MOREOPT "-bufg" $SYNTH_DESIGN(BUFG)
+        lappend MOREOPT "-bufg" $SYNTH_FLAGS(BUFG)
 
     }
 
@@ -236,7 +236,9 @@ proc SynthesizeDesignSetup {synth_flags} {
     # Set LUT combining
     if {[info exist SYNTH_FLAGS(NO_LUT_COMBINE)] } {
         puts "LUT combining disabled: $SYNTH_FLAGS(NO_LUT_COMBINE)"
-        lappend MOREOPT "-no_lc"
+        if {$SYNTH_FLAGS(NO_LUT_COMBINE)} {
+            lappend MOREOPT "-no_lc"
+        }
     }
 
     # Set retiming
@@ -258,7 +260,7 @@ proc SynthesizeDesignSetup {synth_flags} {
     # Set build generics of toplevel entity
     if {[info exist SYNTH_FLAGS(USER_GENERICS)]} {
         foreach g $SYNTH_FLAGS(USER_GENERICS) {
-            lappend MOREOPT "-generic" [lindex $g 0] "=" [lindex $g 1]
+            lappend MOREOPT -generic "[lindex $g 0]=[lindex $g 1]"
         }
         puts "User-defined generics: $SYNTH_FLAGS(USER_GENERICS)"
     }
@@ -266,7 +268,7 @@ proc SynthesizeDesignSetup {synth_flags} {
     # Set Out-of-context mode
     if {[info exist SYNTH_FLAGS(OOC_MODE)]} {
         if {$SYNTH_FLAGS(OOC_MODE) == "1"} {
-            lappend MOREOPT "-mode out_of_context"
+            lappend MOREOPT -mode out_of_context
             puts "Out-of-context mode set"
         }
     }

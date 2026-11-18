@@ -479,7 +479,7 @@ proc SynthesizeDesignSetup {synth_flags} {
     # Set fanout limit
     if {[info exist SYNTH_FLAGS(FANOUT_LIMIT)] } {
         puts "Fanout limit set to: $SYNTH_FLAGS(FANOUT_LIMIT)"
-        set_property -name {STEPS.SYNTH_DESIGN.ARGS.FANOUT_LIMIT} \
+        set_property -name {STEPS.SYNTH_DESIGN.ARGS.CONTROL_SET_OPT_THRESHOLD} \
             -value $SYNTH_FLAGS(FANOUT_LIMIT) -objects [get_runs synth_1]
     }
 
