@@ -17,6 +17,9 @@ class StatRegBits(IntEnum):
     READY = 0
     RST_DONE = 1
     TAG_INIT_DONE = 2
+    # 1 in a build without the diagnostic counters (DMA_IUVENTUS DIAG_EN false): every DIAG register then reads 0.
+    # Set means off so that an image older than the bit, which has the counters, reads correctly.
+    DIAG_OFF = 3
 
 class IuventusMiRegMap(IntEnum):
     """COMMON register block shared by every queue: control/status, data-pool and PRP pointers,

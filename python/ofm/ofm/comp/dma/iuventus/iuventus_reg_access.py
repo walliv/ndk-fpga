@@ -3,6 +3,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import functools
 import sys
 from pprint import pformat
 from dataclasses import dataclass, fields
@@ -13,6 +14,21 @@ from cocotbext.ofm.dma.iuventus import CQEntry
 from cocotbext.ofm.dma.iuventus import IuventusMiRegMap, CtrlRegBits, StatRegBits
 from cocotbext.ofm.dma.iuventus import IuventusPerQueueCntrRegMap, per_queue_cntr_reg_addr
 from cocotbext.ofm.dma.iuventus import IuventusPerQueueRegMap, per_queue_reg_addr
+
+# What a DIAG register reports when the build has no diagnostic counters (STATUS bit 3 set): such a
+# register reads 0, which would pass for "no events".
+DIAG_NA = "n/a (DIAG off)"
+
+
+def _diag(fn):
+    """Accessor of a DIAG register: DIAG_NA instead of the 0 a build without DIAG_EN reads."""
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        if not self.diag_en:
+            return DIAG_NA
+        return fn(self, *args, **kwargs)
+    return wrapper
+
 
 # WRBUFF peer-write 32B-alignment stats (NVMe CQ peer-writes vs. a 32B-aligned, <=16-beat AXI
 # burst); not in IuventusMiRegMap, which lists only addresses needed for SSD throughput/HW debug.
@@ -75,6 +91,7 @@ OP_PROF_CLASS_ADDRS = (
 class DMAIuventusConfig:
     ctrl_reg                : int
     status_reg              : int
+    diag_en                 : bool
     sqtdbl                  : int
     sqhdbl                  : int
     cqhdbl                  : int
@@ -171,7 +188,7 @@ class DMAIuventusConfig:
 
     def status_reg_str(self):
         reg_bin = '{:08b}'.format(self.status_reg)
-        fmt = 'RDY: {}\n\t\t\t | RST_DONE: {}\n\t\t\t | TAG_INIT_DONE: {}\n\t\t\t'.format(reg_bin[-1], reg_bin[-2], reg_bin[-3])
+        fmt = 'RDY: {}\n\t\t\t | RST_DONE: {}\n\t\t\t | TAG_INIT_DONE: {}\n\t\t\t | DIAG_OFF: {}\n\t\t\t'.format(reg_bin[-1], reg_bin[-2], reg_bin[-3], reg_bin[-4])
         return fmt
 
     def __str__(self) -> str:
@@ -186,6 +203,9 @@ class DMAIuventusConfig:
         for name, val in items:
             # Check for a custom formatter method: {name}_str.
             # For example, ctrl_reg_str or status_reg_str.
+            if val == DIAG_NA:
+                res.append(f"{name:<{max_len}} : {DIAG_NA}")
+                continue
             formatter = getattr(self, f"{name}_str", None)
             if callable(formatter):
                 try:
@@ -305,18 +325,29 @@ class DMAIuventusRegAccess(nfb.BaseComp):
     def tag_init_done(self) -> bool:
         return self._comp.get_bit(IuventusMiRegMap.STATUS.value, StatRegBits.TAG_INIT_DONE.value)
     @property
+    def diag_en(self) -> bool:
+        """True in a build with the diagnostic counters (DMA_IUVENTUS DIAG_EN); false means their registers read 0."""
+        return not self._comp.get_bit(IuventusMiRegMap.STATUS.value, StatRegBits.DIAG_OFF.value)
+
+    @property
     def status_reg(self) -> int:
         return self._comp.read8(IuventusMiRegMap.STATUS.value)
 
     @property
+    @_diag
     def sqtdbl(self) -> int:
-        return self._comp.read16(IuventusMiRegMap.SQTDBL.value)
+        """Queue 0's observed SQTDBL value (read-back mirror in the per-queue block)."""
+        return self._comp.read16(per_queue_reg_addr(IuventusPerQueueRegMap.SQTDBL, 0))
     @property
+    @_diag
     def sqhdbl(self) -> int:
-        return self._comp.read16(IuventusMiRegMap.SQHDBL.value)
+        """Queue 0's observed SQHDBL value (read-back mirror in the per-queue block)."""
+        return self._comp.read16(per_queue_reg_addr(IuventusPerQueueRegMap.SQHDBL, 0))
     @property
+    @_diag
     def cqhdbl(self) -> int:
-        return self._comp.read16(IuventusMiRegMap.CQHDBL.value)
+        """Queue 0's observed CQHDBL value (read-back mirror in the per-queue block)."""
+        return self._comp.read16(per_queue_reg_addr(IuventusPerQueueRegMap.CQHDBL, 0))
     @property
     def dbl_mask(self) -> int:
         return self._comp.read16(IuventusMiRegMap.DBL_MASK.value)
@@ -405,24 +436,29 @@ class DMAIuventusRegAccess(nfb.BaseComp):
         return self._comp.read32(IuventusMiRegMap.EP1_WR_PAGES_FREE.value) & 0xFFFF
 
     @property
+    @_diag
     def last_cq_entry(self) -> CQEntry:
         cq_ent_read = int.from_bytes(self._comp.read(IuventusMiRegMap.LAST_CQ_ENTRY_0.value, 16), sys.byteorder)
         return CQEntry.deserialize(cq_ent_read)
 
     @property
+    @_diag
     def sqes_dispatched(self) -> int:
         return self._comp.read64(IuventusMiRegMap.SQE_DISP_CNTR_L.value)
 
     @property
+    @_diag
     def cqes_processed(self) -> int:
         return self._comp.read64(IuventusMiRegMap.CQE_PROC_CNTR_L.value)
 
     # sq_pcie_rds/sq_pcie_rds_bytes stay aggregate-only; no per-queue breakdown is available.
     @property
+    @_diag
     def sq_pcie_rds(self) -> int:
         return self._comp.read64(IuventusMiRegMap.SQ_PCIE_RDS_CNTR_L.value)
 
     @property
+    @_diag
     def sq_pcie_rds_bytes(self) -> int:
         return self._comp.read64(IuventusMiRegMap.SQ_PCIE_RD_BYTES_CNTR_L.value)
     @property
@@ -450,18 +486,21 @@ class DMAIuventusRegAccess(nfb.BaseComp):
         return self._comp.read64(TOTAL_CYCLES_CNTR_L_ADDR)
 
     @property
+    @_diag
     def drain_idle(self) -> int:
         """Cycles the write drain is not actively fetching staged data from RDBUFF. A high
         fraction of total_cycles means write pages are held waiting on the device."""
         return self._comp.read64(DRAIN_IDLE_CNTR_L_ADDR)
 
     @property
+    @_diag
     def cc_stall(self) -> int:
         """Cycles a staged write word was ready and the CC path refused it. Not necessarily lost
         bandwidth -- see the DMA core's own documentation for why."""
         return self._comp.read64(CC_STALL_CNTR_L_ADDR)
 
     @property
+    @_diag
     def dev_inflight_acc(self) -> int:
         """Sum of the in-flight command count over total_cycles. Divide to get the mean commands
         the drive is holding; with the completion rate that is Little's law for device latency."""
@@ -474,6 +513,8 @@ class DMAIuventusRegAccess(nfb.BaseComp):
         cyc = self.total_cycles
         if cyc == 0:
             return {"cycles": 0}
+        if not self.diag_en:
+            return {"cycles": cyc, "idle": DIAG_NA, "cc_stall": DIAG_NA, "serving": DIAG_NA, "mean_inflight": DIAG_NA}
         idle, stall, acc = self.drain_idle, self.cc_stall, self.dev_inflight_acc
         return {
             "cycles": cyc,
@@ -513,55 +554,65 @@ class DMAIuventusRegAccess(nfb.BaseComp):
         return out
 
     @property
+    @_diag
     def drain_admit(self) -> int:
         """WRBUFF drains admitted. Should track succ_cpls 1:1."""
         return self._comp.read64(DRAIN_ADMIT_CNTR_L_ADDR)
 
     @property
+    @_diag
     def drain_fence_wait(self) -> int:
         """Cycles a drain waited on the frame fence. LEVEL counter; see the DMA core's own
         documentation for diagnosis, together with fence_clip."""
         return self._comp.read64(DRAIN_FENCE_W_CNTR_L_ADDR)
 
     @property
+    @_diag
     def drain_hbm_wait(self) -> int:
         """Cycles a drain waited on HBM. Non-zero means the HBM datapath is the constraint."""
         return self._comp.read64(DRAIN_HBM_W_CNTR_L_ADDR)
 
     @property
+    @_diag
     def fence_clip(self) -> int:
         """Frame-fence pushes discarded by the buffer writer's drain guard. MUST be 0; see the
         DMA core's own documentation for what a non-zero value means."""
         return self._comp.read64(FENCE_CLIP_CNTR_L_ADDR)
 
     @property
+    @_diag
     def fence_afull_cycles(self) -> int:
         """Cycles the WRBUFF drain guard held RX off. See the DMA core's own documentation for
         interpretation together with fence_clip."""
         return self._comp.read64(FENCE_AFULL_CNTR_L_ADDR)
 
     @property
+    @_diag
     def drain_hold_cycles(self) -> int:
         """Cycles a WRBUFF drain's new HBM reads were held while its ingest FIFO filled, every
         endpoint summed. Zero proves the HBM ports never starved the fill."""
         return self._comp.read64(IuventusMiRegMap.DRAIN_HOLD_CNTR_L.value)
 
     @property
+    @_diag
     def drain_hold_events(self) -> int:
         """Drain holds started (see drain_hold_cycles)."""
         return self._comp.read64(IuventusMiRegMap.DRAIN_HOLD_EVT_CNTR_L.value)
 
     @property
+    @_diag
     def poisoned_drains(self) -> int:
         """Drains that delivered data a WRBUFF capacity drop lost, each reported as DATA_LOST."""
         return self._comp.read64(IuventusMiRegMap.POISONED_DRAIN_CNTR_L.value)
 
     @property
+    @_diag
     def ingest_hwm(self) -> tuple:
         """(EP0, EP1) WRBUFF ingest-FIFO high-water mark in words since the last rst_cntrs()."""
         v = self._comp.read32(IuventusMiRegMap.INGEST_HWM.value)
         return (v & 0xFFFF, v >> 16)
 
+    @_diag
     def pc_beats(self, channel: int, write: bool) -> int:
         """WRBUFF data beats of one HBM channel (PROFILE_EN build), every endpoint summed. Samples
         every counter, as sample_cntrs() does."""
@@ -590,9 +641,11 @@ class DMAIuventusRegAccess(nfb.BaseComp):
         self._comp.write64(IuventusMiRegMap.LBA_SPACE_SIZE_L.value, value)
 
     @property
+    @_diag
     def cqhdbl_reg_upd (self) -> int:
         return self._comp.read64(IuventusMiRegMap.CQHDBL_REG_UPDS_CNTR_L.value)
     @property
+    @_diag
     def sqtdbl_reg_upd (self) -> int:
         return self._comp.read64(IuventusMiRegMap.SQTDBL_REG_UPDS_CNTR_L.value)
 
@@ -604,13 +657,16 @@ class DMAIuventusRegAccess(nfb.BaseComp):
         self._comp.write64(IuventusMiRegMap.META_PTR_L.value, value)
 
     @property
+    @_diag
     def nvme_rd_cmd_bytes(self) -> int:
         return self._comp.read64(IuventusMiRegMap.NVME_RD_BYTES_CNTR_L.value)
     @property
+    @_diag
     def nvme_wr_cmd_bytes(self) -> int:
         return self._comp.read64(IuventusMiRegMap.NVME_WR_BYTES_CNTR_L.value)
 
     @property
+    @_diag
     def tag_fifo_status(self) -> int:
         return self._comp.read16(IuventusMiRegMap.TAG_FIFO_STATUS.value)
 
@@ -621,6 +677,7 @@ class DMAIuventusRegAccess(nfb.BaseComp):
         return self._comp.read32(IuventusMiRegMap.RD_PAGES_FREE.value) & 0xFFFF
 
     @property
+    @_diag
     def rd_pages_free_min(self) -> int:
         return (self._comp.read32(IuventusMiRegMap.RD_PAGES_FREE.value) >> 16) & 0xFFFF
 
@@ -629,6 +686,7 @@ class DMAIuventusRegAccess(nfb.BaseComp):
         return self._comp.read32(IuventusMiRegMap.WR_PAGES_FREE.value) & 0xFFFF
 
     @property
+    @_diag
     def wr_pages_free_min(self) -> int:
         return (self._comp.read32(IuventusMiRegMap.WR_PAGES_FREE.value) >> 16) & 0xFFFF
 
@@ -657,10 +715,12 @@ class DMAIuventusRegAccess(nfb.BaseComp):
     def pq_sqe_disp(self, qid: int) -> int:
         return self._comp.read64(per_queue_cntr_reg_addr(IuventusPerQueueCntrRegMap.SQE_DISP_L, qid))
 
+    @_diag
     def pq_cqe_proc(self, qid: int) -> int:
         return self._comp.read64(per_queue_cntr_reg_addr(IuventusPerQueueCntrRegMap.CQE_PROC_L, qid))
 
     @property
+    @_diag
     def nvme_flush_disp(self) -> int:
         return self._comp.read64(IuventusMiRegMap.NVME_FLUSH_DISP_CNTR_L.value)
 
@@ -670,14 +730,17 @@ class DMAIuventusRegAccess(nfb.BaseComp):
         return self._comp.read64(CQ_WR_TOTAL_CNTR_L_ADDR)
 
     @property
+    @_diag
     def cq_wr_unalign_start(self) -> int:
         return self._comp.read64(CQ_WR_UNALIGN_START_CNTR_L_ADDR)
 
     @property
+    @_diag
     def cq_wr_unalign_size(self) -> int:
         return self._comp.read64(CQ_WR_UNALIGN_SIZE_CNTR_L_ADDR)
 
     @property
+    @_diag
     def cq_wr_over16beats(self) -> int:
         return self._comp.read64(CQ_WR_OVER16BEATS_CNTR_L_ADDR)
 
@@ -687,26 +750,31 @@ class DMAIuventusRegAccess(nfb.BaseComp):
         return self._comp.read64(WRBUFF_DROPPED_FRAME_CNTR_L_ADDR)
 
     @property
+    @_diag
     def wrbuff_unaligned(self) -> int:
         """WRBUFF HBM write bursts that were not 32B-aligned. Each costs an extra HBM beat."""
         return self._comp.read64(WRBUFF_UNALIGNED_CNTR_L_ADDR)
 
     @property
+    @_diag
     def rdbuff_rd_unaligned(self) -> int:
         """RDBUFF HBM read bursts that were not 32B-aligned. Each costs an extra HBM beat."""
         return self._comp.read64(RDBUFF_RD_UNALIGNED_CNTR_L_ADDR)
 
     @property
+    @_diag
     def fence_accepted(self) -> int:
         """Frames the buffer writer took, low 16 bits (low half of FENCE_GAP)."""
         return self._comp.read32(FENCE_GAP_ADDR) & 0xFFFF
 
     @property
+    @_diag
     def fence_drained(self) -> int:
         """Frames whose every AXI write has BRESP'd, low 16 bits (high half of FENCE_GAP)."""
         return (self._comp.read32(FENCE_GAP_ADDR) >> 16) & 0xFFFF
 
     @property
+    @_diag
     def fence_target(self) -> int:
         """Snapshotted accepted-count the drain guard is waiting for drained to reach, at the
         counter's full 32 b -- mask to 16 bits before comparing it against fence_drained."""
