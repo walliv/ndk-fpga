@@ -36,16 +36,18 @@ architecture BANKED of TX_DMA_PCIE_TRANS_BUFFER_IMPL is
     constant IS_AMD_DEV         : boolean := (DEVICE = "7SERIES" or DEVICE = "ULTRASCALE" or DEVICE = "VERSAL");
 
     -- a maximum depth of a memory block (in 1B items) depends on the memory primitive
-    constant MAX_MEM_DEPTH   : natural := tsel(RAM_TYPE = "URAM", TRBUF_DEPTH_URAM, TRBUF_DEPTH_BRAM);
-    -- The amount of channels that fits into one array
-    constant CHANS_PER_ARRAY : natural := trbuf_chans_per_array_f(CHANNELS, BUFFER_DEPTH, MAX_MEM_DEPTH);
+    constant MAX_MEM_DEPTH    : natural := tsel(RAM_TYPE = "URAM", TRBUF_DEPTH_URAM, TRBUF_DEPTH_BRAM);
+    -- ==== Flat (unpartitioned) addressing -- see the MEM_PARTITIONING generic ====
+    constant FLAT             : boolean := (not MEM_PARTITIONING) and (CHANNELS > 1);
+    -- The amount of channels that fits into one array. A flat space is one array, so a word's row + 1 never needs another one.
+    constant CHANS_PER_ARRAY  : natural := tsel(FLAT, CHANNELS, trbuf_chans_per_array_f(CHANNELS, BUFFER_DEPTH, MAX_MEM_DEPTH));
     -- Number of memory arrays since one array can contain multiple channels
-    constant MEM_ARRAYS      : natural := CHANNELS/CHANS_PER_ARRAY;
+    constant MEM_ARRAYS       : natural := CHANNELS/CHANS_PER_ARRAY;
     -- Total rows (of one whole MFB word) per array
-    constant ARRAY_ROWS      : natural := CHANS_PER_ARRAY * BUFFER_DEPTH;
+    constant ARRAY_ROWS       : natural := CHANS_PER_ARRAY * BUFFER_DEPTH;
     -- Depth of each of the two even/odd row banks
-    constant BANK_ITEMS      : natural := ARRAY_ROWS / 2;
-    constant BANK_ADDR_W     : natural := log2(BANK_ITEMS);
+    constant BANK_ITEMS       : natural := ARRAY_ROWS / 2;
+    constant BANK_ADDR_W      : natural := log2(BANK_ITEMS);
 
     -- ==== XPM_MEMORY_TDPRAM configuration for the memory arrays below ====
     constant XPM_MEM_PRIMITIVE : string  := tsel(RAM_TYPE = "URAM", "ultra", "block");
@@ -64,13 +66,9 @@ architecture BANKED of TX_DMA_PCIE_TRANS_BUFFER_IMPL is
     -- Width of the (registered) target-array index; at least 1 bit even when MEM_ARRAYS = 1
     constant ARR_IDX_W       : natural := max(1, log2(MEM_ARRAYS));
 
-    -- ==== Flat (unpartitioned) addressing -- see the MEM_PARTITIONING generic ====
-    constant FLAT             : boolean := (not MEM_PARTITIONING) and (CHANNELS > 1);
     -- LSB, within the write META DWord-address, of the flat channel-select field (the read byte
     -- address carries it starting at bit POINTER_WIDTH). It sits directly above the intra-channel row.
     constant FLAT_CHAN_LSB_DW : natural := log2(BUFFER_DEPTH) + log2(MFB_DWORDS);
-    -- LSB of the memory-array-select sub-field within the flat channel-select field
-    constant FLAT_ARR_LSB_DW  : natural := FLAT_CHAN_LSB_DW + log2(CHANS_PER_ARRAY);
 
     -- The input word behind the input registers of the write front end and the fields of its META
     signal wr_src_rdy               : std_logic;
@@ -192,21 +190,25 @@ architecture BANKED of TX_DMA_PCIE_TRANS_BUFFER_IMPL is
     signal wr_chan_slot_r0     : std_logic_vector(log2(CHANS_PER_ARRAY) -1 downto 0);
 
     -- ==== Bank addressing ====
-    -- The bank whose index equals the row's parity gets the row, the other bank the next row; the two always lie in
-    -- different banks (see readme.rst).
+    -- The bank whose index equals the row's parity gets the row, the other bank the next row, so the two always lie in
+    -- different banks. A flat row + 1 carries into the channel bits, a partitioned one wraps in its channel.
     function bank_addr_f (chan : std_logic_vector; row : std_logic_vector) return slv_array_t is
-        variable row_v    : std_logic_vector(row'length -1 downto 0);
-        variable row_p1_v : std_logic_vector(row'length -1 downto 0);
+        variable row_v    : std_logic_vector(chan'length + row'length -1 downto 0);
+        variable row_p1_v : std_logic_vector(chan'length + row'length -1 downto 0);
         variable res      : slv_array_t(1 downto 0)(chan'length + row'length -2 downto 0);
     begin
-        row_v    := row;
-        row_p1_v := std_logic_vector(unsigned(row_v) + 1);
-        if (row_v(0) = '0') then
-            res(0) := chan & row_v   (row_v'high downto 1);
-            res(1) := chan & row_p1_v(row_v'high downto 1);
+        row_v := chan & row;
+        if (FLAT) then
+            row_p1_v := std_logic_vector(unsigned(row_v) + 1);
         else
-            res(0) := chan & row_p1_v(row_v'high downto 1);
-            res(1) := chan & row_v   (row_v'high downto 1);
+            row_p1_v := chan & std_logic_vector(unsigned(row) + 1);
+        end if;
+        if (row_v(0) = '0') then
+            res(0) := row_v   (row_v'high downto 1);
+            res(1) := row_p1_v(row_v'high downto 1);
+        else
+            res(0) := row_p1_v(row_v'high downto 1);
+            res(1) := row_v   (row_v'high downto 1);
         end if;
         return res;
     end function;
@@ -390,10 +392,10 @@ begin
         end process;
     end generate;
 
-    -- Verify each mode reads the write channel-slot bits (chan_addr_v, upper log2(CHANS_PER_ARRAY)
-    -- bits of wr_bank_addr(0)) from its OWN field -- regression guard against the other mode's
-    -- field leaking in, checked at SOF.
-    wr_chan_slot_r0 <= wr_bank_addr(0)(0)(BANK_ADDR_W -1 downto BANK_ADDR_W - log2(CHANS_PER_ARRAY));
+    -- Regression guard that each mode takes the write channel-slot bits (upper log2(CHANS_PER_ARRAY) bits of
+    -- wr_bank_addr(0)) from its own field, checked at SOF on the bank holding the SOF row, as the other bank's row + 1 may carry.
+    wr_chan_slot_r0 <= wr_bank_addr(0)(1)(BANK_ADDR_W -1 downto BANK_ADDR_W - log2(CHANS_PER_ARRAY)) when (wr_addr(0)(log2(MFB_DWORDS)) = '1') else
+                       wr_bank_addr(0)(0)(BANK_ADDR_W -1 downto BANK_ADDR_W - log2(CHANS_PER_ARRAY));
 
     -- psl assert_flat_wr_chan_from_addr : assert always
     -- ((FLAT and wr_src_rdy = '1' and wr_sof(0) = '1') ->
@@ -423,29 +425,17 @@ begin
         -- Per-region target-array index (arr_idx_rgn); see its declaration above for why it is only
         -- ever compared, never indexed.
         arr_idx_rgn_logic_p : process (all) is
-            variable chan_v      : std_logic_vector(log2(CHANNELS) -1 downto 0);
-            variable pcie_addr_v : std_logic_vector(TRBUF_META_PCIE_ADDR_W -1 downto 0);
+            variable chan_v : std_logic_vector(log2(CHANNELS) -1 downto 0);
         begin
             arr_idx_rgn <= (others => (others => '0'));
 
             for i in 0 to (MFB_REGIONS - 1) loop
                 if (wr_src_rdy = '1') then
                     if (wr_sof(i) = '1') then
-                        -- FLAT: memory-array select from the address; else from the channel field
-                        if (FLAT) then
-                            pcie_addr_v    := wr_addr(i);
-                            arr_idx_rgn(i) <= pcie_addr_v(FLAT_ARR_LSB_DW + log2(MEM_ARRAYS) -1 downto FLAT_ARR_LSB_DW);
-                        else
-                            chan_v         := wr_chan(i);
-                            arr_idx_rgn(i) <= chan_v(log2(MEM_ARRAYS) + log2(CHANS_PER_ARRAY) -1 downto log2(CHANS_PER_ARRAY));
-                        end if;
+                        chan_v         := wr_chan(i);
+                        arr_idx_rgn(i) <= chan_v(log2(MEM_ARRAYS) + log2(CHANS_PER_ARRAY) -1 downto log2(CHANS_PER_ARRAY));
                     else
-                        -- FLAT: track the running address so a frame may cross array boundaries
-                        if (FLAT) then
-                            arr_idx_rgn(i) <= std_logic_vector(addr_cntr_pst(FLAT_ARR_LSB_DW + log2(MEM_ARRAYS) -1 downto FLAT_ARR_LSB_DW));
-                        else
-                            arr_idx_rgn(i) <= mem_arr_idx_reg;
-                        end if;
+                        arr_idx_rgn(i) <= mem_arr_idx_reg;
                     end if;
                 end if;
             end loop;

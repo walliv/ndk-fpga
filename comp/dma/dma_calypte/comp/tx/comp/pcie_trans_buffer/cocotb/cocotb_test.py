@@ -24,10 +24,6 @@ TB_FLAT = not generic_bool(cocotb.top.MEM_PARTITIONING)
 TB_READ_SHIFTED = bool(int(cocotb.top.READ_BARREL_SHIFTER_MASK.value) & 1)
 # test_unaligned_sweep and test_dual_sof place their frames for at least 8 channels of 8 KiB each.
 TB_DIRECTED_FIT = int(cocotb.top.CHANNELS.value) >= 8 and int(cocotb.top.POINTER_WIDTH.value) >= 13
-# Known defect of the banked buffer's flat mode: row + 1 of a word does not carry into the channel bits, so a word
-# straddling a 2**POINTER_WIDTH boundary writes its tail to the start of its own slot. Shifted reads alias the same
-# way and hide it; whole-row reads show it, so those runs keep frames inside one slot.
-TB_FLAT_CROSS_OK = TB_READ_SHIFTED
 
 # The model/DUT persists for the whole run: @cocotb.test functions share one elaborated design and
 # BRAM content (RESET only clears pipeline registers), so keep one model object per run to stay in
@@ -805,15 +801,14 @@ async def test_flat_channel_ignored(dut):
     assert got == last, f"flat_channel_ignored: channel field not ignored (got={got.hex()} exp={last.hex()})"
 
 
-@cocotb.test(skip=not TB_FLAT or not TB_FLAT_CROSS_OK)
+@cocotb.test(skip=not TB_FLAT)
 async def test_flat_cross_boundary(dut):
     """Flat mode: one write frame streams across a 2**POINTER_WIDTH boundary, so the running address, not a latched
-    channel, carries it into the next channel slot; checked at several boundaries."""
+    channel, carries it into the next channel slot, and across the top of the buffer, where it wraps to address 0."""
     tb = await Testbench.setup(dut, 102)
 
     per_chan = 1 << tb.model.pointer_width
-    # every internal 2**POINTER_WIDTH boundary (there are `channels`-1 of them)
-    for b in range(1, tb.channels):
+    for b in range(1, tb.channels + 1):
         boundary = b * per_chan
         for pre in (96, 32, 4):
             start = boundary - pre
@@ -837,7 +832,7 @@ async def test_flat_random_soak(dut):
     write stream and a final read-back."""
     tb = await Testbench.setup(dut, 103)
     # one bump allocator over the channels * 2**pointer_width flat space
-    alloc = make_alloc(1, int(tb.buf_size * 0.8), None if TB_FLAT_CROSS_OK else 1 << tb.model.pointer_width)
+    alloc = make_alloc(1, int(tb.buf_size * 0.8))
 
     def next_transaction():
         length = random.randrange(1, 200)

@@ -91,9 +91,10 @@ architecture FULL of TX_DMA_PCIE_TRANS_BUFFER is
     constant IS_INTEL_DEV       : boolean := (DEVICE = "STRATIX10" or DEVICE = "AGILEX");
     constant IS_XILINX_URAM_DEV : boolean := (DEVICE = "ULTRASCALE" or DEVICE = "VERSAL");
 
-    -- Rows of one even/odd bank if the channels shared URAM-sized (16384-row) arrays.
+    -- Rows of one even/odd bank if the channels shared URAM-sized (16384-row) arrays; a flat space is one array.
     constant BUFFER_DEPTH      : natural := trbuf_buffer_depth_f(POINTER_WIDTH, MFB_REGIONS*MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH);
-    constant BANK_ITEMS_URAM_C : natural := (trbuf_chans_per_array_f(CHANNELS, BUFFER_DEPTH, TRBUF_DEPTH_URAM) * BUFFER_DEPTH) / 2;
+    constant BANK_ITEMS_URAM_C : natural := tsel((not MEM_PARTITIONING) and CHANNELS > 1, CHANNELS * BUFFER_DEPTH / 2,
+        (trbuf_chans_per_array_f(CHANNELS, BUFFER_DEPTH, TRBUF_DEPTH_URAM) * BUFFER_DEPTH) / 2);
     -- Resolved once here and passed to the banked buffer as its RAM_TYPE.
     constant RES_RAM_TYPE      : string := tsel(RAM_TYPE = "LUT", "LUT", tsel(
         (RAM_TYPE = "URAM") or (RAM_TYPE = "AUTO" and IS_XILINX_URAM_DEV and MFB_REGIONS = 2 and BANK_ITEMS_URAM_C >= 2048),

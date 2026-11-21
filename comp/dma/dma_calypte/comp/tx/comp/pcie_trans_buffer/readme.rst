@@ -53,6 +53,9 @@ UltraScale+ or Versal device for 2 regions when a bank is at least 2048 rows dee
 feature selects the banked one. URAM banks hold up to 16384 rows, BRAM arrays 4096, which sets how
 many channels share one memory array. TX_DMA_CALYPTE with 32 or more channels at
 ``POINTER_WIDTH => 13`` therefore uses the banked URAM buffer, with 16 channels the per-byte one.
+A flat space (``MEM_PARTITIONING => FALSE``) is always one memory array, whatever its depth, so a word
+straddling a 2**POINTER_WIDTH boundary writes its tail to the start of the next slot and one straddling the
+top of the space wraps to address 0, as a read across either does.
 
 ``"LUT"`` (AMD, 2 regions, one memory array) keeps the buffer in distributed RAM, for a buffer of a few bus
 words where block RAM, 1024 bits wide for two write ports, costs many primitives for few bits. A distributed RAM
@@ -93,11 +96,9 @@ flat address space::
     make GENERICS='-gRAM_TYPE="BRAM"'             # other generics: per-byte, two memory arrays
     python3 ../../../../../../../../build/scripts/multi_ver/multi_ver_cocotb.py ver_settings.py -n lat3_bram -c  # one combination
 
-Combinations ``cq_bram``, ``cq_lut`` and ``cq_lut_part`` run the geometry of DMA_IUVENTUS's CQ ring, read in
-whole rows, which the bench splices into windows. Whole-row reads show a defect of the banked flat mode: row + 1
-of a word does not carry into the channel bits, so a word straddling a 2**POINTER_WIDTH boundary writes its tail
-to the start of its own slot. Shifted reads alias the same way and hide it, so those runs keep frames inside one
-slot and skip ``test_flat_cross_boundary``.
+Combinations ``cq_bram``, ``cq_lut``, ``cq_uram`` and ``cq_lut_part`` run the geometry of DMA_IUVENTUS's CQ
+ring, read in whole rows, which the bench splices into windows. Unlike shifted reads, which take row + 1 the way
+the write does, whole-row reads show where a straddling write put its tail.
 
 ``cocotb_test.py`` drives the 2-region geometry only. ``cocotb_1region_smoke.py`` checks a 1-region
 instance (combination ``smoke_uram_b8``): data integrity of aligned, unaligned and wrapping writes, a read
