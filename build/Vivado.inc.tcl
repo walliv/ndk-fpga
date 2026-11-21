@@ -403,6 +403,15 @@ proc ImplementDesignSetup {synth_flags} {
     set_property -name {STEPS.POWER_OPT_DESIGN.ARGS.MORE OPTIONS} \
         -value {-verbose} -objects $run
 
+    # ReportImplementation writes these itself (the DRC with the user rules), so the run's copies only cost time; the
+    # routed timing summary stays, as multi_synth reads the run's *_timing_summary_routed.rpt
+    foreach name {route_report_drc_0 route_report_power_0 route_report_incremental_reuse_0} {
+        set rc [get_report_configs -quiet -of_objects $run impl_1_$name]
+        if {$rc ne ""} {
+            set_property IS_ENABLED false $rc
+        }
+    }
+
     # Incremental synthesis
     if {[info exist SYNTH_FLAGS(DCP)] } {
         puts "Incremental compile checkpoint: $SYNTH_FLAGS(DCP)"
