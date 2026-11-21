@@ -15,6 +15,7 @@ SETTINGS = {
         "RAM_TYPE": "\\\"AUTO\\\"",
         "MEM_PARTITIONING": "true",
         "READ_LATENCY": "1",
+        "INP_REG_NUM": "1",
     },
 
     # The per-byte buffer with two memory arrays, or the banked BRAM one with a flat space or a read latency of 3.
@@ -25,6 +26,13 @@ SETTINGS = {
     "lat3": {"READ_LATENCY": "3"},
     "intel": {"DEVICE": "\\\"AGILEX\\\""},
     "flat": {"MEM_PARTITIONING": "false", "CHANNELS": "2", "POINTER_WIDTH": "18"},
+    # The CQ ring of DMA_IUVENTUS (IUVENTUS_EP's cq_wr_buffer_i): a 2 KiB flat space read in whole rows.
+    "cq": {"CHANNELS": "2", "POINTER_WIDTH": "10", "MEM_PARTITIONING": "false", "READ_BARREL_SHIFTER_MASK": "0",
+           "READ_LATENCY": "3", "INP_REG_NUM": "4"},
+    "lut": {"RAM_TYPE": "\\\"LUT\\\""},
+    "part": {"MEM_PARTITIONING": "true"},
+    "lat1": {"READ_LATENCY": "1", "INP_REG_NUM": "1"},
+    "lat2": {"READ_LATENCY": "2"},
     # cocotb_1region_smoke.py checks a 1-region instance, which cocotb_test.py does not drive.
     "smoke_1region": {"MFB_REGIONS": "1", "RAM_TYPE": "\\\"URAM\\\"",
                       "__cocotb_params__": {"TEST_MODULES": "cocotb_1region_smoke"}},
@@ -39,5 +47,10 @@ SETTINGS = {
         "intel_default": ("intel",),
         "flat_bram": ("flat", "bram"),
         "smoke_uram_b8": ("txdma", "smoke_1region"),
+        "cq_bram": ("cq", "bram"),
+        "cq_lut": ("cq", "lut"),
+        "cq_lut_part": ("cq", "lut", "part"),
+        "cq_lut_lat1": ("cq", "lut", "lat1"),
+        "cq_lut_lat2": ("cq", "lut", "lat2"),
     },
 }

@@ -14,8 +14,8 @@ use work.type_pack.all;
 use work.tx_dma_pcie_trans_buffer_pkg.all;
 
 -- Buffers the PCIe writes of every channel at byte alignment in a per-byte BRAM array. On AMD
--- devices, URAM, flat addressing, READ_LATENCY > 1 or more input registers select two even/odd row
--- banks of XPM memories instead.
+-- devices, URAM, distributed RAM, flat addressing, READ_LATENCY > 1 or more input registers select the
+-- banked implementation instead.
 entity TX_DMA_PCIE_TRANS_BUFFER is
     generic (
         DEVICE : string := "ULTRASCALE";
@@ -41,7 +41,8 @@ entity TX_DMA_PCIE_TRANS_BUFFER is
         READ_BARREL_SHIFTER_EN : b_array_t(MFB_REGIONS -1 downto 0) := (others => TRUE);
 
         -- Memory primitive: AUTO resolves to URAM for 2 regions on UltraScale+/Versal when a bank
-        -- holds at least 2048 rows, else BRAM. URAM needs an AMD DEVICE.
+        -- holds at least 2048 rows, else BRAM. URAM and LUT (distributed RAM, 2 regions, one memory
+        -- array, whole-row reads on port A) need an AMD DEVICE.
         RAM_TYPE : string := "AUTO";
 
         -- TRUE (default): each channel owns a 2**POINTER_WIDTH-byte region. FALSE: one flat
@@ -94,12 +95,12 @@ architecture FULL of TX_DMA_PCIE_TRANS_BUFFER is
     constant BUFFER_DEPTH      : natural := trbuf_buffer_depth_f(POINTER_WIDTH, MFB_REGIONS*MFB_REGION_SIZE*MFB_BLOCK_SIZE*MFB_ITEM_WIDTH);
     constant BANK_ITEMS_URAM_C : natural := (trbuf_chans_per_array_f(CHANNELS, BUFFER_DEPTH, TRBUF_DEPTH_URAM) * BUFFER_DEPTH) / 2;
     -- Resolved once here and passed to the banked buffer as its RAM_TYPE.
-    constant RES_RAM_TYPE      : string := tsel(
+    constant RES_RAM_TYPE      : string := tsel(RAM_TYPE = "LUT", "LUT", tsel(
         (RAM_TYPE = "URAM") or (RAM_TYPE = "AUTO" and IS_XILINX_URAM_DEV and MFB_REGIONS = 2 and BANK_ITEMS_URAM_C >= 2048),
-        "URAM", "BRAM");
+        "URAM", "BRAM"));
     -- The banked buffer only where the per-byte one cannot serve the generics.
     constant USE_BANKED        : boolean := (not IS_INTEL_DEV) and
-        (RES_RAM_TYPE = "URAM" or (not MEM_PARTITIONING) or READ_LATENCY /= 1 or INP_REG_NUM /= 1);
+        (RES_RAM_TYPE = "URAM" or RES_RAM_TYPE = "LUT" or (not MEM_PARTITIONING) or READ_LATENCY /= 1 or INP_REG_NUM /= 1);
 
 begin
 
