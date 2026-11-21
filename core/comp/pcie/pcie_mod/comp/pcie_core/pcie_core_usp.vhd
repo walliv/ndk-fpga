@@ -289,6 +289,7 @@ architecture USP of PCIE_CORE is
     signal pcie_hip_clk             : std_logic_vector(PCIE_HIPS-1 downto 0);
     signal pcie_hip_rst             : std_logic_vector(PCIE_HIPS-1 downto 0);
     signal pcie_clk                 : std_logic_vector(PCIE_ENDPOINTS-1 downto 0);
+    signal cfg_dsn                  : slv_array_t(PCIE_ENDPOINTS-1 downto 0)(63 downto 0);
     signal pcie_rst_async           : std_logic_vector(PCIE_ENDPOINTS-1 downto 0);
     signal pcie_rst                 : slv_array_t(PCIE_ENDPOINTS-1 downto 0)(RESET_WIDTH+1-1 downto 0);
 
@@ -422,6 +423,11 @@ begin
     --  PCIE IP CORE
     -- =========================================================================
 
+    -- The nfb driver groups a card's endpoints by this serial; it reads the same low 64 bits from the device tree VSEC.
+    cfg_dsn_g : for i in 0 to PCIE_ENDPOINTS-1 generate
+        cfg_dsn(i) <= std_logic_vector(resize(unsigned(CARD_ID(i)), 64));
+    end generate;
+
     pcie_mode_0_2_g : if (ENDPOINT_MODE = 0 or ENDPOINT_MODE = 2 or ENDPOINT_MODE = 3) generate
 
         pcie_hip_g : for i in 0 to PCIE_HIPS-1 generate
@@ -519,7 +525,7 @@ begin
                     cfg_tph_st_mode                   => open,
                     cfg_vf_tph_requester_enable       => open,
                     cfg_vf_tph_st_mode                => open,
-                    cfg_dsn                           => (others => '0'),
+                    cfg_dsn                           => cfg_dsn(i),
                     cfg_bus_number                    => open,
                     cfg_fc_ph                         => dbg_credits_ph (i),
                     cfg_fc_pd                         => dbg_credits_pd (i),
@@ -636,7 +642,7 @@ begin
                     cfg_tph_st_mode                   => open,
                     cfg_vf_tph_requester_enable       => open,
                     cfg_vf_tph_st_mode                => open,
-                    cfg_dsn                           => (others => '0'),
+                    cfg_dsn                           => cfg_dsn(i),
                     cfg_bus_number                    => open,
                     cfg_fc_ph                         => open,
                     cfg_fc_pd                         => open,
@@ -779,7 +785,7 @@ begin
                         cfg_tph_st_mode                   => open,
                         cfg_vf_tph_requester_enable       => open,
                         cfg_vf_tph_st_mode                => open,
-                        cfg_dsn                           => (others => '0'),
+                        cfg_dsn                           => cfg_dsn(2*i+j),
                         cfg_bus_number                    => open,
                         cfg_fc_ph                         => dbg_credits_ph (2*i+j),
                         cfg_fc_pd                         => dbg_credits_pd (2*i+j),
@@ -896,7 +902,7 @@ begin
                         cfg_tph_st_mode                   => open,
                         cfg_vf_tph_requester_enable       => open,
                         cfg_vf_tph_st_mode                => open,
-                        cfg_dsn                           => (others => '0'),
+                        cfg_dsn                           => cfg_dsn(2*i+j),
                         cfg_bus_number                    => open,
                         cfg_fc_ph                         => dbg_credits_ph (2*i+j),
                         cfg_fc_pd                         => dbg_credits_pd (2*i+j),
