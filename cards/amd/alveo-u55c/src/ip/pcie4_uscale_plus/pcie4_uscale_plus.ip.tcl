@@ -33,13 +33,8 @@ set IP [get_ips $IP_COMP_NAME]
 # ==============================================================================
 
 set VENDOR_ID {18ec}
+# Every endpoint's PF0 is c000: the nfb driver binds each and joins them into one card by their serial (CARD_ID).
 set PF0_DEVICE_ID {c000}
-
-# Endpoint 1's PF0 is a dummy the nfb driver never binds (only c000 matches its probe), so give it
-# a distinct ID rather than let two PF0s on the same card collide on c000.
-if {$endpoint_idx == 1} {
-    set PF0_DEVICE_ID {c021}
-}
 
 # ==============================================================================
 # common properties they should be the same for all cards

@@ -29,22 +29,25 @@ architecture BANKED of TX_DMA_PCIE_TRANS_BUFFER_IMPL is
     constant MFB_BYTES          : natural := MFB_LENGTH/8;
     -- The Address is restricted by BAR_APERTURE (IP_core setting)
     constant BUFFER_DEPTH       : natural := trbuf_buffer_depth_f(POINTER_WIDTH, MFB_LENGTH);
-    -- Number of registers between BARREL_SHIFTERs and memory arrays
-    constant BRAM_REG_NUM       : natural := 2;
+    -- Number of registers between BARREL_SHIFTERs and memory arrays; a distributed RAM bit has one write load, not a
+    -- block RAM column's.
+    constant BRAM_REG_NUM       : natural := tsel(RAM_TYPE = "LUT", 1, 2);
     -- Every AMD device this component can be built for (see the DEVICE assertion below).
     constant IS_AMD_DEV         : boolean := (DEVICE = "7SERIES" or DEVICE = "ULTRASCALE" or DEVICE = "VERSAL");
 
     -- a maximum depth of a memory block (in 1B items) depends on the memory primitive
-    constant MAX_MEM_DEPTH   : natural := tsel(RAM_TYPE = "URAM", TRBUF_DEPTH_URAM, TRBUF_DEPTH_BRAM);
-    -- The amount of channels that fits into one array
-    constant CHANS_PER_ARRAY : natural := trbuf_chans_per_array_f(CHANNELS, BUFFER_DEPTH, MAX_MEM_DEPTH);
+    constant MAX_MEM_DEPTH    : natural := tsel(RAM_TYPE = "URAM", TRBUF_DEPTH_URAM, TRBUF_DEPTH_BRAM);
+    -- ==== Flat (unpartitioned) addressing -- see the MEM_PARTITIONING generic ====
+    constant FLAT             : boolean := (not MEM_PARTITIONING) and (CHANNELS > 1);
+    -- The amount of channels that fits into one array. A flat space is one array, so a word's row + 1 never needs another one.
+    constant CHANS_PER_ARRAY  : natural := tsel(FLAT, CHANNELS, trbuf_chans_per_array_f(CHANNELS, BUFFER_DEPTH, MAX_MEM_DEPTH));
     -- Number of memory arrays since one array can contain multiple channels
-    constant MEM_ARRAYS      : natural := CHANNELS/CHANS_PER_ARRAY;
+    constant MEM_ARRAYS       : natural := CHANNELS/CHANS_PER_ARRAY;
     -- Total rows (of one whole MFB word) per array
-    constant ARRAY_ROWS      : natural := CHANS_PER_ARRAY * BUFFER_DEPTH;
+    constant ARRAY_ROWS       : natural := CHANS_PER_ARRAY * BUFFER_DEPTH;
     -- Depth of each of the two even/odd row banks
-    constant BANK_ITEMS      : natural := ARRAY_ROWS / 2;
-    constant BANK_ADDR_W     : natural := log2(BANK_ITEMS);
+    constant BANK_ITEMS       : natural := ARRAY_ROWS / 2;
+    constant BANK_ADDR_W      : natural := log2(BANK_ITEMS);
 
     -- ==== XPM_MEMORY_TDPRAM configuration for the memory arrays below ====
     constant XPM_MEM_PRIMITIVE : string  := tsel(RAM_TYPE = "URAM", "ultra", "block");
@@ -63,13 +66,9 @@ architecture BANKED of TX_DMA_PCIE_TRANS_BUFFER_IMPL is
     -- Width of the (registered) target-array index; at least 1 bit even when MEM_ARRAYS = 1
     constant ARR_IDX_W       : natural := max(1, log2(MEM_ARRAYS));
 
-    -- ==== Flat (unpartitioned) addressing -- see the MEM_PARTITIONING generic ====
-    constant FLAT             : boolean := (not MEM_PARTITIONING) and (CHANNELS > 1);
     -- LSB, within the write META DWord-address, of the flat channel-select field (the read byte
     -- address carries it starting at bit POINTER_WIDTH). It sits directly above the intra-channel row.
     constant FLAT_CHAN_LSB_DW : natural := log2(BUFFER_DEPTH) + log2(MFB_DWORDS);
-    -- LSB of the memory-array-select sub-field within the flat channel-select field
-    constant FLAT_ARR_LSB_DW  : natural := FLAT_CHAN_LSB_DW + log2(CHANS_PER_ARRAY);
 
     -- The input word behind the input registers of the write front end and the fields of its META
     signal wr_src_rdy               : std_logic;
@@ -191,21 +190,25 @@ architecture BANKED of TX_DMA_PCIE_TRANS_BUFFER_IMPL is
     signal wr_chan_slot_r0     : std_logic_vector(log2(CHANS_PER_ARRAY) -1 downto 0);
 
     -- ==== Bank addressing ====
-    -- The bank whose index equals the row's parity gets the row, the other bank the next row; the two always lie in
-    -- different banks (see readme.rst).
+    -- The bank whose index equals the row's parity gets the row, the other bank the next row, so the two always lie in
+    -- different banks. A flat row + 1 carries into the channel bits, a partitioned one wraps in its channel.
     function bank_addr_f (chan : std_logic_vector; row : std_logic_vector) return slv_array_t is
-        variable row_v    : std_logic_vector(row'length -1 downto 0);
-        variable row_p1_v : std_logic_vector(row'length -1 downto 0);
+        variable row_v    : std_logic_vector(chan'length + row'length -1 downto 0);
+        variable row_p1_v : std_logic_vector(chan'length + row'length -1 downto 0);
         variable res      : slv_array_t(1 downto 0)(chan'length + row'length -2 downto 0);
     begin
-        row_v    := row;
-        row_p1_v := std_logic_vector(unsigned(row_v) + 1);
-        if (row_v(0) = '0') then
-            res(0) := chan & row_v   (row_v'high downto 1);
-            res(1) := chan & row_p1_v(row_v'high downto 1);
+        row_v := chan & row;
+        if (FLAT) then
+            row_p1_v := std_logic_vector(unsigned(row_v) + 1);
         else
-            res(0) := chan & row_p1_v(row_v'high downto 1);
-            res(1) := chan & row_v   (row_v'high downto 1);
+            row_p1_v := chan & std_logic_vector(unsigned(row) + 1);
+        end if;
+        if (row_v(0) = '0') then
+            res(0) := row_v   (row_v'high downto 1);
+            res(1) := row_p1_v(row_v'high downto 1);
+        else
+            res(0) := row_p1_v(row_v'high downto 1);
+            res(1) := row_v   (row_v'high downto 1);
         end if;
         return res;
     end function;
@@ -255,8 +258,13 @@ begin
         report "TX_DMA_PCIE_TRANS_BUFFER: POINTER_WIDTH is too small, BUFFER_DEPTH must be at least 2 rows for the even/odd row banking scheme to apply!"
         severity FAILURE;
 
-    assert (RAM_TYPE = "URAM" or RAM_TYPE = "BRAM")
-        report "TX_DMA_PCIE_TRANS_BUFFER_BANKED: RAM_TYPE must be the resolved primitive, URAM or BRAM!"
+    assert (RAM_TYPE = "URAM" or RAM_TYPE = "BRAM" or RAM_TYPE = "LUT")
+        report "TX_DMA_PCIE_TRANS_BUFFER_BANKED: RAM_TYPE must be the resolved primitive, URAM, BRAM or LUT!"
+        severity FAILURE;
+
+    -- lut_ram_g reads one whole row through port A from a single memory array.
+    assert (RAM_TYPE /= "LUT" or (MFB_REGIONS = 2 and (not SPLIT_READ_PORTS) and (not READ_BARREL_SHIFTER_EN(0)) and MEM_ARRAYS = 1))
+        report "TX_DMA_PCIE_TRANS_BUFFER_BANKED: RAM_TYPE => LUT needs 2 regions, no split read ports, no read barrel shifter and one memory array!"
         severity FAILURE;
 
     -- AMD-only: the memory arrays are AMD XPM (XPM_MEMORY_TDPRAM) macros with no Intel/Altera
@@ -384,10 +392,10 @@ begin
         end process;
     end generate;
 
-    -- Verify each mode reads the write channel-slot bits (chan_addr_v, upper log2(CHANS_PER_ARRAY)
-    -- bits of wr_bank_addr(0)) from its OWN field -- regression guard against the other mode's
-    -- field leaking in, checked at SOF.
-    wr_chan_slot_r0 <= wr_bank_addr(0)(0)(BANK_ADDR_W -1 downto BANK_ADDR_W - log2(CHANS_PER_ARRAY));
+    -- Regression guard that each mode takes the write channel-slot bits (upper log2(CHANS_PER_ARRAY) bits of
+    -- wr_bank_addr(0)) from its own field, checked at SOF on the bank holding the SOF row, as the other bank's row + 1 may carry.
+    wr_chan_slot_r0 <= wr_bank_addr(0)(1)(BANK_ADDR_W -1 downto BANK_ADDR_W - log2(CHANS_PER_ARRAY)) when (wr_addr(0)(log2(MFB_DWORDS)) = '1') else
+                       wr_bank_addr(0)(0)(BANK_ADDR_W -1 downto BANK_ADDR_W - log2(CHANS_PER_ARRAY));
 
     -- psl assert_flat_wr_chan_from_addr : assert always
     -- ((FLAT and wr_src_rdy = '1' and wr_sof(0) = '1') ->
@@ -417,29 +425,17 @@ begin
         -- Per-region target-array index (arr_idx_rgn); see its declaration above for why it is only
         -- ever compared, never indexed.
         arr_idx_rgn_logic_p : process (all) is
-            variable chan_v      : std_logic_vector(log2(CHANNELS) -1 downto 0);
-            variable pcie_addr_v : std_logic_vector(TRBUF_META_PCIE_ADDR_W -1 downto 0);
+            variable chan_v : std_logic_vector(log2(CHANNELS) -1 downto 0);
         begin
             arr_idx_rgn <= (others => (others => '0'));
 
             for i in 0 to (MFB_REGIONS - 1) loop
                 if (wr_src_rdy = '1') then
                     if (wr_sof(i) = '1') then
-                        -- FLAT: memory-array select from the address; else from the channel field
-                        if (FLAT) then
-                            pcie_addr_v    := wr_addr(i);
-                            arr_idx_rgn(i) <= pcie_addr_v(FLAT_ARR_LSB_DW + log2(MEM_ARRAYS) -1 downto FLAT_ARR_LSB_DW);
-                        else
-                            chan_v         := wr_chan(i);
-                            arr_idx_rgn(i) <= chan_v(log2(MEM_ARRAYS) + log2(CHANS_PER_ARRAY) -1 downto log2(CHANS_PER_ARRAY));
-                        end if;
+                        chan_v         := wr_chan(i);
+                        arr_idx_rgn(i) <= chan_v(log2(MEM_ARRAYS) + log2(CHANS_PER_ARRAY) -1 downto log2(CHANS_PER_ARRAY));
                     else
-                        -- FLAT: track the running address so a frame may cross array boundaries
-                        if (FLAT) then
-                            arr_idx_rgn(i) <= std_logic_vector(addr_cntr_pst(FLAT_ARR_LSB_DW + log2(MEM_ARRAYS) -1 downto FLAT_ARR_LSB_DW));
-                        else
-                            arr_idx_rgn(i) <= mem_arr_idx_reg;
-                        end if;
+                        arr_idx_rgn(i) <= mem_arr_idx_reg;
                     end if;
                 end if;
             end loop;
@@ -558,7 +554,7 @@ begin
     -- =============================================================================================
     -- Memory array - Two regions (TDP, write priority stalls reads)
     -- =============================================================================================
-    tdp_bram_g: if (MFB_REGIONS = 2) generate
+    tdp_bram_g: if (MFB_REGIONS = 2 and RAM_TYPE /= "LUT") generate
 
         -- Cycle-1 (pre-extra-stage) rd_data_valid_arr; see rd_vld_p/rd_vld_lat1_g/rd_vld_lat2_g
         -- below for how READ_LATENCY selects between a plain wire and one extra register stage.
@@ -767,6 +763,120 @@ begin
                 end if;
             end process;
         end generate;
+    end generate;
+
+    -- ==== Memory array, two regions, distributed RAM ====
+    -- Distributed RAM has one write port, so each region writes its own copy and a live value table (LVT) bit per byte
+    -- and row names the copy that wrote last.
+    lut_ram_g : if (MFB_REGIONS = 2 and RAM_TYPE = "LUT") generate
+        constant LUT_ROWS : natural := 2*BANK_ITEMS;
+        constant ROW_W    : natural := BANK_ADDR_W + 1;
+
+        -- The LVT bit read at the read row rides with its byte; a separate copy serves the other copy's write row, as a
+        -- second read address on one memory duplicates every bit.
+        type lane_mem_t is array (0 to LUT_ROWS -1) of std_logic_vector(8 downto 0);
+        type lvt_mem_t is array (0 to LUT_ROWS -1) of std_logic;
+
+        attribute ram_style : string;
+
+        -- Bank row address with the bank index appended as the row parity
+        signal wr_dw_row    : slv_array_2d_t(1 downto 0)(MFB_DWORDS -1 downto 0)(ROW_W -1 downto 0);
+        signal lane_we      : slv_array_t(1 downto 0)(MFB_BYTES -1 downto 0);
+        -- Per copy: its LVT bit at the other copy's write row, its LVT bit and data at the read row
+        signal lvt_at_other : slv_array_t(1 downto 0)(MFB_BYTES -1 downto 0);
+        signal lvt_rd       : slv_array_t(1 downto 0)(MFB_BYTES -1 downto 0);
+        signal data_rd      : slv_array_t(1 downto 0)(MFB_LENGTH -1 downto 0);
+
+        -- Index k holds the read request k cycles late; the last one reads the memory.
+        signal rd_row_dly   : slv_array_t(XPM_RD_LATENCY -1 downto 0)(ROW_W -1 downto 0);
+        signal rd_en_dly    : std_logic_vector(XPM_RD_LATENCY -1 downto 0);
+        signal rd_word      : std_logic_vector(MFB_LENGTH -1 downto 0);
+        signal rd_word_reg  : std_logic_vector(MFB_LENGTH -1 downto 0);
+        signal rd_vld_reg   : std_logic;
+
+    begin
+
+        lut_copy_g : for w in 0 to 1 generate
+            wr_dw_row_g : for d in 0 to (MFB_DWORDS -1) generate
+                wr_dw_row(w)(d) <= (wr_bank_addr_reg(BRAM_REG_NUM)(w)(1) & '1') when ((or we(0)(w)(1)(d*4 +3 downto d*4)) = '1') else
+                                   (wr_bank_addr_reg(BRAM_REG_NUM)(w)(0) & '0');
+            end generate;
+
+            lut_lane_g : for i in 0 to (MFB_BYTES -1) generate
+                signal data_mem : lane_mem_t := (others => (others => '0'));
+                signal lvt_mem  : lvt_mem_t  := (others => '0');
+                signal lvt_wr   : std_logic;
+
+                attribute ram_style of data_mem : signal is "distributed";
+                attribute ram_style of lvt_mem  : signal is "distributed";
+            begin
+                lane_we(w)(i) <= we(0)(w)(0)(i) or we(0)(w)(1)(i);
+                -- Copy 0 makes its LVT bit equal to copy 1's and copy 1 unequal to copy 0's, so their XOR names the last writer.
+                lvt_wr        <= lvt_at_other(1 - w)(i) xor tsel(w = 1, '1', '0');
+
+                lut_lane_wr_p : process (CLK) is
+                begin
+                    if (rising_edge(CLK)) then
+                        if (lane_we(w)(i) = '1') then
+                            data_mem(to_integer(unsigned(wr_dw_row(w)(i/4)))) <= lvt_wr & wr_data_bram_shifter_reg(BRAM_REG_NUM)(w)(i*8 +7 downto i*8);
+                            lvt_mem(to_integer(unsigned(wr_dw_row(w)(i/4))))  <= lvt_wr;
+                        end if;
+                    end if;
+                end process;
+
+                data_rd(w)(i*8 +7 downto i*8) <= data_mem(to_integer(unsigned(rd_row_dly(XPM_RD_LATENCY -1))))(7 downto 0);
+                lvt_rd(w)(i)                  <= data_mem(to_integer(unsigned(rd_row_dly(XPM_RD_LATENCY -1))))(8);
+                lvt_at_other(w)(i)            <= lvt_mem(to_integer(unsigned(wr_dw_row(1 - w)(i/4))));
+            end generate;
+        end generate;
+
+        -- The read is row-aligned (no read barrel shifter), so the bank parity is the row's address bit.
+        rd_row_dly(0) <= rd_bank_addr(0)(0) & rd_addr_eff(0)(log2(MFB_BYTES));
+        rd_en_dly(0)  <= rd_en_a_q;
+
+        lut_rd_dly_g : if (XPM_RD_LATENCY > 1) generate
+            lut_rd_dly_p : process (CLK) is
+            begin
+                if (rising_edge(CLK)) then
+                    rd_row_dly(XPM_RD_LATENCY -1 downto 1) <= rd_row_dly(XPM_RD_LATENCY -2 downto 0);
+                    rd_en_dly(XPM_RD_LATENCY -1 downto 1)  <= rd_en_dly(XPM_RD_LATENCY -2 downto 0);
+                end if;
+            end process;
+        end generate;
+
+        lut_rd_sel_g : for i in 0 to (MFB_BYTES -1) generate
+            rd_word(i*8 +7 downto i*8) <= data_rd(1)(i*8 +7 downto i*8) when ((lvt_rd(0)(i) xor lvt_rd(1)(i)) = '1') else
+                                          data_rd(0)(i*8 +7 downto i*8);
+        end generate;
+
+        lut_rd_reg_p : process (CLK) is
+        begin
+            if (rising_edge(CLK)) then
+                rd_word_reg <= rd_word;
+                rd_vld_reg  <= rd_en_dly(XPM_RD_LATENCY -1);
+            end if;
+        end process;
+
+        -- A read has a port of its own, so no write withholds it; it answers on region slot 0 only.
+        rd_data_valid_arr <= '0' & rd_vld_reg;
+        rd_data_bram_bank <= (others => (others => (others => rd_word_reg)));
+
+        lut_wr_collision_p : process (all) is
+            variable collision_v : std_logic;
+        begin
+            collision_v := '0';
+            for i in 0 to (MFB_BYTES -1) loop
+                if (lane_we(0)(i) = '1' and lane_we(1)(i) = '1' and wr_dw_row(0)(i/4) = wr_dw_row(1)(i/4)) then
+                    collision_v := '1';
+                end if;
+            end loop;
+            wr_addr_collision <= collision_v;
+        end process;
+
+        -- Both copies write one byte of one row in the same cycle, so the LVT cannot name the last writer.
+        -- psl assert_lut_wr_collision :
+        --      assert always (wr_addr_collision = '0') abort (RESET)
+        --      report "TX_DMA_PCIE_TRANS_BUFFER: Two regions write to one address, data are lost!";
     end generate;
 
     -- ==== Read request register (READ_LATENCY => 3 only) ====

@@ -20,6 +20,10 @@ from trans_buffer_tb import TransBufferTestbench, WRITE_SETTLE_MARGIN, collision
 
 # The toplevel is known when cocotb imports the test module, so the test selection can follow the elaboration.
 TB_FLAT = not generic_bool(cocotb.top.MEM_PARTITIONING)
+# Without port A's read barrel shifter a read returns the whole row its address falls in.
+TB_READ_SHIFTED = bool(int(cocotb.top.READ_BARREL_SHIFTER_MASK.value) & 1)
+# test_unaligned_sweep and test_dual_sof place their frames for at least 8 channels of 8 KiB each.
+TB_DIRECTED_FIT = int(cocotb.top.CHANNELS.value) >= 8 and int(cocotb.top.POINTER_WIDTH.value) >= 13
 
 # The model/DUT persists for the whole run: @cocotb.test functions share one elaborated design and
 # BRAM content (RESET only clears pipeline registers), so keep one model object per run to stay in
@@ -36,6 +40,8 @@ def buffer_impl(dut):
     inner = dut.tx_dma_pcie_trans_buffer_i.impl_g.trans_buffer_i
     if not hasattr(inner, "wr_bank_be"):
         return "per-byte"
+    if hasattr(inner, "lut_ram_g"):
+        return "banked LUT"
     return "banked URAM" if int(inner.MAX_MEM_DEPTH.value) > 4096 else "banked BRAM"
 
 
@@ -150,13 +156,15 @@ def gap_after_transaction():
     return random.random() < 0.5
 
 
-def make_alloc(slots: int, budget: int):
+def make_alloc(slots: int, budget: int, boundary=None):
     """alloc(slot, nbytes): bump-allocated DW address in `slot` (a channel), None once `budget` bytes are used, so the
-    transactions of one test neither overlap nor wrap."""
+    transactions of one test neither overlap nor wrap; with `boundary`, no transaction crosses a multiple of it."""
     next_addr_dw = [0] * slots
 
     def alloc(slot, nbytes):
         addr_dw = next_addr_dw[slot]
+        if boundary and (addr_dw * 4) // boundary != (addr_dw * 4 + nbytes - 1) // boundary:
+            addr_dw = -(-addr_dw * 4 // boundary) * boundary // 4
         if addr_dw * 4 + nbytes + 64 > budget:
             return None
         next_addr_dw[slot] = addr_dw + (nbytes + 3) // 4 + 8
@@ -234,6 +242,29 @@ class Testbench(TransBufferTestbench):
     async def read_window(self, chan: int, addr: int, timeout=10000) -> bytes:
         """Read 64 bytes starting at byte address `addr` (mod buffer size) of `chan`. Retries
         (re-issuing RD_EN_A) while write-priority stalls RD_DATA_VLD_A."""
+        if not TB_READ_SHIFTED:
+            addr %= self.buf_size
+            off = addr % MFB_BYTES
+            row = await self._read_once(chan, addr - off, timeout)
+            if off == 0:
+                return row
+            nxt = await self._read_once(chan, (addr - off + MFB_BYTES) % self.buf_size, timeout)
+            return (row + nxt)[off:off + MFB_BYTES]
+        return await self._read_once(chan, addr, timeout)
+
+    def _row_reqs(self, reqs):
+        """Unshifted reads: each (chan, addr) window becomes the two whole rows it spans."""
+        out = []
+        for chan, addr in reqs:
+            row = addr - addr % MFB_BYTES
+            out += [(chan, row), (chan, (row + MFB_BYTES) % self.buf_size)]
+        return out
+
+    @staticmethod
+    def _splice_rows(reqs, rows):
+        return [(rows[2 * i] + rows[2 * i + 1])[addr % MFB_BYTES:][:MFB_BYTES] for i, (_, addr) in enumerate(reqs)]
+
+    async def _read_once(self, chan: int, addr: int, timeout) -> bytes:
         for _ in range(timeout):
             await self.issue_read(chan, addr)
             await self.read_latency_wait()
@@ -285,6 +316,11 @@ class Testbench(TransBufferTestbench):
     async def read_burst(self, reqs):
         """One RD_EN_A pulse per cycle for each (chan, addr) request, a request stalled by a write retried with
         read_window(). Returns the 64 B windows in request order."""
+        if not TB_READ_SHIFTED:
+            return self._splice_rows(reqs, await self._read_burst(self._row_reqs(reqs)))
+        return await self._read_burst(reqs)
+
+    async def _read_burst(self, reqs):
         dut = self.dut
 
         async def issuer():
@@ -300,6 +336,12 @@ class Testbench(TransBufferTestbench):
     async def write_stream_and_read_burst(self, write_words, read_reqs):
         """One write word and one read request per cycle from a single issuer coroutine, since separate writer
         coroutines raced the ReadOnly capture loop. Returns the 64 B results per read_reqs entry, retried on stalls."""
+        if not TB_READ_SHIFTED:
+            rows = await self._write_stream_and_read_burst(write_words, self._row_reqs(read_reqs))
+            return self._splice_rows(read_reqs, rows)
+        return await self._write_stream_and_read_burst(write_words, read_reqs)
+
+    async def _write_stream_and_read_burst(self, write_words, read_reqs):
         dut = self.dut
         nw = len(write_words)
         nr = len(read_reqs)
@@ -419,7 +461,7 @@ async def test_smoke(dut):
     assert got == data
 
 
-@cocotb.test(skip=TB_FLAT)
+@cocotb.test(skip=TB_FLAT or not TB_DIRECTED_FIT)
 async def test_unaligned_sweep(dut):
     tb = await Testbench.setup(dut, 1)
 
@@ -462,7 +504,7 @@ async def test_unaligned_sweep(dut):
         assert got == exp
 
 
-@cocotb.test(skip=TB_FLAT)
+@cocotb.test(skip=TB_FLAT or not TB_DIRECTED_FIT)
 async def test_dual_sof(dut):
     tb = await Testbench.setup(dut, 2)
 
@@ -762,12 +804,11 @@ async def test_flat_channel_ignored(dut):
 @cocotb.test(skip=not TB_FLAT)
 async def test_flat_cross_boundary(dut):
     """Flat mode: one write frame streams across a 2**POINTER_WIDTH boundary, so the running address, not a latched
-    channel, carries it into the next channel slot; checked at several boundaries."""
+    channel, carries it into the next channel slot, and across the top of the buffer, where it wraps to address 0."""
     tb = await Testbench.setup(dut, 102)
 
     per_chan = 1 << tb.model.pointer_width
-    # every internal 2**POINTER_WIDTH boundary (there are `channels`-1 of them)
-    for b in range(1, tb.channels):
+    for b in range(1, tb.channels + 1):
         boundary = b * per_chan
         for pre in (96, 32, 4):
             start = boundary - pre
@@ -799,6 +840,56 @@ async def test_flat_random_soak(dut):
         return gen_transaction(tb, pattern, 0, length, alloc, flat=True)
 
     await soak(tb, "test_flat_random_soak", next_transaction, flat=True)
+
+
+@cocotb.test()
+async def test_dual_port_rewrites(dut):
+    """Frames overwriting each other in one 512 B span, half of them two frames in one bus word, so the region that
+    last wrote a byte keeps changing; the span is checked against the model every 40 frames."""
+    tb = await Testbench.setup(dut, 7)
+    # Inside one 2**POINTER_WIDTH slot: test_flat_cross_boundary covers frames crossing into the next one.
+    per_slot = 1 << tb.model.pointer_width
+    span = min(512, per_slot)
+    base = random.randrange(tb.buf_size // per_slot) * per_slot + random.randrange(0, per_slot - span + 1, 4)
+    chans = [0] if TB_FLAT else random.sample(range(tb.channels), min(2, tb.channels))
+
+    def frame(max_len):
+        """(chan, byte address, data) of a frame of 1 to max_len bytes inside the span, at a random byte offset."""
+        length = random.randrange(1, max_len + 1)
+        return random.choice(chans), base + random.randrange(span - length + 1), rand_bytes(length)
+
+    def first_word_bytes(chan, start, length, offset):
+        # The bytes a frame anchored at `offset` of a word writes in that word; one memory in flat mode.
+        n = min(length, REGION_BYTES - offset)
+        return {(0 if TB_FLAT else chan, start + i) for i in range(n)}
+
+    async def check(tag):
+        await tb.drive_idle(WRITE_SETTLE_MARGIN)
+        for chan in chans:
+            got = await tb.read_range(_noise_chan(tb.channels) if TB_FLAT else chan, base, span)
+            exp = tb.model.read(chan, base, span)
+            assert got == exp, f"dual_port_rewrites {tag}: chan={chan} base={base}: got={got.hex()} exp={exp.hex()}"
+
+    for n in range(240):
+        pattern = random.choice(['a', 'c', 'c', 'd'])
+        chan1, start1, data1 = frame(160)
+        wr_chan1 = _noise_chan(tb.channels) if TB_FLAT else chan1
+        if pattern == 'a':
+            words = gen_words(anchor=0, addr_dw=start1 // 4, chan=wr_chan1, byte_offset=start1 % 4, data=data1)
+        elif pattern == 'd':
+            words = gen_words(anchor=1, addr_dw=start1 // 4, chan=wr_chan1, byte_offset=start1 % 4, data=data1)
+        else:
+            chan0, start0, data0 = frame(REGION_BYTES - 3)
+            # Region 0 and region 1 must not write one byte in the same word.
+            if (first_word_bytes(chan0, start0, len(data0), start0 % 4)
+                    & first_word_bytes(chan1, start1, len(data1), start1 % 4)):
+                continue
+            words = gen_words(anchor=1, addr_dw=start1 // 4, chan=wr_chan1, byte_offset=start1 % 4, data=data1,
+                              other=(start0 // 4, _noise_chan(tb.channels) if TB_FLAT else chan0, start0 % 4, data0))
+        await tb.write_transaction(words)
+        if n % 40 == 39:
+            await check(f"after frame {n}")
+    await check("final")
 
 
 # ==== Collision probe, report-only ====
